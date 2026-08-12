@@ -102,12 +102,12 @@ check(bad.zero?, 'no 503-byte TransferBlock payloads in capture')
 # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
 out, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   ts = 1_700_000_000.0
-  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_cursor_select'))
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_selected_entity_cleared'))
   s.send(:process_packet, 2, ts, SERVER_IP, CLIENT_IP, 34197, 34197, fixture_packet('server_open_gui_echo_14b'))
   s.send(:process_packet, 3, ts, SERVER_IP, CLIENT_IP, 34197, 34197, msg13_packet)
 end
 puts "\nTest 2: server mode (pcap-read path)"
-check(out.include?('cursor_select'), 'incoming msg 6 action logged')
+check(out.include?('selected_entity_cleared'), 'incoming msg 6 action logged')
 check(!out.include?('open_gui'), 'outgoing msg 7 NOT logged')
 
 # ── Test 3: client mode regression ────────────────────────────────────

@@ -233,11 +233,11 @@ REAL_PACKET_FIXTURES = [
     ],
   },
   {
-    name: 'client_cursor_select',
-    description: 'Client cursor_select (8 bytes: tick + padding) — fires when the cursor selects/hovers an entity on the map (server resolves the entity ref)',
+    name: 'client_selected_entity_cleared',
+    description: 'Client selected_entity_cleared (8 bytes: tick + padding) — fires when the cursor leaves an entity; confirmed by /toggle-action-logging tick correlation',
     hex: '0606549b5f39ef38b2000000000002090ce738b20000000000',
     actions: [
-      { type: 9, name: 'cursor_select', player: 11, game_player: 12,
+      { type: 9, name: 'selected_entity_cleared', player: 11, game_player: 12,
         data: 'e738b20000000000' },
     ],
   },

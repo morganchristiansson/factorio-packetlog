@@ -188,25 +188,39 @@ Client (C→S) format — 8 bytes:
   `select_next_valid_gun` Player_59). Locked in by fixtures
   `client_open_gui_8b{,_2,_3}`. See `docs/actions/005-open_gui.md`.
 
-## cursor_hover (type 265) — 8 bytes
+## selected_entity_changed family (types 265-268) + selected_entity_cleared (9)
 
-`[flags(1)][tick(4)][padding(3)]` — sent when hovering over an entity.
+Hover/selection actions, **real names** — verified by correlating
+`/toggle-action-logging` output with the capture by tick (log tick == packet
+heartbeat tick):
 
-## cursor_select (type 9) — 8 bytes
+| Type | Name | C→S payload |
+|------|------|-------------|
+| 9 | selected_entity_cleared | 0 (`[tick][pad]`) |
+| 265 | selected_entity_changed_very_close | 1 |
+| 266 | selected_entity_changed_based_on_unit_number | 1 (best guess) |
+| 267 | selected_entity_changed_very_close_precise | 2 |
+| 268 | selected_entity_changed_relative | 4 |
 
-`[tick(4)][padding(4)]` C→S, `[entity_ref(4)][token(4)]` S→C — fires when the
-cursor selects/hovers an entity on the map (**not a click**; a click sends
-`open_gui`). Working name: type 9 is not in `defines.input_action` (gap
-between `disconnect_rolling_stock = 8` and `clear_cursor = 10`); the
-Hornwitser dissector table is from an older version and shifted. Tick matches
-the open_gui tick when followed by one (client direction only). Server echoes
-are wrapped differently.
+C→S: `[payload][tick(4)][pad(4)]`; S→C: `[payload][ref(4)][token(4)][tick-1(4)][pad(4)]`.
+The log tick equals the packet hb tick, and the data tick field = hb tick - 3.
+Previously working names: `cursor_hover` (265), `cursor_select` (9). The
+Hornwitser dissector table (old version) lists 267/268 shifted by one, which
+initially misnamed them. See `docs/actions/265-selected_entity_changed_very_close.md`.
+
+## zoom_around_point (128), move_on_pan (129), render_mode_changed (310)
+
+Identified with the same tick-correlation: 128 = zoom_around_point (3 doubles
+= position + zoom, field order unverified), 129 = move_on_pan (17B payload:
+pos int32×2 in 1/256 tiles + int + float + byte, semantics unverified — 1
+sample), 310 = render_mode_changed (1-byte mode). Same
+`[payload][tick][pad]` C→S / `[payload][ref][token][tick-1][pad]` S→C shapes.
 
 ## Client action tick trailer (C→S heartbeats)
 
 Client input actions are followed by an 8-byte trailer `[tick(4)][pad(4)]`
 — the local game tick when the action occurred (hb tick - 3 in captures;
--8 for cursor_select). The server does NOT echo it (server echoes end
+-8 for selected_entity_cleared). The server does NOT echo it (server echoes end
 right after the action data). For actions with own data (start_walking,
 pipette, …) the trailer appears after the data; for 0-byte actions
 (stop_walking, stop_drag_build) it is currently left as unparsed trailing

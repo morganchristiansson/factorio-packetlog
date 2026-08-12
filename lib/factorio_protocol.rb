@@ -54,7 +54,7 @@ ACTIONS = {
   6=>["open_current_vehicle_gui",0],
   7=>["connect_rolling_stock",4],
   8=>["disconnect_rolling_stock",4],
-  9=>["cursor_select",8],
+  9=>["selected_entity_cleared",8],
   10=>["clear_cursor",0],
   11=>["reset_assembling_machine",0],
   12=>nil,
@@ -173,8 +173,8 @@ ACTIONS = {
   125=>["send_spidertron",0],
   126=>["set_inventory_bar",6],
   127=>nil,
-  128=>nil,
-  129=>nil,
+  128=>["zoom_around_point",24],
+  129=>["move_on_pan",17],
   130=>["start_repair",8],
   131=>["deconstruct",16],
   132=>["upgrade",0],
@@ -311,9 +311,9 @@ ACTIONS = {
   263=>["flush_opened_entity_specific_fluid",nil],
   264=>["change_picking_state",1],
   265=>["selected_entity_changed_very_close",1],
-  266=>["selected_entity_changed_very_close_precise",1],
-  267=>["selected_entity_changed_relative",2],
-  268=>["selected_entity_changed_based_on_unit_number",4],
+  266=>["selected_entity_changed_based_on_unit_number",1],
+  267=>["selected_entity_changed_very_close_precise",2],
+  268=>["selected_entity_changed_relative",4],
   269=>["set_combinator_description",nil],
   270=>["switch_constant_combinator_state",1],
   271=>["switch_power_switch_state",1],
@@ -355,7 +355,7 @@ ACTIONS = {
   307=>["set_heat_interface_mode",1],
   308=>["open_train_station_gui",4],
   309=>nil,
-  310=>nil,
+  310=>["render_mode_changed",1],
   311=>["set_player_color",4],
   312=>nil,
   313=>["set_trains_limit",4],
@@ -710,14 +710,16 @@ ACTIONS = {
       end
     end
 
-    # SelectedEntityChanged hover family (265-268): names from the game's
-    # internal symbols (verified live via /toggle-action-logging: logs
-    # SelectedEntityChangedVeryClose/Relative/Cleared on hover). Direction-
-    # dependent payload: ACTIONS len is the core payload (1/1/2/4 bytes);
+    # Hover/selection family (265-268) + zoom/render/pan (128, 129, 310):
+    # names from the game's internal symbols (verified live via
+    # /toggle-action-logging correlated with the capture by tick — the log
+    # tick equals the packet's heartbeat tick). Direction-dependent payload:
+    # ACTIONS len is the core payload (doubles for zoom, 17B for pan, mode
+    # byte for render, 1/1/2/4 for hover);
     #   Client → server: [payload][tick(4)][pad(4)]      = payload + 8
     #   Server echo:      [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
     #                                                     = payload + 16
-    if [265, 266, 267, 268].include?(type)
+    if [128, 129, 265, 266, 267, 268, 310].include?(type)
       alen = is_server ? (alen + 16) : (alen + 8)
     end
 

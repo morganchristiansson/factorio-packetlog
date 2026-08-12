@@ -26,7 +26,7 @@ Observed client packet (morganc opens an entity container, hb tick 0x423a7):
                                      └ count_flagged (count=2)
 ```
 
-The tick matches `cursor_select` sent immediately after (same sequence,
+The tick matches `selected_entity_cleared` sent immediately after (same sequence,
 tick+1). The `nothing` (type 0) action after it is skipped in logging.
 
 **Regression (2026-08-12):** the parser used to read the 8-byte payload as a

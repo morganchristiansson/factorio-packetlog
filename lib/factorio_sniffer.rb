@@ -406,7 +406,7 @@ class FactorioSniffer
     INVENTORY_TRANSFER = 83
     CRAFT = 85
     WIRE_DRAGGING = 86
-    SELECTED_ENTITY_CHANGED = 87
+    CHANGE_SHOOTING_STATE = 87
     DROP_ITEM = 67
     BUILD = 68
     USE_ITEM = 119
@@ -420,7 +420,13 @@ class FactorioSniffer
     WRITE_TO_CONSOLE = 106
     FAST_ENTITY_TRANSFER = 278
     SELECTED_ENTITY_CHANGED_VERY_CLOSE = 265
-    CURSOR_SELECT = 9
+    SELECTED_ENTITY_CHANGED_BASED_ON_UNIT_NUMBER = 266
+    SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE = 267
+    SELECTED_ENTITY_CHANGED_RELATIVE = 268
+    SELECTED_ENTITY_CLEARED = 9
+    ZOOM_AROUND_POINT = 128
+    MOVE_ON_PAN = 129
+    RENDER_MODE_CHANGED = 310
     PLAYER_LEAVE_GAME = 247
     SERVER_COMMAND = 209
     OPEN_TRAIN_GUI = 289
@@ -466,11 +472,17 @@ class FactorioSniffer
         y2 = d.unpack1('i', offset: 12)
         return " area=(#{'%.3f' % (x1/256.0)}, #{'%.3f' % (y1/256.0)})-(#{'%.3f' % (x2/256.0)}, #{'%.3f' % (y2/256.0)})"
       end
-    when ActionType::OPEN_ITEM, ActionType::SELECTED_ENTITY_CHANGED,
-         ActionType::USE_ITEM, ActionType::START_REPAIR
+    when ActionType::OPEN_ITEM, ActionType::USE_ITEM, ActionType::START_REPAIR
       if d.bytesize >= 4
         eid = d.unpack1('V')
         return " entity=##{eid}"
+      end
+    when ActionType::CHANGE_SHOOTING_STATE
+      if d.bytesize >= 9
+        flag = d.getbyte(0)
+        x = d.unpack1('V', offset: 1) / 256.0
+        y = d.unpack1('V', offset: 5) / 256.0
+        return " shooting=#{flag} pos=(#{'%.3f' % x}, #{'%.3f' % y})"
       end
     when ActionType::BUILD
       if d.bytesize >= 9
@@ -525,17 +537,47 @@ class FactorioSniffer
         state = flag == 0 ? 'open' : 'close'
         return " #{state} #{gname} tick=#{tick}"
       end
-    when ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE
-      if d.bytesize >= 8
-        flags = d.getbyte(0)
-        tick = d.unpack1('V', offset: 1)
-        return " flags=#{flags} tick=#{tick}"
+    when ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE,
+         ActionType::SELECTED_ENTITY_CHANGED_BASED_ON_UNIT_NUMBER,
+         ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE,
+         ActionType::SELECTED_ENTITY_CHANGED_RELATIVE
+      # Client form: [payload][tick(4)][pad(4)] — payload len 1/1/2/4
+      # Server echo: [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
+      plen = { 265 => 1, 266 => 1, 267 => 2, 268 => 4 }[act[:type]] || 0
+      if d.bytesize >= plen + 12 && d.getbyte(plen) == 0x54
+        payload = d[0, plen].unpack1('H*')
+        tok = d.unpack1('V', offset: plen + 4)
+        tick = d.unpack1('V', offset: plen + 8) + 1
+        return " payload=#{payload} tok=#{tok} tick=#{tick}"
+      elsif d.bytesize >= plen + 4
+        payload = d[0, plen].unpack1('H*')
+        tick = d.unpack1('V', offset: plen)
+        return " payload=#{payload} tick=#{tick}"
       end
-    when ActionType::CURSOR_SELECT
-      if d.bytesize >= 8
+    when ActionType::SELECTED_ENTITY_CLEARED
+      # Client: [tick(4)][pad(4)]; server echo: [ref(4)][token(4)]
+      if d.bytesize >= 8 && d.getbyte(0) == 0x54
+        tok = d.unpack1('V', offset: 4)
+        return " tok=#{tok}"
+      elsif d.bytesize >= 8
         tick = d.unpack1('V', offset: 0)
         return " tick=#{tick}"
       end
+    when ActionType::ZOOM_AROUND_POINT
+      if d.bytesize >= 24
+        a, b, c = d.unpack('E3')
+        return " (#{'%.2f' % a}, #{'%.2f' % b}, #{'%.2f' % c})"
+      end
+    when ActionType::MOVE_ON_PAN
+      if d.bytesize >= 17
+        x = d.unpack1('l', offset: 0) / 256.0
+        y = d.unpack1('l', offset: 4) / 256.0
+        v = d.unpack1('l', offset: 8)
+        f = d.unpack1('e', offset: 12)
+        return " pos=(#{'%.2f' % x}, #{'%.2f' % y}) int=#{v} f=#{'%.2f' % f}"
+      end
+    when ActionType::RENDER_MODE_CHANGED
+      return " mode=#{d.getbyte(0)}" if d.bytesize >= 1
     when ActionType::REMOTE_VIEW_SURFACE
       if d.bytesize >= 4
         surf_id = d[0, 4].unpack1('N')

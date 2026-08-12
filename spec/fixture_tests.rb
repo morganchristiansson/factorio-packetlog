@@ -80,13 +80,13 @@ class FixtureTests < Minitest::Test
     assert tick > 0
   end
 
-  # ── Cursor select (type 9) fixture ──────────────────────────
+  # ── SelectedEntityCleared (type 9) fixture ──────────────────────
 
-  def test_cursor_select_from_fixture
-    result = parse_fixture('cursor_select')
+  def test_selected_entity_cleared_from_fixture
+    result = parse_fixture('selected_entity_cleared')
     actions = extract_actions(result)
     act = actions.find { |a| a[:type] == 9 }
-    refute_nil act, 'Expected cursor_select action'
+    refute_nil act, 'Expected selected_entity_cleared action'
     d = act[:data]
     assert_equal 8, d.bytesize
     tick = d.unpack1('V', offset: 0)

@@ -1,0 +1,3 @@
+Action: selected_entity_changed_very_close type=265 player=6
+Data: 88c8454a0100000000
+Source UDP packet: /workspace/spec/fixtures/selected_entity_changed_very_close.bin

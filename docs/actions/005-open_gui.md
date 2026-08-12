@@ -4,27 +4,36 @@ Open the GUI of an entity (assembling machine, furnace, chest, etc.).
 
 ## Data Length
 
-**Variable** — 2 bytes or 14 bytes. Verified from live captures
-(2026-08-11, `factorio_capture.pcap`); both forms appear in the same session.
+**Direction-dependent** — 8 bytes client→server, 14 or 2 bytes server echo.
+Verified from live captures (2026-08-11 and 2026-08-12, `factorio.pcap`).
 
-### 2-byte form (client → server, and bare server echoes)
+### 8-byte form (client → server)
 
 ```
 Byte 0: gui_type  (0x30 = entity container, observed)
 Byte 1: flags     (0x00 = open)
+Bytes 2-5: tick   (uint32 LE) — local game tick when the click happened
+              (heartbeat tick - 3 in captures)
+Bytes 6-7: pad    (0x0000)
 ```
 
-The client sends only this bare form; the server is expected to fill in
-entity details for the echo (see 14-byte form).
-
-Observed client packet (Player_12 opens an entity container):
+Observed client packet (morganc opens an entity container, hb tick 0x423a7):
 
 ```
-06 06 68cd5f39 f76ab20000000000 | 04 | 05 0c | 30 00 | f4 6ab20000000000
-                                     │   │      │
-                                     │   └delta └ data = [30][00]
+06 06 9060406f a723040000000000 | 04 | 05 01 | 30 00 a42304000000 | 00 00
+                                     │   │      │                   │
+                                     │   └delta └ 8-byte data       └ nothing action
                                      └ count_flagged (count=2)
 ```
+
+The tick matches `cursor_select` sent immediately after (same sequence,
+tick+1). The `nothing` (type 0) action after it is skipped in logging.
+
+**Regression (2026-08-12):** the parser used to read the 8-byte payload as a
+2-byte bare form and then misread the payload tail as phantom actions with
+bogus player deltas — e.g. `add_decider_combinator_condition` (Player_36) and
+`select_next_valid_gun` (Player_59) in a single-player game. The 8-byte length
+is locked in by fixtures `client_open_gui_8b`, `_2`, `_3`.
 
 ### 14-byte form (server echo with entity ref)
 
@@ -44,12 +53,15 @@ Observed server echo (Player_6, entity ref tag 0x45):
 
 Data = `30 00 45 24 00 00 00 00 00 00 00 00 80 00` (14 bytes).
 
+### 2-byte form (bare server echo)
+
+The server echoes `[gui_type][flags]` with no entity info when the client's
+open_gui had nothing to resolve (fixture `server_open_gui_echo_2b`).
+
 ## Parsing
 
-`parse_action` consumes 14 bytes when 14+ are available, otherwise 2.
-This matches every observed packet; the ambiguous case (2-byte form
-followed immediately by ≥12 bytes of another action) has not been
-observed in captures.
+`parse_action` uses direction: client → 8 bytes; server → 14 bytes when 14+
+are available, else 2 (bare echo).
 
 ## Player Index
 
@@ -57,4 +69,5 @@ observed in captures.
 
 ## Fixtures
 
-- `spec/fixtures/packets.rb`: `server_open_gui_echo_14b`, `server_open_gui_echo_2b`
+- `spec/fixtures/packets.rb`: `client_open_gui_8b`, `client_open_gui_8b_2`,
+  `client_open_gui_8b_3`, `server_open_gui_echo_14b`, `server_open_gui_echo_2b`

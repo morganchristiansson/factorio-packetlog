@@ -102,12 +102,12 @@ check(bad.zero?, 'no 503-byte TransferBlock payloads in capture')
 # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
 out, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   ts = 1_700_000_000.0
-  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_cursor_click_select'))
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_cursor_select'))
   s.send(:process_packet, 2, ts, SERVER_IP, CLIENT_IP, 34197, 34197, fixture_packet('server_open_gui_echo_14b'))
   s.send(:process_packet, 3, ts, SERVER_IP, CLIENT_IP, 34197, 34197, msg13_packet)
 end
 puts "\nTest 2: server mode (pcap-read path)"
-check(out.include?('cursor_click_select'), 'incoming msg 6 action logged')
+check(out.include?('cursor_select'), 'incoming msg 6 action logged')
 check(!out.include?('open_gui'), 'outgoing msg 7 NOT logged')
 
 # ── Test 3: client mode regression ────────────────────────────────────
@@ -283,6 +283,23 @@ old = $stdout; $stdout = out
 sr2.send(:load_roster)
 $stdout = old
 check(out.string.empty?, 'failed roster query is silent')
+
+# one-shot across hot reload: roster is queried exactly once, not again
+# after Ctrl-C reload (snapshot carries state.roster_loaded over)
+queries = 0
+fake3 = Object.new
+fake3.define_singleton_method(:connected_players) do
+  queries += 1
+  [{ index: 1, name: 'morganc' }]
+end
+sr3 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })
+sr3.instance_variable_set(:@rcon, fake3)
+sr3.send(:load_roster)              # startup query
+st = sr3.snapshot                   # Ctrl-C reload: state carried over
+sr4 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st)
+sr4.instance_variable_set(:@rcon, fake3)
+sr4.send(:load_roster)              # reload — must NOT query again
+check(queries == 1, 'roster queried exactly once across hot reload')
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

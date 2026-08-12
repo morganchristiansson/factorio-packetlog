@@ -11,9 +11,10 @@
 # These packets come from live captures (2026-08-11, factorio_capture.pcap)
 # and their expected output was verified against the actual gameplay session.
 #
-# NOTE: Packets with session-variable action data lengths (open_gui 2B vs 14B,
-# custom_input, unknown types) are intentionally NOT included as fixtures —
-# their parse depends on game version and a fixture would lock in wrong behavior.
+# NOTE: Client input actions carry an 8-byte trailing [tick(4)][pad(4)] field
+# (the local game tick when the action occurred) that the server does not echo.
+# For most actions it is left as unparsed trailing bytes; open_gui consumes it as
+# part of its 8-byte client payload. Fixtures below lock in the current decoding.
 
 REAL_PACKET_FIXTURES = [
   {
@@ -202,11 +203,41 @@ REAL_PACKET_FIXTURES = [
     ],
   },
   {
-    name: 'client_cursor_click_select',
-    description: 'Client cursor_click_select (8 bytes: tick + padding)',
+    name: 'client_open_gui_8b',
+    description: 'Client open_gui with 8-byte payload [gui_type][flags][tick][pad], followed by a trailing nothing action. Regression: parser assumed 2 bytes, misread the payload tail as phantom action add_decider_combinator_condition (bogus player 36)',
+    hex: '06069060406fa7230400000000000405013000a423040000000000',
+    actions: [
+      { type: 5, name: 'open_gui', player: 0, game_player: 1,
+        data: '3000a42304000000' },
+      { type: 0, name: 'nothing', player: 0, game_player: 1, data: '' },
+    ],
+  },
+  {
+    name: 'client_open_gui_8b_2',
+    description: 'Client open_gui, second capture (phantom action was select_next_valid_gun, bogus player 59)',
+    hex: '26060f77406f263a0400000000000405013000233a040000000000',
+    actions: [
+      { type: 5, name: 'open_gui', player: 0, game_player: 1,
+        data: '3000233a04000000' },
+      { type: 0, name: 'nothing', player: 0, game_player: 1, data: '' },
+    ],
+  },
+  {
+    name: 'client_open_gui_8b_3',
+    description: 'Client open_gui, third capture (phantom action was copy_opened_blueprint, bogus player delta)',
+    hex: '06067787406f8e4a04000000000004050130008b4a040000000000',
+    actions: [
+      { type: 5, name: 'open_gui', player: 0, game_player: 1,
+        data: '30008b4a04000000' },
+      { type: 0, name: 'nothing', player: 0, game_player: 1, data: '' },
+    ],
+  },
+  {
+    name: 'client_cursor_select',
+    description: 'Client cursor_select (8 bytes: tick + padding) — fires when the cursor selects/hovers an entity on the map (server resolves the entity ref)',
     hex: '0606549b5f39ef38b2000000000002090ce738b20000000000',
     actions: [
-      { type: 9, name: 'cursor_click_select', player: 11, game_player: 12,
+      { type: 9, name: 'cursor_select', player: 11, game_player: 12,
         data: 'e738b20000000000' },
     ],
   },

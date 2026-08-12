@@ -109,10 +109,13 @@ overrides `RCON_HOST` / `RCON_PORT` / `RCON_PASSWORD`.
 
 ## Hot Reload
 
-Ctrl-C once reloads the code; Ctrl-C again quits. State carried across
-reloads (via `SnifferState`): the open capture writer (file keeps its
-position — never truncated), the player DB, stats, and learned identities.
-Player names are persisted to `players.json` on reload and at shutdown.
+Ctrl-C reloads the code; Ctrl-C again **within 5 seconds** of the previous
+press quits. A single Ctrl-C pressed later is another reload — so you can
+reload repeatedly while editing code, and double-tap to shut down. State
+carried across reloads (via `SnifferState`): the open capture writer (file
+keeps its position — never truncated), the player DB, stats, and learned
+identities. Player names are persisted to `players.json` on reload and at
+shutdown.
 
 Implementation: `factorio-sniffer.rb` is a thin entry point; the reloadable
 classes live in `lib/` (`factorio_protocol`, `item_db`, `player_db`, `pcap`,

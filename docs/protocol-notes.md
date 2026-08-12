@@ -38,8 +38,8 @@ includes:
 | Type | Observed | Suspected |
 |------|----------|-----------|
 | 84 | 12 bytes S→C | wire_dragging (protocol ID, dump says 86) — see below |
-| 265 | 17+ bytes S→C | cursor hover/selection — see below |
 | 9 | 16+ bytes S→C | cursor/selection action — see below |
+| 265 | 17+ bytes S→C | cursor hover/selection — see below |
 | 128 | 20+ bytes S→C | copy operation |
 | 266 | 10+ bytes C→S | flip entity? |
 | 267 | 20+ bytes S→C | fast entity split? |
@@ -69,6 +69,14 @@ includes:
 
 5. ✅ **open_gui (type 5) length** — Was 9 bytes, corrected to **14 bytes**.
    First 6 bytes are header `30 00 54 ff ff ff` (GUI type + entity ref).
+
+5b. ✅ **open_gui (type 5) client length** — Client (C→S) open_gui is **8
+   bytes** `[gui_type][flags][tick][pad]`, not 2. Was misparsed as 2 bytes,
+   leaving the payload tail to be read as phantom actions with bogus player
+   deltas (single-player game logged `add_decider_combinator_condition`
+   Player_36 and `select_next_valid_gun` Player_59). Fixed: direction-aware
+   length (client 8, server 14-if-fits-else-2). Fixtures
+   `client_open_gui_8b{,_2,_3}`. (2026-08-12)
 
 6. ✅ **open_character_gui (type 61) length** — Was 2 bytes, corrected to
    **15 bytes**. First 2 bytes `01 54` are GUI type, then 13B metadata.
@@ -156,7 +164,9 @@ closures from ~half of all heartbeats (every `0x26`/`0x27`-prefixed packet).
 Verified against factorio_dissector and 97,656 affected packets. Fragmented
 messages (0x40 bit) are skipped.
 
-## open_gui (type 5) — 14 bytes
+## open_gui (type 5) — server echo 14 bytes / client 8 bytes
+
+Server echo format:
 
 `[gui_type(1)][flags(1)][entity_tag(1)][entity_hi(1)][entity_lo(2)][token(4)][tick_minus_1(4)]`
 
@@ -165,23 +175,49 @@ messages (0x40 bit) are skipped.
   container; the 3 payload bytes (hi+lo) uniquely identify the entity.
 - **Bytes 6-9: per-call token** (changes every invocation, NOT the entity ID).
 - **Bytes 10-13: tick - 1** (uint32) — game tick when the action was performed.
-- The actual entity ID is NOT in this action; the client sends an empty
+- The actual entity ID is NOT in this action; the client sends a bare
   open_gui and the server fills the ref from the player's cursor context.
+
+Client (C→S) format — 8 bytes:
+
+`[gui_type(1)][flags(1)][tick(4)][pad(2)]` — tick is the local game tick when
+  the click happened (hb tick - 3 in captures). **Regression (2026-08-12):**
+  the parser read 2 bytes here, so the remaining 6 bytes of payload were
+  misparsed as phantom actions with bogus player deltas (single-player game
+  logged `add_decider_combinator_condition` Player_36 and
+  `select_next_valid_gun` Player_59). Locked in by fixtures
+  `client_open_gui_8b{,_2,_3}`. See `docs/actions/005-open_gui.md`.
 
 ## cursor_hover (type 265) — 8 bytes
 
 `[flags(1)][tick(4)][padding(3)]` — sent when hovering over an entity.
 
-## cursor_click_select (type 9) — 8 bytes
+## cursor_select (type 9) — 8 bytes
 
-`[tick(4)][padding(4)]` — sent when clicking an entity. Tick matches the
-open_gui tick (client direction only; server echoes are wrapped differently).
+`[tick(4)][padding(4)]` C→S, `[entity_ref(4)][token(4)]` S→C — fires when the
+cursor selects/hovers an entity on the map (**not a click**; a click sends
+`open_gui`). Working name: type 9 is not in `defines.input_action` (gap
+between `disconnect_rolling_stock = 8` and `clear_cursor = 10`); the
+Hornwitser dissector table is from an older version and shifted. Tick matches
+the open_gui tick when followed by one (client direction only). Server echoes
+are wrapped differently.
+
+## Client action tick trailer (C→S heartbeats)
+
+Client input actions are followed by an 8-byte trailer `[tick(4)][pad(4)]`
+— the local game tick when the action occurred (hb tick - 3 in captures;
+-8 for cursor_select). The server does NOT echo it (server echoes end
+right after the action data). For actions with own data (start_walking,
+pipette, …) the trailer appears after the data; for 0-byte actions
+(stop_walking, stop_drag_build) it is currently left as unparsed trailing
+bytes (harmless — those bytes are never misread as actions). open_gui is
+special: its payload swallows the trailer (8-byte client form, see above).
 
 ## Server Echo Action Data Lengths (Verified)
 
 | Type | Name | Client Len | Server Echo Len | Notes |
 |------|------|-----------|----------------|-------|
-| 5 | open_gui | 9 | **14** | 6B header + 8B meta |
+| 5 | open_gui | 8 | **14** (or 2 bare) | client: gui_type+flags+tick+pad |
 | 61 | open_character_gui | 2 | **15** | 2B+13B |
 | 64 | open_blueprint_library_gui | 2 | **15** | Same as 61 |
 | 84 | server_tick_info | nil | **12** | Server-only action |

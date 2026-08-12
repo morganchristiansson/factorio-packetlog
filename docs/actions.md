@@ -11,7 +11,7 @@
 | 6 | open_current_vehicle_gui | [actions/006-open_current_vehicle_gui.md](actions/006-open_current_vehicle_gui.md) |
 | 7 | connect_rolling_stock | [actions/007-connect_rolling_stock.md](actions/007-connect_rolling_stock.md) *(detailed)* |
 | 8 | disconnect_rolling_stock | [actions/008-disconnect_rolling_stock.md](actions/008-disconnect_rolling_stock.md) *(detailed)* |
-| 9 | unknown_9 | [actions/009-unknown_9.md](actions/009-unknown_9.md) *(unidentified)* |
+| 9 | cursor_select | [actions/009-cursor_select.md](actions/009-cursor_select.md) *(working name)* |
 | 10 | clear_cursor | [actions/010-clear_cursor.md](actions/010-clear_cursor.md) |
 | 11 | reset_assembling_machine | [actions/011-reset_assembling_machine.md](actions/011-reset_assembling_machine.md) |
 | 13 | cancel_new_blueprint | [actions/013-cancel_new_blueprint.md](actions/013-cancel_new_blueprint.md) |
@@ -237,10 +237,10 @@
 | 262 | instantly_create_space_platform | [actions/262-instantly_create_space_platform.md](actions/262-instantly_create_space_platform.md) |
 | 263 | flush_opened_entity_specific_fluid | [actions/263-flush_opened_entity_specific_fluid.md](actions/263-flush_opened_entity_specific_fluid.md) |
 | 264 | change_picking_state | [actions/264-change_picking_state.md](actions/264-change_picking_state.md) |
-| 265 | unknown_265 | [actions/265-unknown_265.md](actions/265-unknown_265.md) *(unidentified)* |
-| 266 | unknown_266 | [actions/266-unknown_266.md](actions/266-unknown_266.md) *(unidentified)* |
-| 267 | unknown_267 | [actions/267-unknown_267.md](actions/267-unknown_267.md) *(unidentified)* |
-| 268 | unknown_268 | [actions/268-unknown_268.md](actions/268-unknown_268.md) *(unidentified)* |
+| 265 | selected_entity_changed_very_close | [actions/265-selected_entity_changed_very_close.md](actions/265-selected_entity_changed_very_close.md) *(real name)* |
+| 266 | selected_entity_changed_very_close_precise | [actions/265-selected_entity_changed_very_close.md](actions/265-selected_entity_changed_very_close.md) *(real name)* |
+| 267 | selected_entity_changed_relative | [actions/265-selected_entity_changed_very_close.md](actions/265-selected_entity_changed_very_close.md) *(real name)* |
+| 268 | selected_entity_changed_based_on_unit_number | [actions/265-selected_entity_changed_very_close.md](actions/265-selected_entity_changed_very_close.md) *(real name)* |
 | 269 | set_combinator_description | [actions/269-set_combinator_description.md](actions/269-set_combinator_description.md) |
 | 270 | switch_constant_combinator_state | [actions/270-switch_constant_combinator_state.md](actions/270-switch_constant_combinator_state.md) |
 | 271 | switch_power_switch_state | [actions/271-switch_power_switch_state.md](actions/271-switch_power_switch_state.md) |

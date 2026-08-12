@@ -54,7 +54,7 @@ ACTIONS = {
   6=>["open_current_vehicle_gui",0],
   7=>["connect_rolling_stock",4],
   8=>["disconnect_rolling_stock",4],
-  9=>["cursor_click_select",8],
+  9=>["cursor_select",8],
   10=>["clear_cursor",0],
   11=>["reset_assembling_machine",0],
   12=>nil,
@@ -310,10 +310,10 @@ ACTIONS = {
   262=>["instantly_create_space_platform",nil],
   263=>["flush_opened_entity_specific_fluid",nil],
   264=>["change_picking_state",1],
-  265=>["cursor_hover",8],
-  266=>nil,
-  267=>nil,
-  268=>nil,
+  265=>["selected_entity_changed_very_close",1],
+  266=>["selected_entity_changed_very_close_precise",1],
+  267=>["selected_entity_changed_relative",2],
+  268=>["selected_entity_changed_based_on_unit_number",4],
   269=>["set_combinator_description",nil],
   270=>["switch_constant_combinator_state",1],
   271=>["switch_power_switch_state",1],
@@ -613,7 +613,7 @@ ACTIONS = {
     last_index = 0xFFFF
     count.times do
       break if offset >= data.bytesize || tc[:hit_unknown]
-      offset, act = parse_action(data, offset, last_index, is_drag: is_drag)
+      offset, act = parse_action(data, offset, last_index, is_drag: is_drag, is_server: is_server)
       break unless act
       tc[:actions] << act
       last_index = act[:player]
@@ -670,7 +670,7 @@ ACTIONS = {
 
   # ── Input Action ───────────────────────────────────────────────────
 
-  def self.parse_action(data, offset, last_index, is_drag: false)
+  def self.parse_action(data, offset, last_index, is_drag: false, is_server: false)
     type_offset = offset
     offset, type = decode_uint16v(data, offset)
     return [offset, nil] if type.nil?
@@ -694,11 +694,31 @@ ACTIONS = {
       end
     end
 
-    # open_gui: variable length. Client sends 2 bytes [gui_type][flags];
-    # server echoes are the same 2 bytes, or 14 bytes when it appends entity
-    # ref + token + tick (observed both forms in the same session).
+    # open_gui: variable length, depends on direction.
+    #   Client → server: 8 bytes [gui_type(1)][flags(1)][tick(4)][pad(2)].
+    #     The tick is the local game tick when the click happened (hb tick - 3
+    #     in captures). Reading 2 bytes here used to leave the 6-byte tail to
+    #     be misparsed as phantom actions (e.g. add_decider_combinator_condition
+    #     with a bogus player delta).
+    #   Server echo: 14 bytes when it appends entity ref + token + tick,
+    #     else the bare 2-byte form [gui_type][flags] (no entity info).
     if type == 5
-      alen = (offset + 14 <= data.bytesize) ? 14 : 2
+      alen = if is_server
+        (offset + 14 <= data.bytesize) ? 14 : 2
+      else
+        8
+      end
+    end
+
+    # SelectedEntityChanged hover family (265-268): names from the game's
+    # internal symbols (verified live via /toggle-action-logging: logs
+    # SelectedEntityChangedVeryClose/Relative/Cleared on hover). Direction-
+    # dependent payload: ACTIONS len is the core payload (1/1/2/4 bytes);
+    #   Client → server: [payload][tick(4)][pad(4)]      = payload + 8
+    #   Server echo:      [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
+    #                                                     = payload + 16
+    if [265, 266, 267, 268].include?(type)
+      alen = is_server ? (alen + 16) : (alen + 8)
     end
 
     adata = nil

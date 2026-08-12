@@ -1,0 +1,3 @@
+Action: cursor_select type=9 player=6
+Data: ed454a0100000000
+Source UDP packet: /workspace/spec/fixtures/cursor_select.bin

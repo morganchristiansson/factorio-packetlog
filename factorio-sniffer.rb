@@ -174,14 +174,20 @@ if __FILE__ == $PROGRAM_NAME
   # ── Hot-reload loop ────────────────────────────────────────────────
   # Ctrl-C once: snapshot state (capture file stays open, player names and
   # stats preserved), reload the lib files with `load` (fresh code), rebuild
-  # the sniffer. Ctrl-C again: finalize (summary, save player db, close
-  # capture) and quit.
+  # the sniffer. Ctrl-C again WITHIN 5 SECONDS of the previous one:
+  # finalize (summary, save player db, close capture) and quit. A Ctrl-C
+  # pressed later (more than 5s after the last) is a fresh reload instead —
+  # so you can reload repeatedly while editing code, and double-tap to quit.
   SNIFFER_LIBS = %w[
     factorio_protocol item_db player_db pcap live_capture rcon_client factorio_sniffer
   ].freeze
 
+  # Seconds between two Ctrl-C presses that count as "quit". Uses monotonic
+  # time so wall-clock changes (NTP, manual) don't affect the window.
+  QUIT_WINDOW = 5
+
   state = SnifferState.new
-  reload_armed = false
+  last_interrupt = nil
 
   loop do
     sniffer = FactorioSniffer.new(options, state)
@@ -191,13 +197,14 @@ if __FILE__ == $PROGRAM_NAME
       sniffer.finish
       break
     rescue Interrupt
-      if reload_armed
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      if last_interrupt && (now - last_interrupt) <= QUIT_WINDOW
         puts "\nInterrupt — shutting down."
         sniffer.finish
         break
       else
         puts "\nInterrupt — reloading code; capture file and player state preserved."
-        puts '  Interrupt again to quit.'
+        puts "  Press Ctrl+C again within #{QUIT_WINDOW} seconds to quit."
         state = sniffer.snapshot
         state.player_db&.save
         # Reload the library files. `load` re-reads the file (redefining
@@ -207,7 +214,7 @@ if __FILE__ == $PROGRAM_NAME
         $VERBOSE = nil
         SNIFFER_LIBS.each { |lib| load File.expand_path("lib/#{lib}.rb", __dir__) }
         $VERBOSE = old_verbose
-        reload_armed = true
+        last_interrupt = now
         next
       end
     end

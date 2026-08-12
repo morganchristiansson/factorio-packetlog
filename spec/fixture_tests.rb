@@ -66,26 +66,27 @@ class FixtureTests < Minitest::Test
     assert tick > 0
   end
 
-  # ── Cursor hover (type 265) fixture ────────────────────────
+  # ── SelectedEntityChangedVeryClose (type 265) fixture ──────────
 
-  def test_cursor_hover_from_fixture
-    result = parse_fixture('cursor_hover')
+  def test_selected_entity_changed_very_close_from_fixture
+    result = parse_fixture('selected_entity_changed_very_close')
     actions = extract_actions(result)
     act = actions.find { |a| a[:type] == 265 }
-    refute_nil act, 'Expected cursor_hover action'
+    refute_nil act, 'Expected selected_entity_changed_very_close action'
     d = act[:data]
-    assert_equal 8, d.bytesize
+    # client form: [payload(1)][tick(4)][pad(4)]
+    assert_equal 9, d.bytesize
     tick = d.unpack1('V', offset: 1)
     assert tick > 0
   end
 
-  # ── Cursor click (type 9) fixture ──────────────────────────
+  # ── Cursor select (type 9) fixture ──────────────────────────
 
-  def test_cursor_click_from_fixture
-    result = parse_fixture('cursor_click_select')
+  def test_cursor_select_from_fixture
+    result = parse_fixture('cursor_select')
     actions = extract_actions(result)
     act = actions.find { |a| a[:type] == 9 }
-    refute_nil act, 'Expected cursor_click_select action'
+    refute_nil act, 'Expected cursor_select action'
     d = act[:data]
     assert_equal 8, d.bytesize
     tick = d.unpack1('V', offset: 0)

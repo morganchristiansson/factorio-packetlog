@@ -14,7 +14,8 @@ require_relative 'rcon_client'
 # file keeps its position, player names survive, and stats are continuous.
 class SnifferState
   attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
-                :self_ip, :self_name, :self_index, :peer_names, :conn_names
+                :self_ip, :self_name, :self_index, :peer_names, :conn_names,
+                :roster_loaded
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -95,7 +96,7 @@ class FactorioSniffer
     elsif @options[:interface]
       # Seed the roster before capturing so existing players' names are
       # known from the start (RCON is authoritative; later joiners are
-      # learned from the packet stream).
+      # learned from the packet stream). One-shot — see load_roster.
       load_roster if @rcon
       capturer = LiveCapture.new(
         interface: @options[:interface],
@@ -133,6 +134,7 @@ class FactorioSniffer
       st.self_index = @self_index
       st.peer_names = @peer_names
       st.conn_names = @conn_names
+      st.roster_loaded = @state.roster_loaded
     end
   end
 
@@ -417,8 +419,8 @@ class FactorioSniffer
     FAST_ENTITY_SPLIT = 281
     WRITE_TO_CONSOLE = 106
     FAST_ENTITY_TRANSFER = 278
-    CURSOR_HOVER = 265
-    CURSOR_CLICK_SELECT = 9
+    SELECTED_ENTITY_CHANGED_VERY_CLOSE = 265
+    CURSOR_SELECT = 9
     PLAYER_LEAVE_GAME = 247
     SERVER_COMMAND = 209
     OPEN_TRAIN_GUI = 289
@@ -513,14 +515,23 @@ class FactorioSniffer
         gname = gui_names[gt] || "type_#{gt}"
         state = flag == 0 ? 'open' : 'close'
         return " #{state} #{gname} ref=#{ref_tag}:#{ref_id} tok=#{token} tick=#{tick}"
+      elsif d.bytesize >= 6
+        # Client form (8 bytes): [gui_type][flags][tick(4)][pad(2)]
+        gt = d.getbyte(0)
+        flag = d.getbyte(1)
+        tick = d.unpack1('V', offset: 2)
+        gui_names = { 0x30 => 'entity', 0x31 => 'entity_close' }
+        gname = gui_names[gt] || "type_#{gt}"
+        state = flag == 0 ? 'open' : 'close'
+        return " #{state} #{gname} tick=#{tick}"
       end
-    when ActionType::CURSOR_HOVER
+    when ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE
       if d.bytesize >= 8
         flags = d.getbyte(0)
         tick = d.unpack1('V', offset: 1)
         return " flags=#{flags} tick=#{tick}"
       end
-    when ActionType::CURSOR_CLICK_SELECT
+    when ActionType::CURSOR_SELECT
       if d.bytesize >= 8
         tick = d.unpack1('V', offset: 0)
         return " tick=#{tick}"
@@ -626,7 +637,14 @@ class FactorioSniffer
   # DB, so players connected at startup are named immediately. Players who
   # join later are captured from the packet stream (msg 4 username + first
   # C→S heartbeat game index). A failed query is skipped silently.
+  #
+  # One-shot (state.roster_loaded survives hot reloads): the roster is only
+  # authoritative for the moment we started — joiners/leavers are tracked via
+  # the packet stream from then on, and re-querying on every Ctrl-C just
+  # reprints the same list.
   def load_roster
+    return if @state.roster_loaded
+    @state.roster_loaded = true
     return unless @rcon
     players = @rcon.connected_players
     return if players.nil? || players.empty?

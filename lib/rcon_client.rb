@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'rcon'
+require_relative 'server_detect'
 
 # RCON wrapper for the Factorio server, used to query the connected-player
 # roster ({index, name} pairs) at startup.
@@ -18,13 +19,26 @@ class RconClient
   # {index, name} pairs for connected players.
   ROSTER_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(serpent.line(t))'
 
+  # One-liner dumping ALL item + entity prototype names to script-output via
+  # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
+  # 1-indexed ids ARE the `prototypes.<kind>` iteration order
+  # (capture-verified: pipette refs, e.g. entity 87=stone-furnace,
+  # item 87=nuclear-reactor). NOTE: game.item_prototypes does NOT exist at
+  # runtime; `prototypes.<kind>` (console global) is the source. Must stay
+  # one line — /sc only applies to the first line.
+  DUMP_PROTOTYPES_LUA =
+    'local function d(k,f) local n={} for x in pairs(prototypes[k]) do n[#n+1]=x end ' \
+    'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n")) end ' \
+    'd("item","factorio-sniffer-items.txt") d("entity","factorio-sniffer-entities.txt")'
+
   # Build a client from ServerDetect.detect output, or nil when no RCON
   # endpoint was detected.
   def self.from_detected(detected)
     return nil unless detected && detected[:rcon_port]
     new(host: detected[:rcon_host] || 'localhost',
         port: detected[:rcon_port],
-        password: detected[:rcon_password])
+        password: detected[:rcon_password],
+        script_output_dir: ServerDetect.script_output_dir(detected[:pid]))
   end
 
   # Parse a bare rcon.print roster payload into [{index:, name:}].
@@ -37,15 +51,28 @@ class RconClient
     records.map { |i, n| { index: i.to_i, name: n.gsub(/\\(.)/, '\1') } }
   end
 
-  def initialize(host:, port:, password:)
+  def initialize(host:, port:, password:, script_output_dir: nil)
     @host, @port, @password = host, port, password
+    @script_output_dir = script_output_dir
     @client = connect
     @mutex = Mutex.new
   end
 
+  # <user-data>/script-output — where helpers.write_file output lands.
+  attr_reader :script_output_dir
+
   # [{index:, name:}] for connected players, or nil if the query failed.
   def connected_players
     self.class.parse_roster(execute(ROSTER_LUA))
+  end
+
+  # Write item + entity prototype name dumps to the server's script-output
+  # dir (files factorio-sniffer-items.txt / factorio-sniffer-entities.txt)
+  # via helpers.write_file. Returns true when the command ran; the caller
+  # must read the files back (see ServerDetect.script_output_dir).
+  def dump_prototype_files
+    execute(DUMP_PROTOTYPES_LUA)
+    true
   end
 
   private

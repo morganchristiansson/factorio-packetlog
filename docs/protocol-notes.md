@@ -100,6 +100,20 @@ includes:
 
 12. ✅ **Chat message decoding (write_to_console)** — `decode_action_string`
     handles multiple prefix formats (see "Chat message formats" below).
+13. ✅ **C→S closure trailer is per-closure, not per-action** — the 8-byte
+    `[tick][pad]` trailer belongs to the LAST action of a C→S closure.
+    Adding +8 to every hover/zoom/pan action (or treating
+    selected_entity_cleared as 8 bytes) with 2+ actions swallowed the next
+    action's header and re-parsed payload bytes as phantoms
+    (`Player_192 swap_tile_slots` from a zoom×2 closure,
+    `Player_64 drag_train_wait_condition` from a 266+start_walking closure).
+    See "Client action tick trailer" below.
+14. ✅ **C→S drag build carries both positions (21B data)** — the headerless
+    drag position rides inside the build action; reading 11B left it to be
+    re-parsed as a phantom (`Player_252 zoom_around_point`).
+15. ✅ **open_character_gui / open_blueprint_library_gui (61/64) C→S = 1B** —
+    the 15-byte form is the S→C echo only; 15B C→S swallowed the following
+    hover stream (`Player_267 gui_inventory_bar_changed` phantom).
 
 ## Remaining Known Issues
 
@@ -112,6 +126,16 @@ includes:
 2. **Server heartbeat action lengths** — many server-echoed actions have
    different data lengths than their client counterparts. Compare with the
    ACTIONS table per type when debugging new phantom actions.
+3. **S→C echo segments** — server echoes of tooltip-carrying closures
+   (hover over entities with descriptions) append segment sections whose
+   payload bytes can be re-parsed as garbage actions after the S→C
+   first-action filter (phantom set_cheat_mode_quality/gui_confirmed/etc.
+   from tooltip text bytes). Not visible in server mode (C→S only).
+4. **Unknown C→S actions** — a few exotic packets still derail: a drag-build
+   with a `00 00` marker variant (paste_entity_settings phantom), a
+   `[technology=…]` tooltip packet (Unknown(50)), and a rare hover-stream
+   containing an unidentified action. ~74 actions in a multi-hour capture;
+   each needs its own capture to pin down.
 
 ## Server Heartbeat Action Structure
 
@@ -235,6 +259,41 @@ pipette, …) the trailer appears after the data; for 0-byte actions
 (stop_walking, stop_drag_build) it is currently left as unparsed trailing
 bytes (harmless — those bytes are never misread as actions). open_gui is
 special: its payload swallows the trailer (8-byte client form, see above).
+
+**2026-08-12 correction — the trailer belongs to the CLOSURE, not per action.**
+A C→S tick closure carries ONE `[tick][pad]` trailer, after the LAST action
+(or after the segments when present). Multi-action closures make this
+obvious: `[zoom][zoom][trailer]` — each zoom's data is its 24-byte payload
+only; the first zoom must NOT consume a trailer, or it eats the second
+zoom's header (`80 00`) and the tail of its payload (`f0 bf` = last two
+bytes of the -1.0 double) is re-parsed as a phantom `swap_tile_slots` action
+with a garbage delta → `Player_192`. Same for `[266][start_walking][trailer]`
+(phantom `drag_train_wait_condition` `Player_64` from the middle of the
+walk-direction double) and `[cleared][start_walking][trailer]`. Fix: only the
+last action may consume the trailer (+8 for the hover/zoom family, 8 bytes
+for selected_entity_cleared); intermediate actions use the raw payload
+length. Locked in by fixtures `client_zoom_around_point_x2{,_alt}`,
+`client_selected_changed_plus_start_walking`,
+`client_selected_cleared_plus_start_walking`,
+`client_selected_changed_stream`.
+
+## C→S drag build (2026-08-12)
+
+A drag-build closure's build action carries BOTH positions in its data:
+`[x(4)][y(4)][dir(1)][01 01 marker][x2(4)][y2(4)][dir2(1)][flag(1)]` = 21
+bytes. The second position is headerless and NOT counted in `count`. S→C
+echoes instead send it as a separate counted action (11B build + 10B
+position). Reading only 11B for C→S left the position to be re-parsed as a
+phantom action — the position's x-byte `0x80` reads as type 128
+(zoom_around_point) with the next byte as delta → `Player_252`. Locked in by
+fixture `client_drag_build_with_position`.
+
+## open_character_gui / open_blueprint_library_gui (61/64) — direction split
+
+C→S carries only the 1-byte GUI type; the S→C echo appends 14 bytes of
+metadata (15 total). Reading 15B for C→S swallowed following hover actions
+(`Player_267 gui_inventory_bar_changed` phantom). Locked in by fixture
+`client_open_character_gui_then_hover_stream`.
 
 ## Server Echo Action Data Lengths (Verified)
 

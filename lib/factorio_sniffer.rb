@@ -34,6 +34,10 @@ class FactorioSniffer
     if options[:item_db] && File.exist?(options[:item_db])
       @item_db = ItemDB.new(options[:item_db])
     end
+    @entity_db = nil
+    if options[:entity_db] && File.exist?(options[:entity_db])
+      @entity_db = ItemDB.new(options[:entity_db])
+    end
     # Self (this client) tracking: we learn our own username from the
     # ConnectionRequestReplyConfirm and our own game player index from our
     # outgoing (C→S) heartbeat actions. This lets us correct the peer-id
@@ -68,6 +72,32 @@ class FactorioSniffer
         rescue => e
           warn "RCON roster disabled: #{e.class}: #{e.message}"
           @rcon = nil
+        end
+      end
+      # Item/entity name lookup: explicit --item-db / --entity-db files win;
+      # otherwise dump both from RCON via helpers.write_file and read them
+      # back from script-output (`prototypes.<kind>` iteration order = wire
+      # ids; `game.*_prototypes` does not exist at runtime). See
+      # docs/rcon-knowledge.md.
+      if @rcon && @rcon.script_output_dir
+        begin
+          @rcon.dump_prototype_files
+          unless @item_db
+            f = File.join(@rcon.script_output_dir, 'factorio-sniffer-items.txt')
+            if File.exist?(f) && File.size(f) > 0
+              @item_db = ItemDB.new(f)
+              puts "Item DB populated from RCON: #{@item_db.size} items"
+            end
+          end
+          unless @entity_db
+            f = File.join(@rcon.script_output_dir, 'factorio-sniffer-entities.txt')
+            if File.exist?(f) && File.size(f) > 0
+              @entity_db = ItemDB.new(f)
+              puts "Entity DB populated from RCON: #{@entity_db.size} entities"
+            end
+          end
+        rescue => e
+          warn "Prototype DB from RCON failed: #{e.class}: #{e.message}"
         end
       end
     end
@@ -590,10 +620,17 @@ class FactorioSniffer
         src = d.getbyte(0)
         ref = d.unpack1('V', offset: 1)
         qual = d.getbyte(8)
+        # src=0 (inventory/quickbar): ref is the ITEM prototype id
+        # (`prototypes.item` order). src=4 (world entity): ref is the ENTITY
+        # prototype id (`prototypes.entity` order) — capture-verified against
+        # the live server: refs like 87=stone-furnace, 149=iron-ore,
+        # 148=copper-ore. NOT an item id (item 87=nuclear-reactor,
+        # 149=carbon — those never appear pipetted from the world) and NOT an
+        # entity unit_number.
         if src == 0 && @item_db
           return " #{@item_db.name(ref)} qual=#{qual}"
-        elsif src == 4
-          return " entity=#{ref} qual=#{qual}"
+        elsif src == 4 && @entity_db
+          return " entity=#{@entity_db.name(ref)} qual=#{qual}"
         end
         return " src=#{src} ref=#{ref} qual=#{qual}"
       end

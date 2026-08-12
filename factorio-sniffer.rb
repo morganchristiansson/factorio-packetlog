@@ -56,6 +56,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--save-capture PATH', 'Save captured packets to a pcap file') { |v| options[:save_capture] = v }
     opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
     opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }
+    opts.on('--entity-db PATH', 'Entity prototype dump file (entity_prototypes_runtime.txt) for entity name lookup (pipette from world)') { |v| options[:entity_db] = v }
     opts.on('--dump-raw-types', 'Dump raw action type IDs with hex data (for reverse engineering)') { |v| options[:dump_raw_types] = v }
     opts.on('--validate', 'Show warnings about unknown action types and potential length mismatches') { |v| options[:validate] = v }
     opts.on('-q', '--quiet', 'Quiet mode: hide noise actions (wire_dragging, nothing)') { |v| options[:quiet] = v }
@@ -117,6 +118,9 @@ if __FILE__ == $PROGRAM_NAME
           port: detected[:rcon_port],
           password: detected[:rcon_password],
         }
+        if (sod = ServerDetect.script_output_dir(detected[:pid]))
+          options[:rcon][:script_output_dir] = sod
+        end
       end
       if detected[:dedicated]
         puts "  dedicated server: yes (#{detected[:dedicated_flags].join(', ')})"
@@ -180,6 +184,9 @@ if __FILE__ == $PROGRAM_NAME
   # so you can reload repeatedly while editing code, and double-tap to quit.
   SNIFFER_LIBS = %w[
     factorio_protocol item_db player_db pcap live_capture rcon_client factorio_sniffer
+    factorio_protocol/packets/factorio_packet
+    factorio_protocol/packets/heartbeat_packet
+    factorio_protocol/packets/connection_packets
   ].freeze
 
   # Seconds between two Ctrl-C presses that count as "quit". Uses monotonic

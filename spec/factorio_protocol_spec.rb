@@ -113,6 +113,83 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal 2, actions.size, 'client heartbeat should keep all actions'
   end
 
+  # ── C→S closure [tick][pad] trailer (phantom-player regressions) ──
+  #
+  # Client tick closures carry ONE 8-byte [tick(4)][pad(4)] trailer after the
+  # LAST action. Previously the parser added +8 to EVERY hover/zoom/pan action
+  # (60/128/129/262/265-268/310) and treated selected_entity_cleared (9) as
+  # 8 bytes of data, so with 2+ actions it swallowed the next action's header
+  # and re-parsed leftover payload bytes as phantom actions with bogus player
+  # deltas (live captures: Player_192 swap_tile_slots, Player_64
+  # drag_train_wait_condition). Only the last action may consume the trailer.
+
+  def test_client_zoom_x2_no_phantom
+    # Two zoom_around_point actions in one C→S closure. The first (intermediate)
+    # action must NOT get the +8 trailer, or it eats the second zoom's header
+    # (80 00) and the tail of its payload (f0 bf) becomes swap_tile_slots with a
+    # bogus delta.
+    data24 = [0] * 24
+    pkt = build_client_tc_packet([
+      { type: 128, delta: 1, data: data24 },
+      { type: 128, delta: 0, data: data24 },
+    ])
+    result = FactorioProtocol.parse_udp_payload(pkt)
+    actions = extract_actions(result)
+    assert_equal 2, actions.size
+    actions.each_with_index do |a, i|
+      assert_equal 128, a[:type], "action #{i} type"
+      assert_equal 0, a[:player], "action #{i} must stay on player 0 (no phantom delta)"
+    end
+    assert_equal 24, actions[0][:data].bytesize, 'intermediate zoom: payload only, no +8'
+  end
+
+  def test_client_selected_entity_cleared_intermediate_has_no_data
+    # selected_entity_cleared (9) has no data of its own in C→S — the 8 bytes
+    # ACTIONS lists are the closure [tick][pad] trailer, which only belongs to
+    # the last action. As an intermediate action it must consume 0 bytes or it
+    # swallows the following action's header.
+    pkt = build_client_tc_packet([
+      { type: 9, delta: 1, data: [] },
+      { type: 69, delta: 0, data: [0] * 16 },  # start_walking
+    ])
+    result = FactorioProtocol.parse_udp_payload(pkt)
+    actions = extract_actions(result)
+    assert_equal [9, 69], actions.map { |a| a[:type] }
+    assert_equal '', actions[0][:data].unpack1('H*'), 'intermediate cleared has no data'
+    assert actions.all? { |a| a[:player] == 0 }
+  end
+
+  def test_client_266_followed_by_start_walking
+    # selected_entity_changed_very_close (1B payload) + start_walking in one
+    # closure. The 266 must not consume +8 or it eats start_walking's header.
+    pkt = build_client_tc_packet([
+      { type: 266, delta: 1, data: [0x84] },
+      { type: 69, delta: 0, data: [0] * 16 },
+    ])
+    result = FactorioProtocol.parse_udp_payload(pkt)
+    actions = extract_actions(result)
+    assert_equal [266, 69], actions.map { |a| a[:type] }
+    assert_equal '84', actions[0][:data].unpack1('H*')
+    assert_equal 16, actions[1][:data].bytesize
+    assert actions.all? { |a| a[:player] == 0 }
+  end
+
+  def test_client_drag_build_carries_position
+    # C→S drag build: 21-byte data = 9B pos + 01 01 marker + 10B headerless
+    # drag position. Reading only 11B left the position to be re-parsed as a
+    # phantom action (zoom Player_252 from the position's x-byte 0x80).
+    pkt = build_client_tc_packet([
+      { type: 68, delta: 2, data: [0x80, 0xfb, 0xff, 0xff, 0x80, 0x02, 0x00, 0x00, 0x00, 0x01, 0x01,
+                                    0x80, 0xfb, 0xff, 0xff, 0x80, 0x04, 0x00, 0x00, 0x00, 0x10] },
+      { type: 9, delta: 0, data: [] },
+    ])
+    result = FactorioProtocol.parse_udp_payload(pkt)
+    actions = extract_actions(result)
+    assert_equal [68, 9], actions.map { |a| a[:type] }
+    assert_equal 21, actions[0][:data].bytesize, 'drag build carries both positions'
+    assert actions.all? { |a| a[:player] == 1 }
+  end
+
   # ── Build action (type 68) ─────────────────────────────────────
 
   def test_build_data_length

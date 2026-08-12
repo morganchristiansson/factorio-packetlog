@@ -276,4 +276,140 @@ REAL_PACKET_FIXTURES = [
         data: '0100' },
     ],
   },
+  # ── C→S closure [tick][pad] trailer regression fixtures (2026-08-12) ──
+  #
+  # Client tick closures carry ONE 8-byte [tick(4)][pad(4)] trailer after the
+  # LAST action. The parser used to add +8 to EVERY hover/zoom/pan family
+  # action (60/128/129/262/265-268/310) and treated selected_entity_cleared
+  # (9) as 8 bytes of data — so with 2+ actions in a closure it consumed the
+  # next action's header as "trailer" and re-parsed leftover payload bytes as
+  # phantom actions with bogus player deltas:
+  #
+  #   -> Player_192  swap_tile_slots          (zoom_around_point x2 closure)
+  #   -> Player_64   drag_train_wait_condition (selected_entity_changed_very_close
+  #                                             + start_walking closure)
+  #
+  # The phantom type/name depended on the leftover bytes; the phantom player
+  # came from the garbage delta. Fixed: only the LAST action of a C→S closure
+  # may consume the trailer (+8 for the family, 8 bytes for type 9);
+  # intermediate actions use the raw payload length. Fixtures below lock the
+  # correct multi-action decoding.
+
+  {
+    name: 'client_zoom_around_point_single',
+    description: 'Single zoom_around_point (payload 24B) + closure [tick][pad] trailer. The trailer is consumed as part of the LAST (only) action',
+    hex: '26066111cb525ce6080000000000028001000000000000f0bf0000000000c079c0000000000060744059e6080000000000',
+    actions: [
+      { type: 128, name: 'zoom_around_point', player: 0, game_player: 1,
+        data: '000000000000f0bf0000000000c079c0000000000060744059e6080000000000' },
+    ],
+  },
+  {
+    name: 'client_zoom_around_point_x2',
+    description: 'TWO zoom_around_point actions (same player, delta chain 1,0) + one closure trailer. Regression: first zoom consumed 24+8=32B, swallowing the second zoom header 80 00; the middle of the second zoom payload (f0 bf = tail of the -1.0 double) was re-parsed as phantom swap_tile_slots Player_192 (delta 191)',
+    hex: '06066511cb5260e6080000000000048001000000000000f0bf0000000000a079c000000000006074408000000000000000f0bf0000000000a079c000000000006074405de6080000000000',
+    actions: [
+      { type: 128, name: 'zoom_around_point', player: 0, game_player: 1,
+        data: '000000000000f0bf0000000000a079c00000000000607440' },
+      { type: 128, name: 'zoom_around_point', player: 0, game_player: 1,
+        data: '000000000000f0bf0000000000a079c000000000006074405de6080000000000' },
+    ],
+  },
+  {
+    name: 'client_zoom_around_point_x2_alt',
+    description: 'Zoom x2, zoom-in variant (d1 = +1.0). Phantom was swap_tile_slots Player_64 (delta 63 = tail of the +1.0 double)',
+    hex: '06069afb1453071f090000000000048001000000000000f03f0000000000405b400000000000c067408000000000000000f03f0000000000405b400000000000c06740041f090000000000',
+    actions: [
+      { type: 128, name: 'zoom_around_point', player: 0, game_player: 1,
+        data: '000000000000f03f0000000000405b400000000000c06740' },
+      { type: 128, name: 'zoom_around_point', player: 0, game_player: 1,
+        data: '000000000000f03f0000000000405b400000000000c06740041f090000000000' },
+    ],
+  },
+  {
+    name: 'client_selected_changed_plus_start_walking',
+    description: 'selected_entity_changed_very_close (1B payload, NO +8) + start_walking (16B) + trailer. Regression: 266 consumed 1+8=9B, swallowing start_walking header 45 00; the middle of its 2 doubles (e6 3f = tail of the 0.7123 direction double) was re-parsed as phantom drag_train_wait_condition Player_64 (delta 63)',
+    hex: '06066442c44e914500000000000004ff0a0101844500cc3b7f669ea0e63fcc3b7f669ea0e6bf8e45000000000000',
+    actions: [
+      { type: 266, name: 'selected_entity_changed_very_close', player: 0, game_player: 1,
+        data: '84' },
+      { type: 69, name: 'start_walking', player: 0, game_player: 1,
+        data: 'cc3b7f669ea0e63fcc3b7f669ea0e6bf' },
+    ],
+  },
+  {
+    name: 'client_selected_cleared_plus_start_walking',
+    description: 'selected_entity_cleared (intermediate action: NO 8-byte tick data — that is the closure trailer and only belongs to the last action) + start_walking + trailer. Regression: type 9 consumed 8B, swallowing the start_walking header',
+    hex: '0606ba47c44e634b0000000000000409014500cc3b7f669ea0e63fcc3b7f669ea0e63f604b000000000000',
+    actions: [
+      { type: 9, name: 'selected_entity_cleared', player: 0, game_player: 1,
+        data: '' },
+      { type: 69, name: 'start_walking', player: 0, game_player: 1,
+        data: 'cc3b7f669ea0e63fcc3b7f669ea0e63f' },
+    ],
+  },
+  {
+    name: 'client_drag_build_with_position',
+    description: 'C→S drag build: the build action carries BOTH positions in one 21-byte payload (9B pos + 01 01 drag marker + 10B headerless drag position) followed by selected_entity_cleared. Regression: the parser read only 11B, leaving the drag position\'s bytes to be re-parsed as a phantom action — the position\'s x-byte 0x80 read as type 128 zoom_around_point with the next byte (0xfb) as delta → phantom Player_252',
+    hex: '060619175202dbb800000000000004440280fbffff8002000000010180fbffff8004000000100900b3b8000000000000',
+    actions: [
+      { type: 68, name: 'build', player: 1, game_player: 2,
+        data: '80fbffff8002000000010180fbffff800400000010' },
+      { type: 9, name: 'selected_entity_cleared', player: 1, game_player: 2,
+        data: 'b3b8000000000000' },
+    ],
+  },
+  {
+    name: 'client_open_character_gui_then_hover_stream',
+    description: 'open_character_gui (61) carries only the 1-byte GUI type in C→S — the 15-byte form is the S→C echo. Reading 15B swallowed the following selected_entity_changed_very_close headers and re-parsed them as phantom actions (gui_inventory_bar_changed Player_267). The last 266 consumes the closure [tick][pad] trailer',
+    hex: '260656c351020165000000000000263d0201ff0a01008aff0a010088ff0a010077ff0a010088ff0a010078ff0a010078ff0a010068ff0a010067ff0a010078ff0a010078ff0a010078ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ed64000000000000',
+    actions: [
+      { type: 61, name: 'open_character_gui', player: 1, game_player: 2, data: '01' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '8a' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '77' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '78' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '78' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '68' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '67' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '78' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '78' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '78' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88ed64000000000000' },
+    ],
+  },
+  {
+    name: 'client_selected_changed_stream',
+    description: '15x selected_entity_changed_very_close (1B payload each) interleaved with start_walking - the hover stream that previously derailed into phantom actions with players 137/191',
+    hex: '060642bd5102e15e00000000000024ff0a0102b1ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a010088ff0a0100884500cc3b7f669ea0e63fcc3b7f669ea0e6bfff0a0100884500cc3b7f669ea0e63fcc3b7f669ea0e6bfd95e000000000000',
+    actions: [
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: 'b1' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 69, name: 'start_walking', player: 1, game_player: 2,
+        data: 'cc3b7f669ea0e63fcc3b7f669ea0e6bf' },
+      { type: 266, name: 'selected_entity_changed_very_close', player: 1, game_player: 2, data: '88' },
+      { type: 69, name: 'start_walking', player: 1, game_player: 2,
+        data: 'cc3b7f669ea0e63fcc3b7f669ea0e6bf' },
+    ],
+  },
 ].freeze

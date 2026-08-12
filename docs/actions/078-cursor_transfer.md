@@ -19,7 +19,7 @@ Data:         9 bytes
 
 | Offset | Size | Type | Description |
 |--------|------|------|-------------|
-| 0 | 2 | uint16 LE | Item prototype ID (1-indexed, matches `game.item_prototypes` order) |
+| 0 | 2 | uint16 LE | Item prototype ID (1-indexed, matches `prototypes.item` iteration order) |
 | 2 | 4 | uint32 LE | Action type (1 = put/pickup, 0 = clear cursor) |
 | 6 | 1 | uint8 | Quality offset? (0 = normal, higher for higher qualities) |
 | 7 | 2 | bytes | Padding/unknown (usually `00 00`) |

@@ -176,6 +176,17 @@ module ServerDetect
     list.select { |f| cmdline.split.include?(f) }
   end
 
+  # Directory where the server's helpers.write_file output lands:
+  # <user-data>/script-output, where user-data is the process's working
+  # directory (NOT the binary dir). See docs/rcon-knowledge.md.
+  def self.script_output_dir(pid)
+    return nil unless pid && File.directory?("/proc/#{pid}")
+    cwd = File.realpath("/proc/#{pid}/cwd")
+    File.join(cwd, 'script-output')
+  rescue SystemCallError
+    nil
+  end
+
   # Full detection of the running server.
   # Returns {} when no factorio process is found; otherwise:
   #   { pid:, cmdline:, game_port:, rcon_host:, rcon_port:, rcon_password:,

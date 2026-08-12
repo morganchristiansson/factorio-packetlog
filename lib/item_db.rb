@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
-# Build item prototype lookup from Factorio data-raw-dump.json
+# Build item prototype lookup from a runtime dump of item names in wire-id
+# order (external/item_prototypes_runtime.txt, regenerable via
+# tools/item_db.rb from a live server's RCON).
 require 'json'
 
 class ItemDB

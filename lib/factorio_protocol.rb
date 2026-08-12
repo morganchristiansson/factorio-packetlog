@@ -3,6 +3,9 @@
 # Factorio UDP protocol parser.
 # Based on Hornwitser's Wireshark dissector (reverse-engineered from factorio.pdb).
 module FactorioProtocol
+  require_relative 'factorio_protocol/packets/heartbeat_packet'
+  require_relative 'factorio_protocol/packets/connection_packets'
+
   # ── Message Types ──────────────────────────────────────────────────
   MESSAGE_TYPES = {
     0 => 'Ping', 1 => 'PingReply',
@@ -262,7 +265,7 @@ ACTIONS = {
   237=>["select_asteroid_chunk_slot",0],
   238=>["swap_asteroid_chunk_slots",0],
   239=>["select_tile_slot",0],
-  240=>["swap_tile_slots\n",0],
+  240=>["swap_tile_slots",0],
   241=>["select_mapper_slot_from",0],
   242=>["select_mapper_slot_to",0],
   243=>["swap_mappers",nil],
@@ -362,7 +365,7 @@ ACTIONS = {
   339=>["gui_hover",nil],
   340=>["gui_leave",nil],
   341=>["spectator_change_surface",0],
-  342=>["spectator_change_surface\n",0],
+  342=>["spectator_change_surface",0],
   343=>["adjust_blueprint_snapping",0],
   344=>["set_train_stop_priority",nil],
   345=>["land_at_planet",0],
@@ -384,26 +387,10 @@ ACTIONS = {
   ].freeze
 
   # ── Variable-Length Integer Decoding ───────────────────────────────
-
-  def self.decode_uint16v(data, offset)
-    return [offset + 1, nil] if offset >= data.bytesize
-    val = data.getbyte(offset)
-    if val == 0xFF
-      return [offset + 1, nil] if offset + 3 > data.bytesize
-      return [offset + 3, data.unpack1('v', offset: offset + 1)]
-    end
-    [offset + 1, val]
-  end
-
-  def self.decode_uint32v(data, offset)
-    return [offset + 1, nil] if offset >= data.bytesize
-    val = data.getbyte(offset)
-    if val == 0xFF
-      return [offset + 1, nil] if offset + 5 > data.bytesize
-      return [offset + 5, data.unpack1('V', offset: offset + 1)]
-    end
-    [offset + 1, val]
-  end
+  # Shared primitives live in WireDecode (mixed into packet classes too);
+  # the module extends it so `FactorioProtocol.decode_uint16v` etc. still
+  # work for legacy callers and specs.
+  extend WireDecode
 
   # ── Action Name / Length Lookup ────────────────────────────────────
 
@@ -471,407 +458,6 @@ ACTIONS = {
   # ── Length-Prefixed String ─────────────────────────────────────────
 
   # [uint32v len][bytes] — returns [next_offset, string] or [nil, nil]
-  def self.decode_string(data, offset)
-    noff, len = decode_uint32v(data, offset)
-    return [nil, nil] if len.nil? || noff + len > data.bytesize
-    [noff + len, data[noff, len]]
-  end
-
-  # ── Heartbeat ──────────────────────────────────────────────────────
-
-  def self.parse_heartbeat(data, offset, is_server: false)
-    return [offset, nil] if offset >= data.bytesize
-
-    hb = {
-      flags: data.getbyte(offset),
-      has_heartbeat_requests: false,
-      has_tick_closures: false,
-      has_single_tick_closure: false,
-      all_tick_closures_are_empty: false,
-      has_synchronizer_action: false,
-      seq: nil,
-      tick_closures: [],
-      sync_actions: [],
-      heartbeat_requests: [],
-      hit_unknown: false,
-    }
-
-    f = hb[:flags]
-    hb[:has_heartbeat_requests]       = (f & 0x01) != 0
-    hb[:has_tick_closures]            = (f & 0x02) != 0
-    hb[:has_single_tick_closure]      = (f & 0x04) != 0
-    hb[:all_tick_closures_are_empty]  = (f & 0x08) != 0
-    hb[:has_synchronizer_action]      = (f & 0x10) != 0
-    offset += 1
-
-    return [offset, hb] if offset + 4 > data.bytesize
-    hb[:seq] = data.unpack1('V', offset: offset)
-    offset += 4
-
-    # Tick closures
-    if hb[:has_tick_closures]
-      count = hb[:has_single_tick_closure] ? 1 : data.getbyte(offset)
-      offset += 1 unless hb[:has_single_tick_closure]
-
-      count.times do
-        break if offset >= data.bytesize || hb[:hit_unknown]
-        offset, tc = parse_tick_closure(data, offset, hb[:all_tick_closures_are_empty], is_server: is_server)
-        hb[:tick_closures] << tc if tc
-        hb[:hit_unknown] = tc[:hit_unknown] if tc
-      end
-    end
-
-    # Client-only: nextToReceiveServerTickClosure (8 bytes)
-    if !is_server && !hb[:hit_unknown] && offset + 8 <= data.bytesize
-      hb[:next_receive] = data.unpack1('Q<', offset: offset)
-      offset += 8
-    end
-
-    # Synchronizer actions
-    if hb[:has_synchronizer_action] && !hb[:hit_unknown]
-      sync_start = offset
-      offset, count = decode_uint32v(data, offset)
-      # Sanity check: each sync action needs at least 3 bytes for server (1 type + 2 peer_id)
-      # or 1 byte for client (1 type). If count is impossibly large, skip.
-      min_per_sync = is_server ? 3 : 1
-      if count && count > 0 && offset + (count * min_per_sync) > data.bytesize
-        # Sync count is implausible — likely due to TC action length mismatch
-        offset = sync_start  # reset to try other parsing paths
-      else
-        count.to_i.times do
-          break if offset >= data.bytesize
-          offset, sa = parse_synchronizer_action(data, offset, is_server)
-          break unless sa
-          hb[:sync_actions] << sa
-          break if sa[:hit_unknown]
-        end
-      end
-    end
-
-    # Heartbeat requests
-    if hb[:has_heartbeat_requests] && !hb[:hit_unknown] && offset < data.bytesize
-      req_count = data.getbyte(offset)
-      offset += 1
-      req_count.times do
-        break if offset + 4 > data.bytesize
-        hb[:heartbeat_requests] << data.unpack1('V', offset: offset)
-        offset += 4
-      end
-    end
-
-    [offset, hb]
-  end
-
-  # ── Tick Closure ───────────────────────────────────────────────────
-
-  def self.parse_tick_closure(data, offset, is_empty, is_server: false)
-    return [offset, nil] if offset + 8 > data.bytesize
-    tc = { tick: data.unpack1('Q<', offset: offset), actions: [], hit_unknown: false }
-    offset += 8
-    return [offset, tc] if is_empty
-
-    # Action count with segment flag
-    offset, count_flagged = decode_uint32v(data, offset)
-    return [offset, tc] if count_flagged.nil?
-
-    count = count_flagged >> 1
-    has_segments = (count_flagged & 1) == 1
-    tc[:action_count] = count
-
-    # In drag-mode, the tick has more than 1 action and the first build action
-    # has 11 bytes instead of 9 (includes position+dir+2 byte drag marker)
-    is_drag = (count > 1)
-
-    last_index = 0xFFFF
-    count.times do
-      break if offset >= data.bytesize || tc[:hit_unknown]
-      offset, act = parse_action(data, offset, last_index, is_drag: is_drag, is_server: is_server)
-      break unless act
-      tc[:actions] << act
-      last_index = act[:player]
-      tc[:hit_unknown] = true if act[:hit_unknown]
-    end
-
-    # Server-to-client heartbeats: [server_tick_info][real action][metadata...]
-    # or [real action][metadata...]. Keep the server_tick_info wrapper (needed
-    # for player delta decoding; it is filtered at display) plus the FIRST real
-    # action, then drop trailing metadata entries.
-    if is_server && tc[:actions].size > 1
-      wrapper = tc[:actions].take_while { |a| a[:type] == 84 }
-      real = tc[:actions].find { |a| a[:type] != 84 && a[:type] != 0 }
-      tc[:actions] = real ? wrapper + [real] : [tc[:actions].first]
-      # Metadata actions may have set hit_unknown; reset so segment parsing proceeds
-      tc[:hit_unknown] = false
-    end
-
-    # Parse segments — they contain action payloads (also adds actions not in input list)
-    if has_segments && offset < data.bytesize && !tc[:hit_unknown]
-      seg_count = data.getbyte(offset)
-      offset += 1
-      seg_count.times do
-        break if offset >= data.bytesize
-        seg_type = data.getbyte(offset); offset += 1
-        seg_blue = data.unpack1('V', offset: offset) rescue 0; offset += 4
-        v_off, seg_green = decode_uint16v(data, offset); offset = v_off
-        v_off, total_len = decode_uint32v(data, offset); offset = v_off
-        v_off, seg_number = decode_uint32v(data, offset); offset = v_off
-        # Payload: uint32v length + data
-        v_off, pay_len = decode_uint32v(data, offset); offset = v_off
-        if pay_len && pay_len > 0 && offset + pay_len <= data.bytesize
-          payload = data[offset, pay_len]
-          # Find existing action of same type or add new one
-          existing = tc[:actions]&.find { |a| a[:type] == seg_type }
-          if existing
-            existing[:data] = payload
-          else
-            # Add new action from segment
-            seg_name = action_name(seg_type)
-            tc[:actions] << {
-              type: seg_type, name: seg_name,
-              player: seg_green, game_player: seg_green + 1,
-              delta: 0, data: payload, hit_unknown: false
-            }
-          end
-          offset += pay_len
-        end
-      end
-    end
-
-    [offset, tc]
-  end
-
-  # ── Input Action ───────────────────────────────────────────────────
-
-  def self.parse_action(data, offset, last_index, is_drag: false, is_server: false)
-    type_offset = offset
-    offset, type = decode_uint16v(data, offset)
-    return [offset, nil] if type.nil?
-    delta_offset = offset
-    offset, delta = decode_uint16v(data, offset)
-    return [offset, nil] if delta.nil?
-
-    raw_player = (last_index + delta) & 0xFFFF
-    game_player = raw_player + 1
-    data_start = offset
-    entry = ACTIONS[type]
-    name = entry ? entry[0] : "Unknown(#{type})"
-    alen = entry ? entry[1] : nil
-
-    # Build: 9 bytes base (x+y+dir), 10 with ghost flag, 11 in drag mode
-    if type == 68
-      if is_drag && offset + 11 <= data.bytesize
-        alen = 11  # drag: 01 01 marker
-      elsif offset + 10 <= data.bytesize && data.getbyte(offset + 9) == 0x00 && offset + 10 < data.bytesize
-        alen = 10  # ghost: trailing 0x00 byte
-      end
-    end
-
-    # open_gui: variable length, depends on direction.
-    #   Client → server: 8 bytes [gui_type(1)][flags(1)][tick(4)][pad(2)].
-    #     The tick is the local game tick when the click happened (hb tick - 3
-    #     in captures). Reading 2 bytes here used to leave the 6-byte tail to
-    #     be misparsed as phantom actions (e.g. add_decider_combinator_condition
-    #     with a bogus player delta).
-    #   Server echo: 14 bytes when it appends entity ref + token + tick,
-    #     else the bare 2-byte form [gui_type][flags] (no entity info).
-    if type == 5
-      alen = if is_server
-        (offset + 14 <= data.bytesize) ? 14 : 2
-      else
-        8
-      end
-    end
-
-    # Hover/selection family (265-268) + zoom/render/pan (128, 129, 310):
-    # names from the game's internal symbols (verified live via
-    # /toggle-action-logging correlated with the capture by tick — the log
-    # tick equals the packet's heartbeat tick). Direction-dependent payload:
-    # ACTIONS len is the core payload (doubles for zoom, 17B for pan, mode
-    # byte for render, 1/1/2/4 for hover);
-    #   Client → server: [payload][tick(4)][pad(4)]      = payload + 8
-    #   Server echo:      [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
-    #                                                     = payload + 16
-    if alen && [60, 128, 129, 262, 265, 266, 267, 268, 310].include?(type)
-      alen = is_server ? (alen + 16) : (alen + 8)
-    end
-
-    adata = nil
-    hit_unknown = false
-
-    if alen && alen > 0 && offset + alen <= data.bytesize
-      adata = data[offset, alen]
-      offset += alen
-    elsif alen == 0
-      adata = ''.b
-    elsif alen.nil?
-      case type
-      when 259 # remote_view_surface — read 4 bytes for surface ID, then stop
-        if offset + 4 <= data.bytesize
-          adata = data[offset, 4]
-          offset += 4
-        end
-        hit_unknown = true  # stop parsing further actions in this tick
-      when 106 # write_to_console
-        s_off, s_len = decode_uint32v(data, offset)
-        if s_len && s_off + s_len <= data.bytesize
-          adata = data[offset, s_off - offset + s_len]
-          offset = s_off + s_len
-        else
-          adata = nil
-          hit_unknown = true
-        end
-      else
-        adata = nil
-        hit_unknown = true
-      end
-    else
-      # alen > 0 but not enough data available
-      adata = nil
-      hit_unknown = true
-    end
-
-    [offset, {
-      type: type, name: name, player: raw_player, game_player: game_player,
-      delta: delta, data: adata, hit_unknown: hit_unknown,
-      type_offset: type_offset, data_offset: data_start,
-    }]
-  end
-
-  # ── Synchronizer Action ────────────────────────────────────────────
-
-  def self.parse_synchronizer_action(data, offset, is_server)
-    return [offset, nil] if offset >= data.bytesize
-    type = data.getbyte(offset)
-    offset += 1
-    info = SYNCHRONIZER_ACTIONS[type] || "Unknown(0x#{type.to_s(16)})"
-
-    sa = { type: type, name: info, data: nil, hit_unknown: false }
-
-    case type
-    when 0x01 # PeerDisconnect — 1 byte reason
-      if offset < data.bytesize
-        sa[:reason] = data.getbyte(offset)
-        offset += 1
-      end
-    when 0x02 # NewPeerInfo — username string (uint32v-prefixed)
-      s_off, s_len = decode_uint32v(data, offset)
-      if s_len && s_off + s_len <= data.bytesize
-        sa[:username] = data[s_off, s_len]
-        offset = s_off + s_len
-      else
-        sa[:hit_unknown] = true
-      end
-    when 0x03 # ClientChangedState
-      if !is_server && offset < data.bytesize
-        sa[:state] = data.getbyte(offset)
-        offset += 1
-      end
-    when 0x04 # ClientShouldStartSendingTickClosures
-      if offset + 8 <= data.bytesize
-        sa[:data] = data[offset, 8]
-        offset += 8
-      end
-    else
-      # Use known lengths from SYNC_ACTION_LENS, or stop processing
-      slen = SYNC_ACTION_LENS[type]
-      if slen && offset + slen <= data.bytesize
-        sa[:data] = data[offset, slen] if slen > 0
-        offset += slen
-      else
-        sa[:hit_unknown] = true
-      end
-    end
-
-    # Server-to-client messages append a 2-byte sender peer_id after action data
-    if is_server && offset + 2 <= data.bytesize
-      sa[:peer_id] = data.unpack1('v', offset: offset)
-      offset += 2
-    end
-
-    [offset, sa]
-  end
-
-  # ── Connection Request Reply Confirm (username!) ───────────────────
-
-  # msg_type 4 payload (payload offset = header_size, typically 3):
-  #   client_id(4) + server_id(4) + instance_id(4) + username string +
-  #   password hash string + server key string + timestamp(8)
-  # Only the client_id and username are needed here.
-  def self.parse_connection_confirm(data, offset)
-    return nil if data.bytesize < offset + 12
-    client_id = data.unpack1('V', offset: offset)
-    offset += 12  # clientID(4) + serverID(4) + instanceID(4)
-    off, len = decode_uint32v(data, offset)
-    return nil if len.nil? || off + len > data.bytesize
-    username = data[off, len]
-    return nil if username.nil? || username.empty?
-    # Sanity: usernames are printable ASCII
-    return nil unless username.bytes.all? { |b| b >= 0x20 && b <= 0x7E }
-    { client_id: client_id, username: username }
-  end
-
-  # ── Connection Accept Or Deny (player list!) ───────────────────────
-
-  # msg_type 5 payload (payload offset = header_size, variable):
-  #   client_id(4) status(1) gameName serverHash description latency(1)
-  #   max_updates(u32v) game_id(4) steam_id(8) clientsPeerInfo
-  #     serverUsername map_saving_progress(1) savingFor(1+n*u16v)
-  #     clientPeerInfo: [u32v count][(u16v peer_id, username, flags...)]*
-  #   expect_seq(4) send_seq(4) new_peer_id(2) mods...
-  #
-  # NOTE: clientPeerInfo ids are NETWORK PEER ids, NOT game player
-  # indexes (verified: morganc's peer id=101 but game index=11).
-  # Returns { client_id:, status:, game_name:, server_hash:,
-  #           server_username:, peers: [{peer_id:, name:}] }
-  def self.parse_connection_accept(data, offset)
-    return nil if data.bytesize < offset + 20
-    res = {}
-    res[:client_id] = data.unpack1('V', offset: offset); offset += 4
-    res[:status] = data.getbyte(offset); offset += 1
-    offset, res[:game_name] = decode_string(data, offset)
-    offset, res[:server_hash] = decode_string(data, offset)
-    offset, res[:description] = decode_string(data, offset)
-    return nil if offset.nil?
-    offset += 1  # latency
-    offset, res[:max_updates] = decode_uint32v(data, offset)
-    offset += 4  # game_id
-    offset += 8  # steam_id
-
-    # clientsPeerInfo
-    offset, server_username = decode_string(data, offset)
-    return nil if offset.nil?
-    res[:server_username] = server_username
-    offset += 1  # map_saving_progress
-    saving_count = data.getbyte(offset); offset += 1
-    saving_count.to_i.times do
-      offset, = decode_uint16v(data, offset)
-    end
-    offset, client_count = decode_uint32v(data, offset)
-    return nil if client_count.nil? || client_count > 1024
-    res[:peers] = []
-    client_count.to_i.times do
-      break if offset.nil?
-      offset, peer_id = decode_uint16v(data, offset)
-      offset, name = decode_string(data, offset)
-      break if offset.nil?
-      flags = data.getbyte(offset); offset += 1
-      [0x01, 0x02, 0x04, 0x08, 0x10].each { |b| offset += 1 if (flags & b) != 0 }
-      res[:peers] << { peer_id: peer_id, name: name }
-    end
-    res
-  end
-
-  # ── Connection Request (version info) ──────────────────────────────
-
-  def self.parse_connection_request(data, offset)
-    return nil if data.bytesize < offset + 9
-    maj = data.getbyte(offset)
-    min = data.getbyte(offset + 1)
-    patch = data.getbyte(offset + 2)
-    build = data.unpack1('V', offset: offset + 3) & 0xFFFF
-    cid   = data.unpack1('V', offset: offset + 5)
-    { version: "#{maj}.#{min}.#{patch} (build #{build})", client_id: cid }
-  end
 
   # ── Full UDP Payload Parse ─────────────────────────────────────────
 
@@ -879,7 +465,6 @@ ACTIONS = {
     hdr = parse_network_header(data)
     return nil unless hdr
 
-    result = { header: hdr }
     case hdr[:msg_type]
     when 6, 7
       # Heartbeat payload always starts at byte 1. The random flag (0x20) is
@@ -887,16 +472,16 @@ ACTIONS = {
       # (verified against factorio_dissector and live captures; treating it
       # as a 4-byte offset silently dropped ~half of all heartbeat actions).
       return nil if hdr[:fragmented]  # fragment payload is not a full message
-      _, hb = parse_heartbeat(data, 1, is_server: hdr[:msg_type] == 7)
-      result[:heartbeat] = hb
+      HeartbeatPacket.parse(data).result
     when 2
-      result[:connection_request] = parse_connection_request(data, hdr[:header_size])
+      ConnectionRequestPacket.parse(data).result
     when 4
-      result[:connection_confirm] = parse_connection_confirm(data, hdr[:header_size])
+      ConnectionConfirmPacket.parse(data).result
     when 5
-      result[:connection_accept] = parse_connection_accept(data, hdr[:header_size])
+      ConnectionAcceptPacket.parse(data).result
+    else
+      { header: hdr }
     end
-    result
   end
 
   # ── Chat Message Decoding (write_to_console) ─────────────────────

@@ -1,20 +1,5 @@
 # Input Actions Reference
 
-Action type IDs from defines.input_action. IDs are session-specific —
-dump per session for accuracy using the helpers.write_file command.
-
-## Ghost Flag
-
-Ghost mode detects via next_receive bit 0 in client heartbeats.
-
-## Build Action Lengths
-
-| Mode | Length | Extra Bytes |
-|------|--------|------------|
-| Single | 9 | — |
-| Ghost | 10 | 0x00 |
-| Drag (subsequent) | 11 | 0x01 0x01 |
-
 | ID | Name | Doc |
 |----|------|-----|
 | 0 | nothing | [actions/000-nothing.md](actions/000-nothing.md) |
@@ -24,8 +9,9 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 4 | toggle_driving | [actions/004-toggle_driving.md](actions/004-toggle_driving.md) |
 | 5 | open_gui | [actions/005-open_gui.md](actions/005-open_gui.md) *(detailed)* |
 | 6 | open_current_vehicle_gui | [actions/006-open_current_vehicle_gui.md](actions/006-open_current_vehicle_gui.md) |
-| 7 | connect_rolling_stock | [actions/007-connect_rolling_stock.md](actions/007-connect_rolling_stock.md) |
-| 8 | disconnect_rolling_stock | [actions/008-disconnect_rolling_stock.md](actions/008-disconnect_rolling_stock.md) |
+| 7 | connect_rolling_stock | [actions/007-connect_rolling_stock.md](actions/007-connect_rolling_stock.md) *(detailed)* |
+| 8 | disconnect_rolling_stock | [actions/008-disconnect_rolling_stock.md](actions/008-disconnect_rolling_stock.md) *(detailed)* |
+| 9 | unknown_9 | [actions/009-unknown_9.md](actions/009-unknown_9.md) *(unidentified)* |
 | 10 | clear_cursor | [actions/010-clear_cursor.md](actions/010-clear_cursor.md) |
 | 11 | reset_assembling_machine | [actions/011-reset_assembling_machine.md](actions/011-reset_assembling_machine.md) |
 | 13 | cancel_new_blueprint | [actions/013-cancel_new_blueprint.md](actions/013-cancel_new_blueprint.md) |
@@ -34,12 +20,14 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 17 | destroy_opened_item | [actions/017-destroy_opened_item.md](actions/017-destroy_opened_item.md) |
 | 18 | copy_opened_item | [actions/018-copy_opened_item.md](actions/018-copy_opened_item.md) |
 | 19 | copy_large_opened_item | [actions/019-copy_large_opened_item.md](actions/019-copy_large_opened_item.md) |
+| 21 | unknown_21 | [actions/021-unknown_21.md](actions/021-unknown_21.md) *(unidentified)* |
 | 23 | open_bonus_gui | [actions/023-open_bonus_gui.md](actions/023-open_bonus_gui.md) |
 | 24 | open_achievements_gui | [actions/024-open_achievements_gui.md](actions/024-open_achievements_gui.md) |
 | 25 | cycle_blueprint_book_forwards | [actions/025-cycle_blueprint_book_forwards.md](actions/025-cycle_blueprint_book_forwards.md) |
 | 26 | cycle_blueprint_book_backwards | [actions/026-cycle_blueprint_book_backwards.md](actions/026-cycle_blueprint_book_backwards.md) |
 | 27 | cycle_quality_up | [actions/027-cycle_quality_up.md](actions/027-cycle_quality_up.md) |
 | 28 | cycle_quality_down | [actions/028-cycle_quality_down.md](actions/028-cycle_quality_down.md) |
+| 31 | unknown_31 | [actions/031-unknown_31.md](actions/031-unknown_31.md) *(unidentified)* |
 | 32 | toggle_enable_vehicle_logistics_while_moving | [actions/032-toggle_enable_vehicle_logistics_while_moving.md](actions/032-toggle_enable_vehicle_logistics_while_moving.md) |
 | 33 | toggle_deconstruction_item_entity_filter_mode | [actions/033-toggle_deconstruction_item_entity_filter_mode.md](actions/033-toggle_deconstruction_item_entity_filter_mode.md) |
 | 34 | toggle_deconstruction_item_tile_filter_mode | [actions/034-toggle_deconstruction_item_tile_filter_mode.md](actions/034-toggle_deconstruction_item_tile_filter_mode.md) |
@@ -63,6 +51,7 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 57 | toggle_selected_entity | [actions/057-toggle_selected_entity.md](actions/057-toggle_selected_entity.md) |
 | 58 | cheat | [actions/058-cheat.md](actions/058-cheat.md) |
 | 59 | toggle_blueprint_snap_to_grid | [actions/059-toggle_blueprint_snap_to_grid.md](actions/059-toggle_blueprint_snap_to_grid.md) |
+| 60 | unknown_60 | [actions/060-unknown_60.md](actions/060-unknown_60.md) *(unidentified)* |
 | 61 | open_character_gui | [actions/061-open_character_gui.md](actions/061-open_character_gui.md) |
 | 62 | open_production_gui | [actions/062-open_production_gui.md](actions/062-open_production_gui.md) |
 | 63 | open_logistics_gui | [actions/063-open_logistics_gui.md](actions/063-open_logistics_gui.md) |
@@ -85,6 +74,7 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 81 | send_stack_to_trash | [actions/081-send_stack_to_trash.md](actions/081-send_stack_to_trash.md) |
 | 82 | send_stacks_to_trash | [actions/082-send_stacks_to_trash.md](actions/082-send_stacks_to_trash.md) |
 | 83 | inventory_transfer | [actions/083-inventory_transfer.md](actions/083-inventory_transfer.md) *(detailed)* |
+| 84 | unknown_84 | [actions/084-unknown_84.md](actions/084-unknown_84.md) *(unidentified)* |
 | 85 | craft | [actions/085-craft.md](actions/085-craft.md) |
 | 86 | wire_dragging | [actions/086-wire_dragging.md](actions/086-wire_dragging.md) *(detailed)* |
 | 87 | change_shooting_state | [actions/087-change_shooting_state.md](actions/087-change_shooting_state.md) |
@@ -125,6 +115,7 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 124 | use_item | [actions/124-use_item.md](actions/124-use_item.md) |
 | 125 | send_spidertron | [actions/125-send_spidertron.md](actions/125-send_spidertron.md) |
 | 126 | set_inventory_bar | [actions/126-set_inventory_bar.md](actions/126-set_inventory_bar.md) |
+| 128 | unknown_128 | [actions/128-unknown_128.md](actions/128-unknown_128.md) *(unidentified)* |
 | 130 | start_repair | [actions/130-start_repair.md](actions/130-start_repair.md) |
 | 131 | deconstruct | [actions/131-deconstruct.md](actions/131-deconstruct.md) |
 | 132 | upgrade | [actions/132-upgrade.md](actions/132-upgrade.md) |
@@ -145,6 +136,7 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 147 | upgrade_opened_blueprint_by_item | [actions/147-upgrade_opened_blueprint_by_item.md](actions/147-upgrade_opened_blueprint_by_item.md) |
 | 148 | spawn_item | [actions/148-spawn_item.md](actions/148-spawn_item.md) |
 | 149 | set_ghost_cursor | [actions/149-set_ghost_cursor.md](actions/149-set_ghost_cursor.md) |
+| 151 | unknown_151 | [actions/151-unknown_151.md](actions/151-unknown_151.md) *(unidentified)* |
 | 153 | edit_blueprint_tool_preview | [actions/153-edit_blueprint_tool_preview.md](actions/153-edit_blueprint_tool_preview.md) |
 | 154 | remove_cables | [actions/154-remove_cables.md](actions/154-remove_cables.md) |
 | 155 | export_blueprint | [actions/155-export_blueprint.md](actions/155-export_blueprint.md) |
@@ -245,6 +237,10 @@ Ghost mode detects via next_receive bit 0 in client heartbeats.
 | 262 | instantly_create_space_platform | [actions/262-instantly_create_space_platform.md](actions/262-instantly_create_space_platform.md) |
 | 263 | flush_opened_entity_specific_fluid | [actions/263-flush_opened_entity_specific_fluid.md](actions/263-flush_opened_entity_specific_fluid.md) |
 | 264 | change_picking_state | [actions/264-change_picking_state.md](actions/264-change_picking_state.md) |
+| 265 | unknown_265 | [actions/265-unknown_265.md](actions/265-unknown_265.md) *(unidentified)* |
+| 266 | unknown_266 | [actions/266-unknown_266.md](actions/266-unknown_266.md) *(unidentified)* |
+| 267 | unknown_267 | [actions/267-unknown_267.md](actions/267-unknown_267.md) *(unidentified)* |
+| 268 | unknown_268 | [actions/268-unknown_268.md](actions/268-unknown_268.md) *(unidentified)* |
 | 269 | set_combinator_description | [actions/269-set_combinator_description.md](actions/269-set_combinator_description.md) |
 | 270 | switch_constant_combinator_state | [actions/270-switch_constant_combinator_state.md](actions/270-switch_constant_combinator_state.md) |
 | 271 | switch_power_switch_state | [actions/271-switch_power_switch_state.md](actions/271-switch_power_switch_state.md) |

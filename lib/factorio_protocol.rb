@@ -31,6 +31,16 @@ module FactorioProtocol
     0x15 => 'AuxiliaryDataDownloadFinished',
   }.freeze
 
+  # Data lengths for synchronizer action types (bytes after type byte, before peer_id).
+  # nil = variable-length (handled by parse_synchronizer_action case logic).
+  SYNC_ACTION_LENS = {
+    0x00 => 0, 0x01 => 1, 0x02 => nil, 0x03 => nil, 0x04 => 8,
+    0x05 => nil, 0x06 => 1, 0x07 => 1, 0x08 => 0,
+    0x09 => 1, 0x0a => 1, 0x0b => 1, 0x0c => 0,
+    0x0d => 0, 0x0e => 0, 0x0f => nil, 0x10 => nil,
+    0x11 => 1, 0x12 => 5, 0x13 => 8, 0x14 => 8, 0x15 => 0,
+  }.freeze
+
   # ── Input Actions (from Hornwitser/factorio_dissector Lua plugin) ──
   # [action_id] => [name, data_len]
   #   data_len: 0 = no data, N = fixed N bytes, nil = variable/complex
@@ -40,11 +50,11 @@ ACTIONS = {
   2=>["begin_mining",0],
   3=>["stop_mining",0],
   4=>["toggle_driving",0],
-  5=>["open_gui",6],
+  5=>["open_gui",14],
   6=>["open_current_vehicle_gui",0],
-  7=>["connect_rolling_stock",0],
-  8=>["disconnect_rolling_stock",0],
-  9=>nil,
+  7=>["connect_rolling_stock",4],
+  8=>["disconnect_rolling_stock",4],
+  9=>["cursor_click_select",8],
   10=>["clear_cursor",0],
   11=>["reset_assembling_machine",0],
   12=>nil,
@@ -62,7 +72,7 @@ ACTIONS = {
   24=>["open_achievements_gui",0],
   25=>["cycle_blueprint_book_forwards",0],
   26=>["cycle_blueprint_book_backwards",0],
-  27=>["cycle_quality_up",0],
+  27=>["cycle_quality_up",1],
   28=>["cycle_quality_down",0],
   29=>nil,
   30=>nil,
@@ -96,11 +106,11 @@ ACTIONS = {
   58=>["cheat",0],
   59=>["toggle_blueprint_snap_to_grid",0],
   60=>nil,
-  61=>["open_character_gui",0],
+  61=>["open_character_gui",15],
   62=>["open_production_gui",0],
   63=>["open_logistics_gui",0],
-  64=>["open_blueprint_library_gui",2],
-  65=>["toggle_show_entity_info",0],
+  64=>["open_blueprint_library_gui",15],
+  65=>["toggle_show_entity_info",1],
   66=>nil,
   67=>["drop_item",8],
   68=>["build",9],
@@ -119,8 +129,8 @@ ACTIONS = {
   81=>["send_stack_to_trash",0],
   82=>["send_stacks_to_trash",0],
   83=>["inventory_transfer",5],
-  84=>nil,
-  85=>["craft",5],
+  84=>["server_tick_info",12],
+  85=>["craft",7],
   86=>["wire_dragging",8],
   87=>["change_shooting_state",9],
   88=>["setup_assembling_machine",2],
@@ -142,10 +152,10 @@ ACTIONS = {
   104=>["gui_click",nil],
   105=>["gui_confirmed",nil],
   106=>["write_to_console",nil],
-  107=>["market_offer",9],
+  107=>nil,
   108=>["change_train_stop_station",0],
-  109=>["change_active_item_group_for_crafting",25],
-  110=>["change_active_item_group_for_filters",5],
+  109=>["change_active_item_group_for_crafting",2],
+  110=>["change_active_item_group_for_filters",15],
   111=>["change_active_character_tab",1],
   112=>["gui_text_changed",nil],
   113=>["gui_checked_state_changed",nil],
@@ -166,7 +176,7 @@ ACTIONS = {
   128=>nil,
   129=>nil,
   130=>["start_repair",8],
-  131=>["deconstruct",8],
+  131=>["deconstruct",16],
   132=>["upgrade",0],
   133=>["copy",0],
   134=>["alternative_copy",0],
@@ -300,7 +310,7 @@ ACTIONS = {
   262=>["instantly_create_space_platform",nil],
   263=>["flush_opened_entity_specific_fluid",nil],
   264=>["change_picking_state",1],
-  265=>nil,
+  265=>["cursor_hover",8],
   266=>nil,
   267=>nil,
   268=>nil,
@@ -437,17 +447,62 @@ ACTIONS = {
 
   # ── Network Header ─────────────────────────────────────────────────
 
+  # Message types that always carry a 2-byte message_id after the flags
+  # byte, even without the fragmented flag (per factorio_dissector).
+  ALWAYS_HAS_MESSAGE_ID_TYPES = [2, 4].freeze
+
   def self.parse_network_header(data)
     return nil if data.bytesize < 1
     flags = data.getbyte(0)
-    {
+    msg_type = flags & 0x1F
+    hdr = {
       flags: flags,
-      msg_type: flags & 0x1F,
-      msg_name: MESSAGE_TYPES[flags & 0x1F] || "Unknown(#{flags & 0x1F})",
+      msg_type: msg_type,
+      msg_name: MESSAGE_TYPES[msg_type] || "Unknown(#{msg_type})",
       has_random: (flags & 0x20) != 0,
       fragmented: (flags & 0x40) != 0,
       last_frag: (flags & 0x80) != 0,
+      header_size: 1,
     }
+
+    # Variable-length header: flags(1), then when fragmented or the type
+    # always carries it: message_id(2, bit15=confirm) + frag_number(1 if
+    # fragmented) + confirm_count(1) + count*4 confirm items.
+    # Verified: ConnectionAcceptOrDeny pkt header = 9 bytes
+    # (0xc5 2f 85 00 01 01 00 00 00: flags + msg_id(0x852f, confirm) +
+    #  frag_number + confirm_count(1) + confirm_item(0x00000001)).
+    if hdr[:fragmented] || ALWAYS_HAS_MESSAGE_ID_TYPES.include?(msg_type)
+      return hdr if data.bytesize < 3
+      msg_id = data.unpack1('v', offset: 1)
+      hdr[:message_id] = msg_id
+      hdr[:confirm] = (msg_id & 0x8000) != 0
+      hdr[:header_size] = 3
+      if hdr[:fragmented]
+        hdr[:frag_number] = data.getbyte(3)
+        hdr[:header_size] = 4
+      end
+      if hdr[:confirm] && data.bytesize > hdr[:header_size]
+        count = data.getbyte(hdr[:header_size])
+        hdr[:confirm_count] = count
+        hdr[:header_size] += 1
+        hdr[:confirm_items] = []
+        count.to_i.times do
+          break if hdr[:header_size] + 4 > data.bytesize
+          hdr[:confirm_items] << data.unpack1('V', offset: hdr[:header_size])
+          hdr[:header_size] += 4
+        end
+      end
+    end
+    hdr
+  end
+
+  # ── Length-Prefixed String ─────────────────────────────────────────
+
+  # [uint32v len][bytes] — returns [next_offset, string] or [nil, nil]
+  def self.decode_string(data, offset)
+    noff, len = decode_uint32v(data, offset)
+    return [nil, nil] if len.nil? || noff + len > data.bytesize
+    [noff + len, data[noff, len]]
   end
 
   # ── Heartbeat ──────────────────────────────────────────────────────
@@ -488,7 +543,7 @@ ACTIONS = {
 
       count.times do
         break if offset >= data.bytesize || hb[:hit_unknown]
-        offset, tc = parse_tick_closure(data, offset, hb[:all_tick_closures_are_empty])
+        offset, tc = parse_tick_closure(data, offset, hb[:all_tick_closures_are_empty], is_server: is_server)
         hb[:tick_closures] << tc if tc
         hb[:hit_unknown] = tc[:hit_unknown] if tc
       end
@@ -502,11 +557,22 @@ ACTIONS = {
 
     # Synchronizer actions
     if hb[:has_synchronizer_action] && !hb[:hit_unknown]
+      sync_start = offset
       offset, count = decode_uint32v(data, offset)
-      count.to_i.times do
-        break if offset >= data.bytesize
-        offset, sa = parse_synchronizer_action(data, offset, is_server)
-        hb[:sync_actions] << sa if sa
+      # Sanity check: each sync action needs at least 3 bytes for server (1 type + 2 peer_id)
+      # or 1 byte for client (1 type). If count is impossibly large, skip.
+      min_per_sync = is_server ? 3 : 1
+      if count && count > 0 && offset + (count * min_per_sync) > data.bytesize
+        # Sync count is implausible — likely due to TC action length mismatch
+        offset = sync_start  # reset to try other parsing paths
+      else
+        count.to_i.times do
+          break if offset >= data.bytesize
+          offset, sa = parse_synchronizer_action(data, offset, is_server)
+          break unless sa
+          hb[:sync_actions] << sa
+          break if sa[:hit_unknown]
+        end
       end
     end
 
@@ -526,7 +592,7 @@ ACTIONS = {
 
   # ── Tick Closure ───────────────────────────────────────────────────
 
-  def self.parse_tick_closure(data, offset, is_empty)
+  def self.parse_tick_closure(data, offset, is_empty, is_server: false)
     return [offset, nil] if offset + 8 > data.bytesize
     tc = { tick: data.unpack1('Q<', offset: offset), actions: [], hit_unknown: false }
     offset += 8
@@ -554,8 +620,20 @@ ACTIONS = {
       tc[:hit_unknown] = true if act[:hit_unknown]
     end
 
+    # Server-to-client heartbeats: [server_tick_info][real action][metadata...]
+    # or [real action][metadata...]. Keep the server_tick_info wrapper (needed
+    # for player delta decoding; it is filtered at display) plus the FIRST real
+    # action, then drop trailing metadata entries.
+    if is_server && tc[:actions].size > 1
+      wrapper = tc[:actions].take_while { |a| a[:type] == 84 }
+      real = tc[:actions].find { |a| a[:type] != 84 && a[:type] != 0 }
+      tc[:actions] = real ? wrapper + [real] : [tc[:actions].first]
+      # Metadata actions may have set hit_unknown; reset so segment parsing proceeds
+      tc[:hit_unknown] = false
+    end
+
     # Parse segments — they contain action payloads (also adds actions not in input list)
-    if has_segments && offset < data.bytesize
+    if has_segments && offset < data.bytesize && !tc[:hit_unknown]
       seg_count = data.getbyte(offset)
       offset += 1
       seg_count.times do
@@ -593,13 +671,16 @@ ACTIONS = {
   # ── Input Action ───────────────────────────────────────────────────
 
   def self.parse_action(data, offset, last_index, is_drag: false)
+    type_offset = offset
     offset, type = decode_uint16v(data, offset)
     return [offset, nil] if type.nil?
+    delta_offset = offset
     offset, delta = decode_uint16v(data, offset)
     return [offset, nil] if delta.nil?
 
     raw_player = (last_index + delta) & 0xFFFF
     game_player = raw_player + 1
+    data_start = offset
     entry = ACTIONS[type]
     name = entry ? entry[0] : "Unknown(#{type})"
     alen = entry ? entry[1] : nil
@@ -611,6 +692,13 @@ ACTIONS = {
       elsif offset + 10 <= data.bytesize && data.getbyte(offset + 9) == 0x00 && offset + 10 < data.bytesize
         alen = 10  # ghost: trailing 0x00 byte
       end
+    end
+
+    # open_gui: variable length. Client sends 2 bytes [gui_type][flags];
+    # server echoes are the same 2 bytes, or 14 bytes when it appends entity
+    # ref + token + tick (observed both forms in the same session).
+    if type == 5
+      alen = (offset + 14 <= data.bytesize) ? 14 : 2
     end
 
     adata = nil
@@ -642,11 +730,16 @@ ACTIONS = {
         adata = nil
         hit_unknown = true
       end
+    else
+      # alen > 0 but not enough data available
+      adata = nil
+      hit_unknown = true
     end
 
     [offset, {
       type: type, name: name, player: raw_player, game_player: game_player,
       delta: delta, data: adata, hit_unknown: hit_unknown,
+      type_offset: type_offset, data_offset: data_start,
     }]
   end
 
@@ -658,28 +751,47 @@ ACTIONS = {
     offset += 1
     info = SYNCHRONIZER_ACTIONS[type] || "Unknown(0x#{type.to_s(16)})"
 
-    sa = { type: type, name: info, data: nil }
-    rest = data[offset..]
+    sa = { type: type, name: info, data: nil, hit_unknown: false }
 
     case type
-    when 0x02 # NewPeerInfo — contains username!
-      if rest.bytesize > 0
-        s_off, s_len = decode_uint32v(rest, 0)
-        if s_len && s_off + s_len <= rest.bytesize
-          sa[:username] = rest[s_off, s_len]
-          offset += s_off + s_len
-        end
-      end
-    when 0x03 # ClientChangedState
-      if !is_server && rest.bytesize >= 1
-        sa[:state] = rest.getbyte(0)
+    when 0x01 # PeerDisconnect — 1 byte reason
+      if offset < data.bytesize
+        sa[:reason] = data.getbyte(offset)
         offset += 1
       end
-    when 0x04 # ClientShouldStartSendingTickClosures (8 bytes)
-      if rest.bytesize >= 8
-        sa[:data] = rest[0, 8]
+    when 0x02 # NewPeerInfo — username string (uint32v-prefixed)
+      s_off, s_len = decode_uint32v(data, offset)
+      if s_len && s_off + s_len <= data.bytesize
+        sa[:username] = data[s_off, s_len]
+        offset = s_off + s_len
+      else
+        sa[:hit_unknown] = true
+      end
+    when 0x03 # ClientChangedState
+      if !is_server && offset < data.bytesize
+        sa[:state] = data.getbyte(offset)
+        offset += 1
+      end
+    when 0x04 # ClientShouldStartSendingTickClosures
+      if offset + 8 <= data.bytesize
+        sa[:data] = data[offset, 8]
         offset += 8
       end
+    else
+      # Use known lengths from SYNC_ACTION_LENS, or stop processing
+      slen = SYNC_ACTION_LENS[type]
+      if slen && offset + slen <= data.bytesize
+        sa[:data] = data[offset, slen] if slen > 0
+        offset += slen
+      else
+        sa[:hit_unknown] = true
+      end
+    end
+
+    # Server-to-client messages append a 2-byte sender peer_id after action data
+    if is_server && offset + 2 <= data.bytesize
+      sa[:peer_id] = data.unpack1('v', offset: offset)
+      offset += 2
     end
 
     [offset, sa]
@@ -687,13 +799,72 @@ ACTIONS = {
 
   # ── Connection Request Reply Confirm (username!) ───────────────────
 
+  # msg_type 4 payload (payload offset = header_size, typically 3):
+  #   client_id(4) + server_id(4) + instance_id(4) + username string +
+  #   password hash string + server key string + timestamp(8)
+  # Only the client_id and username are needed here.
   def self.parse_connection_confirm(data, offset)
     return nil if data.bytesize < offset + 12
+    client_id = data.unpack1('V', offset: offset)
     offset += 12  # clientID(4) + serverID(4) + instanceID(4)
     off, len = decode_uint32v(data, offset)
     return nil if len.nil? || off + len > data.bytesize
     username = data[off, len]
-    { username: username }
+    return nil if username.nil? || username.empty?
+    # Sanity: usernames are printable ASCII
+    return nil unless username.bytes.all? { |b| b >= 0x20 && b <= 0x7E }
+    { client_id: client_id, username: username }
+  end
+
+  # ── Connection Accept Or Deny (player list!) ───────────────────────
+
+  # msg_type 5 payload (payload offset = header_size, variable):
+  #   client_id(4) status(1) gameName serverHash description latency(1)
+  #   max_updates(u32v) game_id(4) steam_id(8) clientsPeerInfo
+  #     serverUsername map_saving_progress(1) savingFor(1+n*u16v)
+  #     clientPeerInfo: [u32v count][(u16v peer_id, username, flags...)]*
+  #   expect_seq(4) send_seq(4) new_peer_id(2) mods...
+  #
+  # NOTE: clientPeerInfo ids are NETWORK PEER ids, NOT game player
+  # indexes (verified: morganc's peer id=101 but game index=11).
+  # Returns { client_id:, status:, game_name:, server_hash:,
+  #           server_username:, peers: [{peer_id:, name:}] }
+  def self.parse_connection_accept(data, offset)
+    return nil if data.bytesize < offset + 20
+    res = {}
+    res[:client_id] = data.unpack1('V', offset: offset); offset += 4
+    res[:status] = data.getbyte(offset); offset += 1
+    offset, res[:game_name] = decode_string(data, offset)
+    offset, res[:server_hash] = decode_string(data, offset)
+    offset, res[:description] = decode_string(data, offset)
+    return nil if offset.nil?
+    offset += 1  # latency
+    offset, res[:max_updates] = decode_uint32v(data, offset)
+    offset += 4  # game_id
+    offset += 8  # steam_id
+
+    # clientsPeerInfo
+    offset, server_username = decode_string(data, offset)
+    return nil if offset.nil?
+    res[:server_username] = server_username
+    offset += 1  # map_saving_progress
+    saving_count = data.getbyte(offset); offset += 1
+    saving_count.to_i.times do
+      offset, = decode_uint16v(data, offset)
+    end
+    offset, client_count = decode_uint32v(data, offset)
+    return nil if client_count.nil? || client_count > 1024
+    res[:peers] = []
+    client_count.to_i.times do
+      break if offset.nil?
+      offset, peer_id = decode_uint16v(data, offset)
+      offset, name = decode_string(data, offset)
+      break if offset.nil?
+      flags = data.getbyte(offset); offset += 1
+      [0x01, 0x02, 0x04, 0x08, 0x10].each { |b| offset += 1 if (flags & b) != 0 }
+      res[:peers] << { peer_id: peer_id, name: name }
+    end
+    res
   end
 
   # ── Connection Request (version info) ──────────────────────────────
@@ -717,13 +888,134 @@ ACTIONS = {
     result = { header: hdr }
     case hdr[:msg_type]
     when 6, 7
+      # Heartbeat payload always starts at byte 1. The random flag (0x20) is
+      # header metadata only — it does NOT add bytes before the heartbeat
+      # (verified against factorio_dissector and live captures; treating it
+      # as a 4-byte offset silently dropped ~half of all heartbeat actions).
+      return nil if hdr[:fragmented]  # fragment payload is not a full message
       _, hb = parse_heartbeat(data, 1, is_server: hdr[:msg_type] == 7)
       result[:heartbeat] = hb
     when 2
-      result[:connection_request] = parse_connection_request(data, 1)
+      result[:connection_request] = parse_connection_request(data, hdr[:header_size])
     when 4
-      result[:connection_confirm] = parse_connection_confirm(data, 1)
+      result[:connection_confirm] = parse_connection_confirm(data, hdr[:header_size])
+    when 5
+      result[:connection_accept] = parse_connection_accept(data, hdr[:header_size])
     end
     result
+  end
+
+  # ── Chat Message Decoding (write_to_console) ─────────────────────
+
+  # Decode a write_to_console message payload into a plain string.
+  # Returns nil when the data is empty or not decodable.
+  #
+  # Observed payload formats (first byte is a message-type marker):
+  #   [0x04][text...]                    non-segment message, text to end
+  #   [0x05][meta(1)][text...]           segment message; meta = TOTAL message
+  #                                      length across segments; text to end
+  #   [0x0b][meta(1)][text...]           same layout as 0x05 (observed live)
+  #   [0x00|0x3d|0x01][meta(1)][text...] server echoes, text to end
+  #   localized string                   protobuf-like [key][mode][params...]
+  #   [uint32v len][text]                main-action-list form
+  #   raw text                           no prefix at all
+  def self.decode_chat(data)
+    return nil unless data && data.bytesize > 0
+    d = data.dup.force_encoding('BINARY')
+
+    # [0x04][text...] — non-segment format, text runs to end of payload
+    if d.getbyte(0) == 0x04 && d.bytesize > 1
+      return d[1..-1].force_encoding('UTF-8')
+    end
+
+    # [0x05|0x0b|0x24|0x29][meta(1)][text...] — meta byte is the TOTAL message
+    # length (may span multiple segments). Text runs to end of payload, NOT meta
+    # bytes — truncating to meta truncates long messages split across segments.
+    if [0x05, 0x0b, 0x24, 0x29].include?(d.getbyte(0)) && d.bytesize >= 2
+      text = d[2..-1]
+      return nil if text.empty?   # [type][meta] with no text = empty message
+      return text.force_encoding('UTF-8')
+    end
+
+    # Server echo formats: [0x00|0x3d|0x01][meta(1)][text...]
+    if d.getbyte(0) == 0x00 && d.bytesize > 2
+      return d[2..-1].force_encoding('UTF-8')
+    end
+    if d.getbyte(0) == 0x3d && d.bytesize > 2
+      return d[2..-1].force_encoding('UTF-8')
+    end
+    if d.getbyte(0) == 0x01 && d.bytesize > 2
+      return d[2..-1].force_encoding('UTF-8')
+    end
+
+    # Localized string format: [key_uint32v][mode(1)][params_count(1)][params...]
+    # mode: 0=Empty, 1=Translation, 2=Literal, 3=LiteralTranslation
+    msg = decode_localized_string(d)
+    return msg if msg
+
+    # Main action list format: [uint32v len][text]
+    off, slen = decode_uint32v(d, 0)
+    if slen && slen > 0 && off + slen <= d.bytesize
+      return d[off, slen].force_encoding('UTF-8')
+    end
+
+    # Raw text (no prefix)
+    d.force_encoding('UTF-8')
+  end
+
+  # Recursively decode a localized string (Factorio's protobuf-like format).
+  # Format: [key_uint32v][mode(1)][params_count(1)][params...]
+  # mode: 0=Empty, 1=Translation, 2=Literal, 3=LiteralTranslation
+  def self.decode_localized_string(data, depth = 0)
+    return nil if depth > 6 || data.bytesize < 4
+
+    off, slen = decode_uint32v(data, 0)
+    return nil unless slen && slen > 0 && off + slen + 2 <= data.bytesize
+
+    key = data[off, slen].force_encoding('UTF-8')
+    mode = data.getbyte(off + slen)
+    pcount = data.getbyte(off + slen + 1)
+    pos = off + slen + 2
+
+    case mode
+    when 0 then return ''                           # Empty
+    when 2 then return key                          # Literal: key is the text
+    when 3 then                                     # LiteralTranslation
+      parts = [key]
+      pcount.times do
+        sub = decode_localized_string(data[pos..], depth + 1)
+        break unless sub
+        parts << sub
+        pos = advance_ls(data, pos)
+      end
+      return parts.join('')
+    when 1                                          # Translation
+      parts = []
+      pcount.times do
+        sub = decode_localized_string(data[pos..], depth + 1)
+        break unless sub
+        parts << sub
+        pos = advance_ls(data, pos)
+      end
+      return "[#{key}](#{parts.join(', ')})" if parts.any?
+      return "[#{key}]"
+    end
+    nil
+  end
+
+  # Advance past one localized string, return next byte offset
+  def self.advance_ls(data, offset)
+    return data.bytesize if offset >= data.bytesize
+    off, slen = decode_uint32v(data, offset)
+    return data.bytesize unless slen
+    off += slen
+    return data.bytesize if off + 2 > data.bytesize
+    pcount = data.getbyte(off + 1)
+    off += 2
+    pcount.to_i.times do
+      off = advance_ls(data, off)
+      break if off >= data.bytesize
+    end
+    off
   end
 end

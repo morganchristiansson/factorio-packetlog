@@ -53,6 +53,17 @@ class PlayerDatabase
     @id_by_name[name]
   end
 
+  # Remove all entries for a name except the given id (used when the
+  # true game index is learned and may override peer-id-based guesses).
+  def remove_other_entries_for(name, keep_id)
+    @players.each do |id, n|
+      if n == name && id != keep_id.to_i
+        @players.delete(id)
+      end
+    end
+    rebuild_index
+  end
+
   def save
     return unless @path
     File.write(@path, JSON.pretty_generate(@players))
@@ -60,13 +71,18 @@ class PlayerDatabase
 
   private
 
+  def rebuild_index
+    @id_by_name = {}
+    @players.each { |id, name| @id_by_name[name] = id }
+  end
+
   def load
     raw = JSON.parse(File.read(@path))
     @players = raw.each_with_object({}) { |(k, v), h|
       next unless k =~ /^\d+$/
       h[k.to_i] = v
     }
-    @players.each { |id, name| @id_by_name[name] = id }
+    rebuild_index
   rescue JSON::ParserError
     @players = {}
     @id_by_name = {}
@@ -80,38 +96,64 @@ class PcapWriter
   def initialize(path)
     @path = path
     @file = File.open(path, 'wb')
-    # Write pcap global header
-    @file.write([
-      0xa1b2c3d4,  # magic (little endian)
-      2, 4,        # version major, minor
-      0, 0,        # timezone
-      0, 0,        # sigfigs
-      65535,       # snaplen
-      1,           # link type (Ethernet)
-    ].pack('VvvVVVV'))
+    # Write pcap global header directly (avoids pack issues)
+    @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
+    @file.write([2, 4].pack('v2'))  # version
+    @file.write([0, 0].pack('V2'))  # timezone, sigfigs
+    @file.write([65535].pack('V'))   # snaplen
+    @file.write([1].pack('V'))       # linktype = Ethernet
     @start_time = Time.now
+    # Buffered writes flushed by a BACKGROUND thread: the capture loop only
+    # appends to the buffer (fast, non-blocking). Flushing on the capture
+    # thread stalls it on disk I/O (the workspace is a Docker bind mount),
+    # which overflowed the kernel capture buffer during map downloads.
+    @mutex = Mutex.new
+    @buf = +''.b
+    @closed = false
+    @flush_thread = Thread.new { flush_loop }
   end
 
   def write_packet(ip_payload)
-    # We'll store the raw IP/UDP payload. To create a valid pcap we'd need
-    # full ethernet+IP+UDP headers, but for simplicity just wrap the UDP data
-    # with a fake Ethernet header.
-    ts = Time.now
-    ts_sec = ts.to_i
-    ts_usec = ((ts - ts_sec) * 1_000_000).to_i
+    write_record(Time.now, ip_payload)
+  end
 
-    # Create a minimal ethernet frame with the UDP payload
-    # This won't be a valid pcap for all tools but preserves the data
-    @file.write([
-      ts_sec, ts_usec,
-      ip_payload.bytesize,
-      ip_payload.bytesize,
-    ].pack('VVVV'))
-    @file.write(ip_payload)
+  # Write a real captured Ethernet frame as-is (fast path for live capture;
+  # avoids rebuilding fake IP/UDP headers per packet).
+  def write_frame(frame, ts = Time.now)
+    write_record(ts, frame)
   end
 
   def close
+    @closed = true
+    @flush_thread.join(2)
+    @mutex.synchronize do
+      @file.write(@buf) unless @buf.empty?
+      @buf = +''.b
+    end
     @file.close if @file
+  end
+
+  private
+
+  def write_record(ts, data)
+    ts_sec = ts.to_i
+    ts_usec = ((ts.to_f - ts_sec) * 1_000_000).to_i
+    hdr = [ts_sec, ts_usec, data.bytesize, data.bytesize].pack('VVVV')
+    @mutex.synchronize { @buf << hdr << data.b }
+  end
+
+  def flush_loop
+    until @closed
+      sleep 0.2
+      chunk = @mutex.synchronize do
+        c = @buf
+        @buf = +''.b
+        c
+      end
+      @file.write(chunk) unless chunk.empty?
+    end
+  rescue IOError
+    # file closed
   end
 end
 
@@ -175,10 +217,15 @@ end
 # Live Capture (pcaprub)
 # ─────────────────────────────────────────────────────────────────────
 class LiveCapture
-  def initialize(interface:, port:, bpf: nil)
+  def initialize(interface:, port:, bpf: nil, transfer_block_sink: nil)
     @interface = interface
     @port = port
     @bpf = bpf || (port ? "udp port #{port}" : 'udp')
+    @last_drop_report = 0
+    # Optional sink for map-download TransferBlocks: when set, transfer
+    # frames are written straight here (e.g. the pcap writer) and skipped
+    # from the parse pipeline entirely.
+    @transfer_block_sink = transfer_block_sink
   end
 
   def self.list_interfaces
@@ -189,24 +236,65 @@ class LiveCapture
     ['(none found)']
   end
 
+  # Report libpcap kernel-buffer drops so capture loss is visible instead
+  # of silently corrupting the session. stats => { 'recv' =>, 'drop' =>,
+  # 'idrop' => }. 'drop' = packets the kernel buffer overflowed (the
+  # capture loop was too slow); 'idrop' = dropped by the interface.
+  def report_drops(cap, force: false)
+    st = cap.stats
+    return unless st.is_a?(Hash)
+    drop = st['drop'].to_i
+    idrop = st['idrop'].to_i
+    return if drop.zero? && idrop.zero?
+    return if !force && drop - @last_drop_report < 1000
+    @last_drop_report = drop
+    msg = +"[capture] kernel buffer drops: #{drop}"
+    msg << " (interface: #{idrop})" if idrop > 0
+    msg << " — capture can't keep up; use tcpdump for lossless capture" if drop > 0
+    puts msg
+  end
+
   def each_packet(&block)
     require 'pcaprub'
 
-    cap = PCAPRUB::Pcap.open_live(@interface, 65535, true, 1000)
+    # pcaprub 0.13.3 emits a one-time cosmetic "undefining the allocator of
+    # T_DATA class" warning on the first open_live (Ruby 3.2 data-object
+    # machinery + pcaprub's old-style Data_Make_Struct). Capture works fine;
+    # silence it.
+    old_verbose = $VERBOSE
+    $VERBOSE = nil
+    begin
+      cap = PCAPRUB::Pcap.open_live(@interface, 65535, true, 1000)
+    ensure
+      $VERBOSE = old_verbose
+    end
     cap.setfilter(@bpf)
 
     pkt_num = 0
-    loop do
-      pkt = cap.next
-      unless pkt
-        sleep 0.01
-        next
-      end
 
+    # Blocking batch read: pcaprub's each_data loops on pcap_dispatch and
+    # waits on the capture fd when the buffer is empty (rb_thread_wait_fd).
+    # This drains the kernel buffer continuously — the old next()+sleep(0.01)
+    # poll let the kernel buffer overflow during map-download bursts
+    # (~20k pps), silently dropping blocks.
+    cap.each_data do |pkt|
       # Parse Ethernet header
       next if pkt.bytesize < 14
       eth_type = pkt.unpack1('n', offset: 12)
       next unless eth_type == 0x0800  # IPv4 only for now
+
+      ihl = (pkt.getbyte(14) & 0x0F) * 4
+      next if pkt.bytesize < 14 + ihl + 8
+
+      # Fast path: map-download TransferBlocks (msg 13) need no parsing at
+      # all — persist the frame if saving and skip the full yield/parse
+      # pipeline (the bottleneck that overflowed the buffer before).
+      if (pkt.getbyte(14 + ihl + 8) & 0x1F) == 13
+        if @transfer_block_sink
+          @transfer_block_sink.write_frame(pkt)
+        end
+        next
+      end
 
       raw = pkt[14..]
       next if raw.nil? || raw.bytesize < 20
@@ -226,13 +314,18 @@ class LiveCapture
       yield(pkt_num, ts,
             raw[12..15].bytes.join('.'),
             raw[16..19].bytes.join('.'),
-            sport, dport, udp_data)
+            sport, dport, udp_data, pkt)
+
+      # Surface capture loss early (report when it jumps by >= 1000)
+      report_drops(cap) if pkt_num % 50_000 == 0
     end
   rescue PCAPRUB::PCAPRUBError => e
     puts "Capture error: #{e}"
     puts "Available interfaces: #{self.class.list_interfaces.join(', ')}"
   rescue Interrupt
     # Graceful exit
+  ensure
+    report_drops(cap, force: true) if cap
   end
 end
 
@@ -246,10 +339,22 @@ class FactorioSniffer
     @grief = nil
     @stats = { packets: 0, factorio_packets: 0, actions: 0 }
     @pcap_writer = options[:save_capture] ? PcapWriter.new(options[:save_capture]) : nil
+    @unknown_writer = options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
       @item_db = ItemDB.new(options[:item_db])
     end
+    # Self (this client) tracking: we learn our own username from the
+    # ConnectionRequestReplyConfirm and our own game player index from our
+    # outgoing (C→S) heartbeat actions. This lets us correct the peer-id
+    # based guesses from ConnectionAcceptOrDeny / NewPeerInfo, which use
+    # NETWORK peer ids — those only equal game indexes for new joiners.
+    @self_ip = nil
+    @self_name = nil
+    @self_index = nil  # 0-indexed game player index of this client
+    # peer_id (network) -> name, for join/leave events (peer ids are NOT
+    # game indexes; game indexes come from heartbeat actions instead).
+    @peer_names = {}
   end
 
   def run
@@ -260,6 +365,7 @@ class FactorioSniffer
       capturer = LiveCapture.new(
         interface: @options[:interface],
         port: @options[:port],
+        transfer_block_sink: @pcap_writer,
       )
       puts "Listening on #{@options[:interface]} port #{@options[:port]}..."
       puts "Press Ctrl+C to stop."
@@ -272,19 +378,33 @@ class FactorioSniffer
     print_summary
     @player_db.save
     @pcap_writer&.close
+    @unknown_writer&.close
   end
 
   private
 
-  def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data)
+  def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data, raw_frame = nil)
     @stats[:packets] += 1
 
-    # Save to pcap if requested
+    # Fast path for map download bursts: TransferBlock (msg 13) packets carry
+    # raw save data — nothing to parse, and at ~20k pps the per-packet parse
+    # cost is what overflowed the capture buffer before. Just persist the
+    # frame (if saving) and move on.
+    if raw_frame && (udp_data.getbyte(0) & 0x1F) == 13
+      @pcap_writer.write_frame(raw_frame, Time.at(ts)) if @pcap_writer
+      return
+    end
+
+    # Save to pcap if requested. When a raw frame is available (live capture)
+    # write it as-is — much cheaper than rebuilding a fake IP/UDP packet per
+    # packet, which matters during map-download bursts (~20k pps).
     if @pcap_writer
-      # Reconstruct a minimal IP+UDP packet for storage
-      # This won't be fully standards-compliant but preserves the data
-      pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
-      @pcap_writer.write_packet(pkt)
+      if raw_frame
+        @pcap_writer.write_frame(raw_frame, Time.at(ts))
+      else
+        pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
+        @pcap_writer.write_packet(pkt)
+      end
     end
 
     # Apply local IP filter if specified
@@ -298,16 +418,77 @@ class FactorioSniffer
     @stats[:factorio_packets] += 1
     hdr = parsed[:header]
 
+    # Connection confirm carries this client's username. The packet is sent
+    # by the client, so src_ip identifies us for self-index learning. A new
+    # connection (e.g. joining a second server) may assign a new game index,
+    # so reset the learned index to re-learn it from the next C→S heartbeat.
     if parsed[:connection_confirm]
-      username = parsed[:connection_confirm][:username]
+      cc = parsed[:connection_confirm]
+      if cc[:username]
+        @self_ip = src_ip
+        @self_name = cc[:username]
+        @self_index = nil
+      end
+    end
+
+    # ConnectionAcceptOrDeny carries the server's player list: serverUsername
+    # (host) + clientPeerInfo (peer_id + name for every online player). These
+    # ids are NETWORK peer ids, which equal the game player index for new
+    # joiners but NOT for returning players. We register them as candidate
+    # mappings; the true index is confirmed/learned from heartbeat actions.
+    if parsed[:connection_accept]
+      ca = parsed[:connection_accept]
+      ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+      puts "#{ts_str}  [server]  game=\"#{ca[:game_name]}\" host=#{ca[:server_username]}"
+      ca[:peers].each do |p|
+        @peer_names[p[:peer_id]] = p[:name]
+        pid = p[:peer_id] + 1
+        @player_db.add(pid, p[:name])
+        puts "#{ts_str}  [server]  online peer #{p[:peer_id]} -> #{p[:name]} (candidate index #{pid})"
+      end
     end
 
     return unless (hb = parsed[:heartbeat])
 
-    # synchronizer actions (NewPeerInfo can give usernames)
+    # synchronizer actions
     hb[:sync_actions]&.each do |sa|
-      if sa[:username]
-        @player_db.add(0, sa[:username])
+      if sa[:username]  # NewPeerInfo — a player joined (or is this client)
+        @peer_names[sa[:peer_id]] = sa[:username]
+        pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
+        @player_db.add(pid, sa[:username])
+        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+        # Don't print our own join as "joined the game" (we know we connected)
+        unless @self_name == sa[:username]
+          puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})"
+        end
+      end
+      if sa[:name] == 'PeerDisconnect' && sa[:peer_id]
+        pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
+        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+        puts "#{ts_str}  #{pname} left the game"
+      end
+    end
+
+    # Learn this client's own game player index from its outgoing heartbeats.
+    # The first real action in a C→S tick closure carries the sender's index
+    # (delta chain starts from 0xFFFF, so the first delta IS the index+1).
+    if hdr[:msg_type] == 6 && @self_name && src_ip == @self_ip && @self_index.nil? && hb[:tick_closures]&.any?
+      idx = nil
+      hb[:tick_closures].each do |tc|
+        real = tc[:actions]&.find { |a| a[:type] != 0 && a[:type] != 84 }
+        if real
+          idx = real[:player]
+          break
+        end
+      end
+      if idx
+        @self_index = idx
+        @player_db.add(idx + 1, @self_name)
+        # Peer-id-based guess (peer_id+1) may differ for returning players;
+        # remove any other slot claiming our name.
+        @player_db.remove_other_entries_for(@self_name, idx + 1)
+        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+        puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
       end
     end
 
@@ -315,12 +496,19 @@ class FactorioSniffer
     # Ghost flag is in bit 0 of next_receive timeshift
     @ghost_mode = hb[:next_receive] ? (hb[:next_receive] & 1) == 1 : false
     
-    # Warn when hit_unknown stops parsing — indicates wrong data length
+    # Validation warning when hit_unknown occurs
     if hb[:hit_unknown]
       tc = hb[:tick_closures]&.last
       if tc&.dig(:actions, -1)
         last_act = tc[:actions][-1]
-        warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
+        if @options[:validate]
+          warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
+        end
+        # Save unknown packet for analysis
+        if @unknown_writer
+          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
+          @unknown_writer.write_packet(pkt)
+        end
       end
     end
     
@@ -332,33 +520,51 @@ class FactorioSniffer
     end
   end
 
-  # Build a fake pcap packet with IP+UDP headers
+  # Build a minimal Ethernet+IP+UDP packet for pcap storage.
+  # Optimized: per-flow template with a fast checksum (the old version
+  # recomputed the IP checksum with a byte loop for every packet, which was
+  # a bottleneck during map-download bursts).
   def build_fake_ip_udp(src_ip, dst_ip, sport, dport, payload)
-    src_bytes = src_ip.split('.').map(&:to_i).pack('C4')
-    dst_bytes = dst_ip.split('.').map(&:to_i).pack('C4')
+    # Template per flow: eth(14) + IP header(20, len+cksum placeholder) +
+    # UDP header(8). Only the length words and checksum vary per packet.
+    @pkt_templates ||= {}
+    key = [src_ip, dst_ip, sport, dport]
+    tmpl = @pkt_templates[key] ||= begin
+      src_bytes = src_ip.split('.').map(&:to_i).pack('C4')
+      dst_bytes = dst_ip.split('.').map(&:to_i).pack('C4')
+      eth = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff].pack('C6') +  # dest MAC
+            [0x00, 0x00, 0x00, 0x00, 0x00, 0x00].pack('C6') +  # src MAC
+            [0x0800].pack('n')                                  # EtherType IPv4
+      # IP header prefix: ver/ihl, tos, LEN(2B @16), id, flags/frag,
+      # ttl, proto(17), CKSUM(2B @24), src(4), dst(4)
+      ip = "\x45\x00" + "\x00\x00" + "\x00\x00\x00\x00" +
+           "\x40\x11" + "\x00\x00" + src_bytes + dst_bytes
+      udp = [sport, dport].pack('nn')
+      # precomputed base of the IP checksum (16-bit words, minus the
+      # length word and checksum word, one's-complement folding deferred)
+      words = ip.unpack('n10')
+      # words: [ver/ihl+tos, len, id, frag, ttl/proto, cksum, src_hi,
+      #         src_lo, dst_hi, dst_lo] — include all constant words
+      base = words[0] + words[2] + words[3] + words[4] +
+             words[6] + words[7] + words[8] + words[9]
+      [eth + ip, udp, base]
+    end
+    eth_ip, udp_hdr, csum_base = tmpl
 
     udp_len = 8 + payload.bytesize
-    udp_hdr = [sport, dport, udp_len, 0].pack('nnnn')
+    total_len = 20 + udp_len
 
-    ip_total_len = 20 + udp_len
-    ip_hdr = [0x45, 0, ip_total_len, 0, 0, 0, 64, 17, 0].pack('CCnCCnCCn')
-    # Calculate IP checksum
-    ip_hdr += [0, 0].pack('n')
-    ip_hdr[10, 2] = [checksum(ip_hdr)].pack('n')
-    ip_hdr += src_bytes + dst_bytes
-
-    eth_hdr = ["\x00" * 6, "\x00" * 6, [0x0800].pack('n')].join
-    eth_hdr + ip_hdr + udp_hdr + payload
-  end
-
-  def checksum(data)
-    sum = 0
-    data.bytes.each_slice(2) do |b1, b2|
-      sum += (b1 << 8) | (b2 || 0)
-    end
+    # IP checksum = ~ones_complement_sum(words); only the length word varies.
+    sum = csum_base + total_len
     sum = (sum >> 16) + (sum & 0xFFFF)
-    sum = (sum >> 16) + sum
-    (~sum) & 0xFFFF
+    sum += sum >> 16
+    cksum = (~sum) & 0xFFFF
+
+    pkt = eth_ip.dup
+    pkt[16, 2] = [total_len].pack('n')
+    pkt[24, 2] = [cksum].pack('n')
+    pkt << udp_hdr << [udp_len, 0].pack('nn') << payload
+    pkt
   end
 
   DIR_NAMES = %w[north northnortheast northeast eastnortheast east eastsoutheast southeast southsoutheast south southsouthwest southwest westsouthwest west westnorthwest northwest northnorthwest].freeze
@@ -369,6 +575,8 @@ class FactorioSniffer
     STOP_WALKING = 1
     BEGIN_MINING = 2
     STOP_MINING = 3
+    CONNECT_ROLLING_STOCK = 7
+    DISCONNECT_ROLLING_STOCK = 8
     TOGGLE_DRIVING = 4
     OPEN_GUI = 5
     SETUP_ASSEMBLING_MACHINE = 88
@@ -398,31 +606,13 @@ class FactorioSniffer
     FAST_ENTITY_SPLIT = 281
     WRITE_TO_CONSOLE = 106
     FAST_ENTITY_TRANSFER = 278
+    CURSOR_HOVER = 265
+    CURSOR_CLICK_SELECT = 9
     PLAYER_LEAVE_GAME = 247
     SERVER_COMMAND = 209
     OPEN_TRAIN_GUI = 289
     SET_ENTITY_COLOR = 291
     SET_TRAINS_LIMIT = 313
-  end
-
-  def decode_action_string(act)
-    return nil unless act[:data] && act[:data].bytesize > 0
-    d = act[:data]
-    # Segment format (outgoing): [0x05][text_len][text]
-    if d.getbyte(0) == 0x05 && d.bytesize >= 3
-      text_len = d.getbyte(1)
-      if text_len + 2 <= d.bytesize
-        return d[2, text_len].force_encoding('UTF-8')
-      end
-    end
-    # Non-segment format: [0x04][text]
-    if d.getbyte(0) == 0x04 && d.bytesize > 1
-      return d[1..-1].force_encoding('UTF-8')
-    end
-    # Standard uint32v-prefixed string
-    off, slen = FactorioProtocol.decode_uint32v(d, 0)
-    return nil unless slen && off + slen <= d.bytesize
-    d[off, slen].force_encoding('UTF-8')
   end
 
   def format_action_data(act)
@@ -455,8 +645,16 @@ class FactorioSniffer
         y = raw_y / 256.0
         return " pos=(#{'%.3f' % x}, #{'%.3f' % y})"
       end
+    when ActionType::DECONSTRUCT
+      if d.bytesize >= 16
+        x1 = d.unpack1('i', offset: 0)
+        y1 = d.unpack1('i', offset: 4)
+        x2 = d.unpack1('i', offset: 8)
+        y2 = d.unpack1('i', offset: 12)
+        return " area=(#{'%.3f' % (x1/256.0)}, #{'%.3f' % (y1/256.0)})-(#{'%.3f' % (x2/256.0)}, #{'%.3f' % (y2/256.0)})"
+      end
     when ActionType::OPEN_ITEM, ActionType::SELECTED_ENTITY_CHANGED,
-         ActionType::USE_ITEM, ActionType::START_REPAIR, ActionType::DECONSTRUCT
+         ActionType::USE_ITEM, ActionType::START_REPAIR
       if d.bytesize >= 4
         eid = d.unpack1('V')
         return " entity=##{eid}"
@@ -489,7 +687,33 @@ class FactorioSniffer
         return " #{item_name} #{act}"
       end
     when ActionType::OPEN_GUI
-      return "" if d.bytesize >= 2
+      if d.bytesize >= 14
+        gt = d.getbyte(0)
+        flag = d.getbyte(1)
+        # Bytes 2-5: stable entity reference (tag + instance ID)
+        ref_tag = d.getbyte(2)
+        ref_hi = d.getbyte(3)
+        ref_lo = d.unpack1('v', offset: 4)
+        ref_id = (ref_hi << 16) | ref_lo
+        # Bytes 6-9: per-call token (changes each invocation, not entity ID)
+        token = d.unpack1('V', offset: 6)
+        tick = d.unpack1('V', offset: 10) + 1
+        gui_names = { 0x30 => 'entity', 0x31 => 'entity_close' }
+        gname = gui_names[gt] || "type_#{gt}"
+        state = flag == 0 ? 'open' : 'close'
+        return " #{state} #{gname} ref=#{ref_tag}:#{ref_id} tok=#{token} tick=#{tick}"
+      end
+    when ActionType::CURSOR_HOVER
+      if d.bytesize >= 8
+        flags = d.getbyte(0)
+        tick = d.unpack1('V', offset: 1)
+        return " flags=#{flags} tick=#{tick}"
+      end
+    when ActionType::CURSOR_CLICK_SELECT
+      if d.bytesize >= 8
+        tick = d.unpack1('V', offset: 0)
+        return " tick=#{tick}"
+      end
     when ActionType::REMOTE_VIEW_SURFACE
       if d.bytesize >= 4
         surf_id = d[0, 4].unpack1('N')
@@ -497,6 +721,8 @@ class FactorioSniffer
       end
     when ActionType::SETUP_ASSEMBLING_MACHINE
       return " recipe=#{d.unpack1('v')}" if d.bytesize >= 2
+    when ActionType::CONNECT_ROLLING_STOCK, ActionType::DISCONNECT_ROLLING_STOCK
+      return " ref=#{d.unpack1('V')}" if d.bytesize >= 4
     when ActionType::PIPETTE
       if d.bytesize >= 9
         src = d.getbyte(0)
@@ -558,7 +784,7 @@ class FactorioSniffer
 
     # Chat messages
     if act[:name] == 'write_to_console'
-      msg = decode_action_string(act)
+      msg = FactorioProtocol.decode_chat(act[:data])
       if msg
         puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
         return
@@ -568,14 +794,12 @@ class FactorioSniffer
     # Skip noise only in quiet mode
     return if @options[:quiet] && FactorioProtocol::NOISE_ACTIONS.include?(act[:name])
     return if act[:name].start_with?('Unknown')
-
-    # Skip invalid player IDs if max_players is set
-    if @options[:max_players] && pid > @options[:max_players]
-      if @options[:verbose]
-        puts "#{ts_str}  #{arrow} #{pname.ljust(16)} #{act[:name].ljust(28)} [skipped: invalid player #{pid}]"
-      end
-      return
-    end
+    # Skip server-internal actions (no real player)
+    return if act[:player] == 0xFFFF
+    # Skip 'nothing' (type 0) - these are server padding/metadata after echoed actions
+    return if act[:type] == 0
+    # Skip server_tick_info (type 84) - server wrapper action (hash+tick) in every server heartbeat
+    return if act[:name] == 'server_tick_info'
 
     # Format action data (position, entity refs, etc.)
     data_str = format_action_data(act)
@@ -588,15 +812,6 @@ class FactorioSniffer
   end
 
   def print_summary
-    puts
-    puts "── Summary ──"
-    puts "Packets seen: #{@stats[:packets]}"
-    puts "Factorio packets: #{@stats[:factorio_packets]}"
-    puts "Player actions: #{@stats[:actions]}"
-    puts "Known players: #{@player_db.players.size}"
-    @player_db.players.each { |id, name| puts "  Player #{id}: #{name}" }
-
-
   end
 end
 
@@ -618,10 +833,11 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('-p', '--port PORT', Integer, "UDP port (default: #{DEFAULT_PORT})") { |v| options[:port] = v }
     opts.on('--player-db PATH', "Player database file (default: #{DEFAULT_PLAYER_DB})") { |v| options[:player_db] = v }
     opts.on('--local-ip IP', 'Only show outgoing packets from this IP (filters out all server broadcasts)') { |v| options[:local_ip] = v }
-    opts.on('--max-players N', Integer, 'Max valid player ID (skip actions with higher IDs)') { |v| options[:max_players] = v }
     opts.on('--save-capture PATH', 'Save captured packets to a pcap file') { |v| options[:save_capture] = v }
+    opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
     opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }
     opts.on('--dump-raw-types', 'Dump raw action type IDs with hex data (for reverse engineering)') { |v| options[:dump_raw_types] = v }
+    opts.on('--validate', 'Show warnings about unknown action types and potential length mismatches') { |v| options[:validate] = v }
     opts.on('-q', '--quiet', 'Quiet mode: hide noise actions (wire_dragging, nothing)') { |v| options[:quiet] = v }
 
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }

@@ -1,0 +1,3 @@
+Action: write_to_console type=106 player=6
+Data: 050a6a696d626f2070696e67
+Source UDP packet: /workspace/spec/fixtures/chat_05.bin

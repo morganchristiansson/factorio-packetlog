@@ -1,0 +1,3 @@
+Action: build type=68 player=1
+Data: 00fbffff000100000c0000
+Source UDP packet: /workspace/spec/fixtures/build.bin

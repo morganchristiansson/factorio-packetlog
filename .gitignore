@@ -1,0 +1,8 @@
+# Capture artifacts
+*.pcap
+
+# Runtime state
+players.json
+
+# Large game reference dumps (external/ is downloaded/generated)
+external/

@@ -112,3 +112,16 @@ To add a fixture from a live capture:
 2. Verify the expected parse output manually.
 3. Add it to `spec/fixtures/packets.rb` with the expected actions.
 4. Run `ruby -Ilib spec/packet_fixtures_spec.rb`.
+
+## Additional Notes
+
+- [`protocol-notes.md`](protocol-notes.md) — session-verified findings:
+  fixed parsing issues, unknown types, chat message formats, server echo
+  metadata suppression, verified echo data lengths.
+- [`player-mapping.md`](player-mapping.md) — peer IDs vs game player
+  indexes, where player names live in the save, red herrings.
+- [`server-mode.md`](server-mode.md) — running the sniffer on the game
+  server host: server mode semantics, auto-detection, RCON roster, hot
+  reload.
+- Save/map-download internals: [`save-file-format.md`](save-file-format.md)
+  and [`save/`](save/).

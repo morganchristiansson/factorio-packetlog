@@ -23,7 +23,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
 
 # ── npm global packages ─────────────────────────────────────────────────────
-RUN npm install -g @earendil-works/pi-coding-agent@0.82.0 && \
+RUN npm install -g @earendil-works/pi-coding-agent@0.83.0 && \
+    pi install npm:@narumitw/pi-retry && \
     pi --version
 
 # ── Ruby gems for packet capture ─────────────────────────────────────────────

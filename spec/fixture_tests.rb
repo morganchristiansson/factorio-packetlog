@@ -66,13 +66,15 @@ class FixtureTests < Minitest::Test
     assert tick > 0
   end
 
-  # ── SelectedEntityChangedVeryClose (type 265) fixture ──────────
+  # ── ChangePickingState (type 265) fixture ─────────────────────
+  # Captured as type 265 (was misidentified as selected_entity_changed_*);
+  # live defines: 265 = change_picking_state.
 
-  def test_selected_entity_changed_very_close_from_fixture
-    result = parse_fixture('selected_entity_changed_very_close')
+  def test_change_picking_state_from_fixture
+    result = parse_fixture('change_picking_state')
     actions = extract_actions(result)
     act = actions.find { |a| a[:type] == 265 }
-    refute_nil act, 'Expected selected_entity_changed_very_close action'
+    refute_nil act, 'Expected change_picking_state action'
     d = act[:data]
     # client form: [payload(1)][tick(4)][pad(4)]
     assert_equal 9, d.bytesize

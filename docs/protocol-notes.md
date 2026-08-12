@@ -188,7 +188,7 @@ Client (C→S) format — 8 bytes:
   `select_next_valid_gun` Player_59). Locked in by fixtures
   `client_open_gui_8b{,_2,_3}`. See `docs/actions/005-open_gui.md`.
 
-## selected_entity_changed family (types 265-268) + selected_entity_cleared (9)
+## selected_entity_changed family (types 266-268) + selected_entity_cleared (9)
 
 Hover/selection actions, **real names** — verified by correlating
 `/toggle-action-logging` output with the capture by tick (log tick == packet
@@ -197,24 +197,33 @@ heartbeat tick):
 | Type | Name | C→S payload |
 |------|------|-------------|
 | 9 | selected_entity_cleared | 0 (`[tick][pad]`) |
-| 265 | selected_entity_changed_very_close | 1 |
-| 266 | selected_entity_changed_based_on_unit_number | 1 (best guess) |
+| 266 | selected_entity_changed_very_close | 1 |
 | 267 | selected_entity_changed_very_close_precise | 2 |
 | 268 | selected_entity_changed_relative | 4 |
 
 C→S: `[payload][tick(4)][pad(4)]`; S→C: `[payload][ref(4)][token(4)][tick-1(4)][pad(4)]`.
 The log tick equals the packet hb tick, and the data tick field = hb tick - 3.
-Previously working names: `cursor_hover` (265), `cursor_select` (9). The
-Hornwitser dissector table (old version) lists 267/268 shifted by one, which
-initially misnamed them. See `docs/actions/265-selected_entity_changed_very_close.md`.
+`selected_entity_changed_based_on_unit_number` does not exist in 2.1.14
+(removed); type 265 is `change_picking_state` (live defines).
+`close_remote_view` (262) and `close_gui` (60) use the same wire shape.
+See `docs/actions/266-selected_entity_changed_very_close.md`.
 
 ## zoom_around_point (128), move_on_pan (129), render_mode_changed (310)
 
 Identified with the same tick-correlation: 128 = zoom_around_point (3 doubles
 = position + zoom, field order unverified), 129 = move_on_pan (17B payload:
-pos int32×2 in 1/256 tiles + int + float + byte, semantics unverified — 1
-sample), 310 = render_mode_changed (1-byte mode). Same
-`[payload][tick][pad]` C→S / `[payload][ref][token][tick-1][pad]` S→C shapes.
+pos int32×2 in 1/256 tiles + int + float + byte, semantics unverified), 310 =
+render_mode_changed (1-byte mode). Same `[payload][tick][pad]` C→S /
+`[payload][ref][token][tick-1][pad]` S→C shapes.
+
+## ACTIONS table alignment (2026-08-12)
+
+The full ACTIONS table was rebuilt against the **live** `defines.input_action`
+(via RCON, 2.1.14). The previous table and the Hornwitser dissector predate
+`super_forced_select_area` being inserted at type 209 — everything ≥209 was
+shifted by one (e.g. 279 was misnamed rotate_entity, 262 was misnamed
+instantly_create_space_platform; those are fast_entity_transfer and
+close_remote_view, and 263 = instantly_create_space_platform).
 
 ## Client action tick trailer (C→S heartbeats)
 

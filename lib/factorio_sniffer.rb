@@ -397,9 +397,9 @@ class FactorioSniffer
     BEGIN_MINING_TERRAIN = 70
     CHANGE_RIDING_STATE = 71
     OPEN_ITEM = 73
-    REMOTE_VIEW_SURFACE = 259
-    QUICK_BAR_SET = 244
-    QUICK_BAR_PICK = 245
+    REMOTE_VIEW_SURFACE = 260
+    QUICK_BAR_SET = 245
+    QUICK_BAR_PICK = 246
     PIPETTE = 90
     CURSOR_TRANSFER = 78
     STACK_TRANSFER = 80
@@ -409,29 +409,28 @@ class FactorioSniffer
     CHANGE_SHOOTING_STATE = 87
     DROP_ITEM = 67
     BUILD = 68
-    USE_ITEM = 119
+    USE_ITEM = 124
     START_REPAIR = 130
     DECONSTRUCT = 131
     COPY = 133
     CHEAT = 58
     STOP_DRAG_BUILD = 48
-    ROTATE_ENTITY = 279
-    FAST_ENTITY_SPLIT = 281
+    ROTATE_ENTITY = 280
+    FLIP_ENTITY = 281
+    FAST_ENTITY_SPLIT = 282
     WRITE_TO_CONSOLE = 106
-    FAST_ENTITY_TRANSFER = 278
-    SELECTED_ENTITY_CHANGED_VERY_CLOSE = 265
-    SELECTED_ENTITY_CHANGED_BASED_ON_UNIT_NUMBER = 266
+    FAST_ENTITY_TRANSFER = 279
+    CHANGE_PICKING_STATE = 265
+    SELECTED_ENTITY_CHANGED_VERY_CLOSE = 266
     SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE = 267
     SELECTED_ENTITY_CHANGED_RELATIVE = 268
     SELECTED_ENTITY_CLEARED = 9
     ZOOM_AROUND_POINT = 128
     MOVE_ON_PAN = 129
     RENDER_MODE_CHANGED = 310
-    PLAYER_LEAVE_GAME = 247
-    SERVER_COMMAND = 209
-    OPEN_TRAIN_GUI = 289
-    SET_ENTITY_COLOR = 291
-    SET_TRAINS_LIMIT = 313
+    OPEN_TRAIN_GUI = 290
+    SET_ENTITY_COLOR = 292
+    SET_TRAINS_LIMIT = 314
   end
 
   def format_action_data(act)
@@ -538,12 +537,11 @@ class FactorioSniffer
         return " #{state} #{gname} tick=#{tick}"
       end
     when ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE,
-         ActionType::SELECTED_ENTITY_CHANGED_BASED_ON_UNIT_NUMBER,
          ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE,
          ActionType::SELECTED_ENTITY_CHANGED_RELATIVE
-      # Client form: [payload][tick(4)][pad(4)] — payload len 1/1/2/4
+      # Client form: [payload][tick(4)][pad(4)] — payload len 1/2/4
       # Server echo: [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
-      plen = { 265 => 1, 266 => 1, 267 => 2, 268 => 4 }[act[:type]] || 0
+      plen = { 266 => 1, 267 => 2, 268 => 4 }[act[:type]] || 0
       if d.bytesize >= plen + 12 && d.getbyte(plen) == 0x54
         payload = d[0, plen].unpack1('H*')
         tok = d.unpack1('V', offset: plen + 4)

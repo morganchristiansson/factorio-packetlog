@@ -147,13 +147,13 @@ REAL_PACKET_FIXTURES = [
     ],
   },
   {
-    name: 'server_rotate_entity_echo',
-    description: 'Server echo of rotate_entity (1-byte direction)',
+    name: 'server_fast_entity_transfer_echo',
+    description: 'Server echo of fast_entity_transfer (1-byte direction). Previously misnamed rotate_entity — live defines confirm 279=fast_entity_transfer',
     hex: '0706c8bdb200a472b200000000000454013e178eb7a372b20000000000ff17012401',
     actions: [
       { type: 84, name: 'server_tick_info', player: 0, game_player: 1,
         data: '3e178eb7a372b20000000000' },
-      { type: 279, name: 'rotate_entity', player: 36, game_player: 37,
+      { type: 279, name: 'fast_entity_transfer', player: 36, game_player: 37,
         data: '01' },
     ],
   },

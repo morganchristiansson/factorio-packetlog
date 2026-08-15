@@ -40,28 +40,42 @@ records at the end get dropped with no error. If you must print a list:
 
 ## helpers.write_file — large dumps to disk
 
+Official signature (Factorio Lua API):
+
 ```lua
 helpers.write_file(filename, data, append?, for_player?)
 ```
 
-Writes to `<user-data>/script-output/` (filename may include subdirs, e.g.
-`"sniffer/items.txt"`). No size limit. The user-data dir is the factorio
-process's **working directory** (not the binary dir!) — find it via:
+- `filename :: string` — name/path relative to `script-output/`; a
+  directory path (e.g. `"save/here/example.txt"`) creates the folder
+  structure.
+- `data :: LocalisedString` — the content to write.
+- `append :: boolean?` — true appends; default false OVERWRITES any
+  pre-existing file.
+- `for_player :: uint32?` — **the trap**: if given, the file is only
+  written for that player_index. `0` writes to the server's output;
+  non-zero writes for THAT PLAYER (transferred to their client, never
+  readable server-side). In the main chunk of the runtime stage (i.e.
+  `/sc` console commands) a non-zero `for_player` is **always skipped**
+  — the write silently does nothing. So via RCON: never pass it.
+
+Writes land in `<user-data>/script-output/`. No size limit (unlike the
+~4KB rcon.print cap). The user-data dir is the factorio process's
+**working directory** (not the binary dir!) — find it via:
 
 ```bash
 readlink /proc/<pid>/cwd        # → /home/factorio/factorio
 ls /home/factorio/factorio/script-output/
 ```
 
-**Server-side only**: `for_player` (the 4th arg) must be left NIL — passing
-it redirects the file to THAT PLAYER'S CLIENT data (transferred to their
-machine, not written to the server's script-output), which we can never
-read back. All sniffer calls pass only `(filename, data)`; a `p.index`
-inside the data is just the player index being serialized INTO the JSON,
-not the `for_player` arg. This is how the roster / player-attrs queries
-(and the item/entity prototype dumps) avoid the ~4KB rcon.print cap on
-100+ player servers (`RconClient#json_query` reads the file straight from
-script-output — the sniffer runs on the server host).
+**Server-side only by construction**: all sniffer calls pass only
+`(filename, data)` — no `for_player`, so the write always goes to the
+server's script-output. A `p.index` inside the data is just the player
+index being serialized INTO the JSON, not the `for_player` arg. This is
+how the roster / player-attrs queries (and the item/entity prototype
+dumps) avoid the ~4KB rcon.print cap on 100+ player servers
+(`RconClient#json_query` reads the file straight from script-output —
+the sniffer runs on the server host).
 
 In code: `ServerDetect.script_output_dir(pid)`.
 

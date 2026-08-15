@@ -98,9 +98,17 @@ either on a client or on the game server host (server mode, with RCON).
   output live (survives hot reloads). Chat is always printed. See
   `docs/server-mode.md`.
 - **RCON data channel**: `rcon.print(data)` returns values through RCON;
-  `helpers.table_to_json` for tables. `/players` lists names only (no index). See
+  `helpers.table_to_json` for tables (JSON, parsed with stdlib
+  `JSON.parse`); large payloads go through `helpers.write_file` (no 4KB
+  cap). `/players` lists names only (no index). See
   `docs/rcon-knowledge.md` for the full API knowledge base (incl.
   `helpers.write_file` for large dumps, `prototypes.*` ordering).
+- **RCON writes are SERVER-side only**: `helpers.write_file` is NEVER
+  called with the `for_player` argument — a non-zero index writes to
+  that player's client (and is silently skipped via `/sc` runtime), so
+  every dump must land in the server's `script-output/` where the sniffer
+  reads it locally. Guarded by a spec (server_mode_spec checks the Lua
+  constants).
 
 ## Usage
 

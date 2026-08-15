@@ -287,6 +287,15 @@ check(attrs == [
 ], 'parse_player_attrs + afk_time')
 check(RconClient.parse_player_attrs('garbage').nil?, 'non-JSON payload → nil')
 
+# Hard invariant: NEVER pass for_player to helpers.write_file. A non-zero
+# index writes to that player's CLIENT (unreadable server-side) and via
+# /sc runtime is skipped entirely — a silent no-op. All write_file Lua
+# constants must stay server-side only (filename, data).
+%w[ROSTER_WRITE_LUA PLAYER_ATTRS_WRITE_LUA DUMP_PROTOTYPES_LUA].each do |const|
+  check(!RconClient.const_get(const).to_s.include?('for_player'),
+        "#{const}: no for_player arg (server-side write only)")
+end
+
 # refresh_roster → load_roster: initial load only (new players come from
 # the packet stream, no periodic refresh)
 sr = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })

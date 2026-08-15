@@ -7,3 +7,4 @@ players.json
 
 # Large game reference dumps (external/ is downloaded/generated)
 external/
+hivemind-session.json

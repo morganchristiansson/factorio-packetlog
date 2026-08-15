@@ -18,7 +18,7 @@ class SnifferState
   attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
                 :self_ip, :self_name, :self_index, :peer_names, :conn_names,
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
-                :game_tick, :attrs_loaded, :protocol_version,
+                :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :hide_players, :show_actions, :hide_actions,
                 :chat_only, :quiet
 end
@@ -62,6 +62,11 @@ class FactorioSniffer
     # src_ip → name for CONFIRMED (in-game) players — lets C→S msg 14
     # (clean disconnect) resolve the leaver without S→C analysis.
     @conn_ip_name = @state.conn_ip_name || {}
+    # Cross-packet chat segment reassembly buffer: [player, total_segs] =>
+    # {seg_no => payload}. Split chat messages arrive as separate
+    # input-action segments across packets; merged when complete. Survives
+    # hot reloads via state.
+    @chat_segments = @state.chat_segments || {}
     # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
     # once from RCON, maintained by packet decoding. See PlayerAttrs.
     @attrs = @state.attrs || PlayerAttrs.new
@@ -236,6 +241,7 @@ class FactorioSniffer
       st.peer_names = @peer_names
       st.conn_names = @conn_names
       st.conn_ip_name = @conn_ip_name
+      st.chat_segments = @chat_segments
       st.roster_loaded = @state.roster_loaded
       st.ai_agent = @agent
       st.online = @online
@@ -846,14 +852,19 @@ class FactorioSniffer
 
     # Chat messages: ALWAYS printed (exempt from all filters) and fed to
     # the agent — chat is the important signal, filters are for action
-    # spam. /chat chat-only mode still hides non-chat actions.
+    # spam. /chat chat-only mode still hides non-chat actions. Split
+    # messages are reassembled across packets (chat_action_data) before
+    # decoding.
     if act[:name] == 'write_to_console'
-      msg = FactorioProtocol.decode_chat(act[:data])
-      if msg
-        @agent&.on_chat(pname, msg)
-        puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
-        return
+      data = chat_action_data(act, pname, ts)
+      if data
+        msg = FactorioProtocol.decode_chat(data)
+        if msg
+          @agent&.on_chat(pname, msg)
+          puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
+        end
       end
+      return
     end
 
     return unless visible?(pname, act)
@@ -1076,5 +1087,32 @@ class FactorioSniffer
     @agent&.on_player_event(:left, name)
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} left the game" if player_visible?(name)
+  end
+
+  # Reassemble a chat message split across input-action segments. The
+  # segment metadata (total_segs/seg_no) marks split messages that arrive
+  # in SEPARATE packets; fragments are buffered per (player, total_segs)
+  # and merged in seg_no order when complete. Returns the merged payload,
+  # or nil while the group is incomplete (skip printing/feeding until the
+  # full message arrives). Buffers older than 15s are dropped (UDP loss
+  # may strand a fragment).
+  def chat_action_data(act, pname, ts)
+    total = act[:total_segs]
+    data = act[:data]
+    return data unless total && total > 1
+
+    key = [pname, total]
+    group = (@chat_segments[key] ||= {})
+    group[:ts] = ts
+    group[act[:seg_no]] = data
+
+    @chat_segments.delete_if do |_k, g|
+      g[:ts] && (ts - g[:ts]) > 15
+    end
+
+    return nil unless (0...total).all? { |n| group.key?(n) }
+    merged = (0...total).map { |n| group[n] }.join
+    @chat_segments.delete(key)
+    merged
   end
 end

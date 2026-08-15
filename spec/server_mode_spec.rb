@@ -28,6 +28,24 @@ def msg13_packet
   "\x0d".b + [1234].pack('V') + ('A'.b * 503)
 end
 
+# Build a C→S heartbeat (msg 6) with a pure-segment closure carrying one
+# input-action segment (e.g. a fragment of a split chat message).
+def build_segment_packet(payload, total:, no:, green:)
+  hdr = "\x06".b + "\x06".b        # msg 6 + flags (tick closures, single)
+  seq = [1].pack('V')
+  tick = [1_700_000_000].pack('Q<')
+  count_flagged = [0x01].pack('C')  # count=0, has_segments
+  seg_count = [1].pack('C')
+  seg = [104].pack('C')              # seg_type = write_to_console (2.0)
+  seg += [green].pack('V')           # blue (4 bytes, arbitrary)
+  seg += [green].pack('C')           # green (uint16v, player)
+  seg += [total].pack('C')           # total_segs (uint32v)
+  seg += [no].pack('C')              # seg_no (uint32v)
+  seg += [payload.bytesize].pack('C') # pay_len (uint32v)
+  seg += payload
+  hdr + seq + tick + count_flagged + seg_count + seg
+end
+
 def run_sniffer(opts)
   out = StringIO.new
   old = $stdout
@@ -393,6 +411,36 @@ _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   @events = agent.events
 end
 check(@events.empty?, 'msg 14 from unknown src_ip → no leave event')
+
+# ── Test 10: split chat messages reassembled across packets ──────────
+puts "\nTest 10: split chat reassembly"
+FactorioProtocol.select_version('2.0.77')  # segment 104 = write_to_console
+
+# Segment metadata: total_segs/seg_no mark messages split across packets.
+# Each packet carries ONE segment; the agent must receive the merged text.
+messages = []
+fake_agent_class2 = Class.new do
+  define_method(:initialize) { @msgs = [] }
+  define_method(:on_chat) { |_p, m| @msgs << m }
+  define_method(:on_player_event) { |_k, _n| }
+  attr_reader :msgs
+end
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+  agent = fake_agent_class2.new
+  s.instance_variable_set(:@agent, agent)
+  ts = 1_700_000_000.0
+  # fragment 0: [0x15][29] + first 18 chars
+  frag0 = "\x15\x1dwe dont need it to".b
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197,
+         build_segment_packet(frag0, total: 2, no: 0, green: 21))
+  # fragment 1: raw continuation (no prefix), next packet
+  frag1 = ' be 2 lanes'.b
+  s.send(:process_packet, 2, ts + 0.1, CLIENT_IP, SERVER_IP, 34197, 34197,
+         build_segment_packet(frag1, total: 2, no: 1, green: 21))
+  messages = agent.msgs
+end
+check(messages == ['we dont need it to be 2 lanes'],
+      "split chat reassembled (got #{messages.inspect})")
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

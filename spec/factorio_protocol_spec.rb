@@ -259,6 +259,28 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal text, msg
   end
 
+  def test_chat_0x15_and_0x2d_prefixes
+    # Live-observed chat tones: [0x15]/[0x2d][meta][text...] — previously
+    # unhandled (returned raw bytes incl. the prefix).
+    assert_equal 'i get the reference',
+                 FactorioProtocol.decode_chat(([0x15, 19] + 'i get the reference'.bytes).pack('C*'))
+    assert_equal 'good', FactorioProtocol.decode_chat(([0x2d, 4] + 'good'.bytes).pack('C*'))
+  end
+
+  def test_chat_0x1f_and_0x30_prefixes
+    # More live-observed tones: GPS pings use 0x1f; 0x30 is '0'.
+    assert_equal '[gps=-64.6,93.2]',
+                 FactorioProtocol.decode_chat(([0x1f, 16] + '[gps=-64.6,93.2]'.bytes).pack('C*'))
+    assert_equal 'hey', FactorioProtocol.decode_chat(([0x30, 3] + 'hey'.bytes).pack('C*'))
+    # 0x30 is '0' — a raw message starting with '0' must NOT be stripped
+    # unless byte1 is a plausible length.
+    assert_equal "0\x00raw", FactorioProtocol.decode_chat("0\x00raw".b)
+  end
+
+  def test_chat_0x30_empty_message
+    assert_nil FactorioProtocol.decode_chat("0\x00".b)
+  end
+
   def test_chat_server_echo_3d_format
     # [0x3d][meta][text...]
     text = 'Do we need the legendary insect eggs?'

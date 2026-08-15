@@ -169,6 +169,13 @@ module FactorioProtocol
       if has_segments && offset < data.bytesize && !tc[:hit_unknown]
         seg_count = data.getbyte(offset)
         offset += 1
+        # Collect raw segments first: split chat messages span MULTIPLE
+        # input-action segments (seg_no/total_segs), often across separate
+        # packets. Same-closure segments are merged here (ordered by
+        # seg_no); cross-packet groups carry seg_no/total_segs on the
+        # action for the sniffer to reassemble (see
+        # FactorioSniffer#chat_action_data).
+        segs = []
         seg_count.times do
           break if offset >= data.bytesize
           seg_type = data.getbyte(offset); offset += 1
@@ -178,26 +185,34 @@ module FactorioProtocol
           v_off, seg_number = decode_uint32v(data, offset); offset = v_off
           # Payload: uint32v length + data
           v_off, pay_len = decode_uint32v(data, offset); offset = v_off
-          if pay_len && pay_len > 0 && offset + pay_len <= data.bytesize
-            payload = data[offset, pay_len]
-            # Find existing action of same type or add new one
-            existing = tc[:actions]&.find { |a| a[:type] == seg_type }
-            if existing
-              existing[:data] = payload
-            else
-              # Add new action from segment. Segment types follow the
-              # server version's defines.input_action (see
-              # FactorioProtocol.segment_types) — NOT the version-stable
-              # main-action table. 2.0.77: chat arrives as a segment with
-              # type 104 (write_to_console); 2.1: type 106.
-              seg_name = FactorioProtocol.segment_action_name(seg_type)
-              tc[:actions] << {
-                type: seg_type, name: seg_name,
-                player: seg_green, game_player: seg_green + 1,
-                delta: 0, data: payload, hit_unknown: false
-              }
-            end
-            offset += pay_len
+          next unless pay_len && pay_len > 0 && offset + pay_len <= data.bytesize
+          segs << { type: seg_type, green: seg_green, total: total_len,
+                    no: seg_number, payload: data[offset, pay_len] }
+          offset += pay_len
+        end
+        segs.group_by { |s| s[:type] }.each do |seg_type, parts|
+          parts.sort_by! { |s| s[:no] }
+          payload = parts.map { |s| s[:payload] }.join
+          total_segs = parts.first[:total]
+          seg_no = parts.first[:no]
+          existing = tc[:actions]&.find { |a| a[:type] == seg_type }
+          if existing
+            existing[:data] = payload
+            existing[:total_segs] = total_segs if total_segs
+            existing[:seg_no] = seg_no
+          else
+            # Add new action from segment. Segment types follow the
+            # server version's defines.input_action (see
+            # FactorioProtocol.segment_types) — NOT the version-stable
+            # main-action table. 2.0.77: chat arrives as a segment with
+            # type 104 (write_to_console); 2.1: type 106.
+            seg_name = FactorioProtocol.segment_action_name(seg_type)
+            tc[:actions] << {
+              type: seg_type, name: seg_name,
+              player: parts.first[:green], game_player: parts.first[:green] + 1,
+              delta: 0, data: payload, hit_unknown: false,
+              total_segs: total_segs, seg_no: seg_no
+            }
           end
         end
       end

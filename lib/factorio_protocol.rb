@@ -549,13 +549,26 @@ ACTIONS = {
       return d[1..-1].force_encoding('UTF-8')
     end
 
-    # [0x05|0x0b|0x24|0x29][meta(1)][text...] — meta byte is the TOTAL message
-    # length (may span multiple segments). Text runs to end of payload, NOT meta
-    # bytes — truncating to meta truncates long messages split across segments.
+    # [0x05|0x0b|0x24|0x29][meta(1)][text...] — meta byte is the TOTAL
+    # message length (may span multiple segments). Text runs to end of payload,
+    # NOT meta bytes — truncating to meta truncates long messages split across
+    # segments (partials are returned for in-flight splits; the sniffer
+    # reassembles them, see FactorioSniffer#chat_action_data).
     if [0x05, 0x0b, 0x24, 0x29].include?(d.getbyte(0)) && d.bytesize >= 2
       text = d[2..-1]
       return nil if text.empty?   # [type][meta] with no text = empty message
       return text.force_encoding('UTF-8')
+    end
+
+    # Live-observed chat tones [0x15|0x1f|0x2d|0x30][len][text] — same
+    # layout. Stripped only when byte1 is a plausible length for the
+    # remaining payload: 0x2d is '-' and 0x30 is '0', common first
+    # characters of RAW text, so a length check avoids mangling those.
+    # (Complete messages have len == bytesize - 2.)
+    if [0x15, 0x1f, 0x2d, 0x30].include?(d.getbyte(0)) && d.bytesize >= 2
+      len = d.getbyte(1)
+      return nil if len == 0 && d.bytesize == 2   # empty message
+      return d[2..-1].force_encoding('UTF-8') if len > 0 && len <= d.bytesize - 2
     end
 
     # Server echo formats: [0x00|0x3d|0x01][meta(1)][text...]

@@ -53,11 +53,13 @@ helpers.write_file(filename, data, append?, for_player?)
 - `append :: boolean?` — true appends; default false OVERWRITES any
   pre-existing file.
 - `for_player :: uint32?` — **the trap**: if given, the file is only
-  written for that player_index. `0` writes to the server's output;
-  non-zero writes for THAT PLAYER (transferred to their client, never
-  readable server-side). In the main chunk of the runtime stage (i.e.
-  `/sc` console commands) a non-zero `for_player` is **always skipped**
-  — the write silently does nothing. So via RCON: never pass it.
+  written for that player_index. **`0` writes to the server's output if
+  present** (verified live on 2.0.77: `write_file(f, d, false, 0)` lands
+  in `<user-data>/script-output/`); non-zero writes for THAT PLAYER
+  (transferred to their client, never readable server-side). In the main
+  chunk of the runtime stage (i.e. `/sc` console commands) a non-zero
+  `for_player` is **always skipped** — the write silently does nothing.
+  So via RCON: pass nothing (nil), or `0` — never a player index.
 
 Writes land in `<user-data>/script-output/`. No size limit (unlike the
 ~4KB rcon.print cap). The user-data dir is the factorio process's

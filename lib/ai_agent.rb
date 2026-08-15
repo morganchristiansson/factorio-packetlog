@@ -95,6 +95,7 @@ class HiveMindAgent
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
   HISTORY_SIZE = 20             # rolling chat history kept for context
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
+  GREET_ON_JOIN = true          # welcome joining players in game chat
 
   attr_reader :trigger, :model
 
@@ -129,6 +130,7 @@ class HiveMindAgent
     @exchanges = 0
     @mutex = Mutex.new
     @chat = nil
+    @greet_on_join = GREET_ON_JOIN
     # Rolling chat history (player, message) — INCLUDING the agent's own
     # replies (appended via HivemindSay#on_sent / the fallback send_reply).
     # Fed into the system context on every trigger so the model sees what
@@ -145,6 +147,31 @@ class HiveMindAgent
   def on_chat(player, message)
     append_history(player, message)
     handle(player, message)
+  end
+
+  # Feed a join/leave event (player came online / went offline). Appended
+  # to the rolling console history so the agent knows who was around.
+  # Joins also get a templated in-game greeting (no LLM call).
+  def on_player_event(kind, player)
+    name = player.to_s.strip
+    return if name.empty?
+    case kind
+    when :joined
+      append_history(nil, "#{name} joined the game")
+      greet_join(name)
+    when :left
+      append_history(nil, "#{name} left the game")
+    end
+  end
+
+  # Templated welcome to a joining player: instant and not subject to the
+  # LLM rate limit (no model call). Recorded in the history like a reply.
+  def greet_join(name)
+    return if @disabled || @greet_on_join == false
+    msg = "Welcome to the server, #{name}!"
+    puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{msg}"
+    @rcon.say("Hivemind> #{msg}")
+    append_history('hivemind', msg)
   end
 
   private
@@ -238,25 +265,28 @@ class HiveMindAgent
     stats = player_stat_lines
     parts << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
     history = chat_history_lines
-    parts << "Recent chat (hivemind = you):\n#{history}" unless history.empty?
+    parts << "Recent console (hivemind = you; joins/leaves included):\n#{history}" unless history.empty?
     parts.join("\n\n")
   end
 
-  # Rolling chat history: last HISTORY_SIZE decoded chat messages, oldest
-  # first, one "player: message" per line. Long lines are clipped so the
-  # context stays bounded. The agent's own replies appear as "hivemind: …".
+  # Rolling console history: last HISTORY_SIZE decoded chat messages + join/
+  # leave events, oldest first. Chat lines are "player: message" (agent's
+  # own replies as "hivemind: …"); events are bare lines (player == nil).
+  # Long lines are clipped so the context stays bounded.
   def chat_history_lines
     @chat_history.map do |player, msg|
       clipped = msg.each_char.first(HISTORY_LINE_LEN).join
-      "  #{player}: #{clipped}"
+      player ? "  #{player}: #{clipped}" : "  #{clipped}"
     end.join("\n")
   end
 
-  # Append a chat message to the rolling history (ring buffer).
+  # Append a chat/console line to the rolling history (ring buffer).
+  # player is nil for bare console lines (join/leave events); chat and
+  # replies carry the speaker name.
   def append_history(player, message)
     msg = message.to_s.strip
     return if msg.empty?
-    @chat_history << [player.to_s, msg]
+    @chat_history << [player, msg]
     @chat_history.shift if @chat_history.size > HISTORY_SIZE
   end
 
@@ -379,8 +409,9 @@ class HiveMindAgent
       "Alice: 5h12m (admin)", "Bob: 2h3m", "Carol: 1d3h (offline)"). Use
       these to answer questions like "who has played the longest" or
       "who is an admin".
-    - Recent chat history (last ~20 messages, "hivemind: …" lines are
-      YOUR OWN previous replies). Use it to follow the conversation.
+    - Recent console history (last ~20 lines: chat, "hivemind: …" lines
+      are YOUR OWN previous replies, and join/leave events like "alice
+      joined the game"). Use it to follow the conversation.
 
     Tools:
     - say: send your reply to in-game chat (always use this to respond).

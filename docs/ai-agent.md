@@ -30,13 +30,18 @@ player chat ──► write_to_console action (C→S packet)
   for pcap analysis.
 - **Trigger**: any message containing `hivemind` (case-insensitive). The
   reply is prefixed `Hivemind>` so it's identifiable in chat.
-- **Context — chat history**: a rolling history of the last ~20 decoded
-  chat messages is included in the system prompt on every trigger (header
-  `Recent chat (hivemind = you):`), so the model sees what was said around
-  the message it is answering — including its OWN previous replies
-  (appended via the `HivemindSay` `on_sent` callback and the fallback
-  `send_reply`). Long lines are clipped to 120 chars; the history survives
-  hot reloads (the agent persists in state).
+- **Context — console history**: a rolling history of the last ~20 lines
+  is included in the system prompt on every trigger (header
+  `Recent console (hivemind = you; joins/leaves included):`): decoded chat,
+  join/leave events (`alice joined the game` / `bob left the game`), and
+  the agent's OWN previous replies (appended via the `HivemindSay`
+  `on_sent` callback and the fallback `send_reply`). So the model follows
+  the conversation and knows who has come and gone. Long lines are clipped
+  to 120 chars; the history survives hot reloads (agent persists in state).
+- **Join greeting**: joining players get a templated in-game welcome
+  (`Hivemind> Welcome to the server, <name>!`) — no LLM call, so it's
+  instant and not rate-limited. Recorded in the history like a reply.
+  Disable with `greet_on_join: false` on the agent (default on).
 - **Context — who's online + player stats**: the system prompt is rebuilt
   before every ask with the current online player list and per-player
   stats (total play time + admin status), e.g.

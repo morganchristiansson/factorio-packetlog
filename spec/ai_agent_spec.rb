@@ -69,12 +69,66 @@ class TestHiveMindAgent < Minitest::Test
   def test_system_prompt_includes_recent_chat
     @agent.on_chat('alice', 'hey hivemind, whats the bus?')
     sp = @agent.send(:system_prompt)
-    assert_includes sp, 'Recent chat (hivemind = you):'
+    assert_includes sp, 'Recent console (hivemind = you; joins/leaves included):'
     assert_includes sp, 'alice: hey hivemind, whats the bus?'
   end
 
   def test_system_prompt_omits_history_when_empty
-    refute_includes @agent.send(:system_prompt), 'Recent chat (hivemind = you):'
+    refute_includes @agent.send(:system_prompt), 'Recent console (hivemind = you'
+  end
+
+  def test_on_player_event_appends_join_and_leave
+    @agent.on_player_event(:joined, 'alice')
+    @agent.on_player_event(:left, 'bob')
+    history = @agent.instance_variable_get(:@chat_history)
+    # join, its greeting, then the leave
+    assert_equal [nil, 'alice joined the game'], history[0]
+    assert_equal ['hivemind', 'Welcome to the server, alice!'], history[1]
+    assert_equal [nil, 'bob left the game'], history[2]
+    lines = @agent.send(:chat_history_lines)
+    assert_includes lines, '  alice joined the game'
+    assert_includes lines, '  bob left the game'
+  end
+
+  def test_on_player_event_ignores_blank_name
+    @agent.on_player_event(:joined, '  ')
+    assert_empty @agent.instance_variable_get(:@chat_history)
+  end
+
+  def test_system_prompt_includes_events
+    @agent.on_player_event(:joined, 'alice')
+    sp = @agent.send(:system_prompt)
+    assert_includes sp, 'alice joined the game'
+  end
+
+  # ── Join greeting ─────────────────────────────────────────────
+
+  def test_join_greets_player_in_chat
+    rcon = FakeRcon.new
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent.on_player_event(:joined, 'alice')
+    assert_includes rcon.sent, 'Hivemind> Welcome to the server, alice!'
+  end
+
+  def test_join_greeting_recorded_in_history
+    @agent.on_player_event(:joined, 'alice')
+    assert_equal ['hivemind', 'Welcome to the server, alice!'],
+                 @agent.instance_variable_get(:@chat_history).last
+  end
+
+  def test_leave_does_not_greet
+    rcon = FakeRcon.new
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent.on_player_event(:left, 'alice')
+    assert_empty rcon.sent
+  end
+
+  def test_greeting_disabled_with_greet_on_join_false
+    rcon = FakeRcon.new
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent.instance_variable_set(:@greet_on_join, false)
+    agent.on_player_event(:joined, 'alice')
+    assert_empty rcon.sent
   end
 
   def test_system_prompt_clips_long_lines

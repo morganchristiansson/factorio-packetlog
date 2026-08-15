@@ -424,6 +424,7 @@ class FactorioSniffer
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
         unless @self_name == sa[:username]
+          @agent&.on_player_event(:joined, sa[:username])
           puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})" if player_visible?(sa[:username])
         end
       end
@@ -431,6 +432,7 @@ class FactorioSniffer
         pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
         @online.delete(pname) if pname
         @attrs.disconnect(pname, @game_tick) if pname
+        @agent&.on_player_event(:left, pname) if pname
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
       end

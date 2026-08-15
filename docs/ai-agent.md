@@ -37,14 +37,15 @@ player chat ──► write_to_console action (C→S packet)
   for pcap analysis.
 - **Trigger**: any message containing `hivemind` (case-insensitive). The
   reply is prefixed `Hivemind>` so it's identifiable in chat.
-- **Context — console history**: a rolling history of the last ~20 lines
-  is included in the system prompt on every trigger (header
-  `Recent console (hivemind = you; joins/leaves included):`): decoded chat,
-  join/leave events (`alice joined the game` / `bob left the game`), and
-  the agent's OWN previous replies (appended via the `HivemindSay`
-  `on_sent` callback and the fallback `send_reply`). So the model follows
-  the conversation and knows who has come and gone. Long lines are clipped
-  to 120 chars; the history survives hot reloads (agent persists in state).
+- **Context — incremental console lines**: the RubyLLM chat object keeps the
+  whole session (previous Q&A), so follow-ups continue the conversation.
+  Console lines are delivered **incrementally**: each prompt carries only
+  the lines seen since the last prompt (`New console lines since the last
+  prompt:` — chat, join/leave events, and the trigger message), so nothing
+  is duplicated across calls. Hivemind's own replies are excluded from
+  that list (they're already in the conversation as assistant messages).
+  Long lines are clipped to 120 chars; after a conversation reset the
+  last ~10 console lines are re-sent as fresh context.
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or

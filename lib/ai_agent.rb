@@ -133,12 +133,16 @@ class HiveMindAgent
     @mutex = Mutex.new
     @chat = nil
     @greet_on_join = GREET_ON_JOIN
-    # Rolling chat history (player, message) — INCLUDING the agent's own
-    # replies (appended via HivemindSay#on_sent / the fallback send_reply).
-    # Fed into the system context on every trigger so the model sees what
-    # was said around the message it is answering. Survives hot reloads
-    # (the agent persists in SnifferState).
+    # Rolling console history (player, message) — chat lines, join/leave
+    # events, and the agent's own replies (via HivemindSay#on_sent / the
+    # fallback send_reply). @history_sent tracks how many lines have been
+    # included in prompts so far: each prompt carries ONLY the lines since
+    # the last one (no duplication across calls). Guarded by @console_mutex
+    # (separate from @mutex so the packet thread never blocks on a slow
+    # LLM call). Survives hot reloads (the agent persists in state).
     @chat_history = []
+    @history_sent = 0
+    @console_mutex = Mutex.new
 
     configure_llm(provider)
   end
@@ -179,11 +183,14 @@ class HiveMindAgent
     end
     Thread.new do
       begin
-        prompt = "#{name} just joined the game. Greet them personally and briefly " \
-                 "(one or two short sentences, under 150 characters), informed by " \
-                 "what is happening right now: the recent console lines, who else " \
-                 "is online, and their play history. Call the say tool with your " \
-                 'greeting.'
+        prompt = +''
+        new_console = unread_console(exclude: [nil, "#{name} joined the game"])
+        prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
+        prompt << "#{name} just joined the game. Greet them personally and briefly " \
+                  "(one or two short sentences, under 150 characters), informed by " \
+                  "what is happening right now: the recent console lines, who else " \
+                  "is online, and their play history. Call the say tool with your " \
+                  'greeting.'
         reply = complete(prompt)
         send_reply(reply)
       rescue StandardError => e
@@ -242,18 +249,23 @@ class HiveMindAgent
   end
 
   def ask_llm(player, message)
-    prompt = "In-game chat from #{player}: #{message}\n\n" \
-             "Answer the player's question or continue the conversation. " \
-             "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
-             'no markdown, no code blocks, no emoji.'
+    prompt = +''
+    new_console = unread_console(exclude: [player, message])
+    prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
+    prompt << "In-game chat from #{player}: #{message}\n\n" \
+              "Answer the player's question or continue the conversation. " \
+              "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
+              'no markdown, no code blocks, no emoji.'
     complete(prompt)
   end
 
   # Run one LLM completion with the fresh system context (online players,
-  # stats, console history) and tools. Whole call under the mutex: the
-  # chat object (messages, system prompt) is shared state, and the rate
-  # limiters mean only one completion is live at a time anyway —
-  # serializing just prevents interleaving.
+  # stats) and tools. Whole call under the mutex: the chat object
+  # (messages, system prompt) is shared state, and the rate limiters mean
+  # only one completion is live at a time anyway — serializing just
+  # prevents interleaving. The chat object persists across calls, so the
+  # model already sees the previous Q&A (the session); console lines are
+  # delivered incrementally via the prompt (see unread_console).
   #
   # Tool path: HivemindSay already sent the reply (ask returns a
   # Tool::Halt with empty content after the halt). Fallback path: the
@@ -265,6 +277,10 @@ class HiveMindAgent
       if @exchanges >= MAX_CONVERSATION
         @chat.reset_messages!
         @exchanges = 0
+        # Fresh session: rewind the console pointer so the last few lines
+        # get re-sent as context (the old conversation — and its console
+        # lines — is gone).
+        @console_mutex.synchronize { @history_sent = [@chat_history.size - 10, 0].max }
       end
       # Fresh system context per ask: the online player list + stats are
       # part of the system prompt (replace_system_instruction swaps it in
@@ -282,26 +298,35 @@ class HiveMindAgent
   #   Currently online players: Alice, Bob (2 players).
   #   Player stats (total play time; live session included for online
   #   players): Alice: 5h12m (admin); Bob: 2h3m; Carol: 1d3h (offline).
+  # Console lines are NOT included here — they are delivered incrementally
+  # via each prompt (unread_console) so nothing is duplicated across calls.
   def system_prompt
     parts = [SYSTEM_PROMPT]
     online = online_player_list
     parts << "Currently online players: #{online.join(', ')} (#{online.size} players)." unless online.empty?
     stats = player_stat_lines
     parts << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
-    history = chat_history_lines
-    parts << "Recent console (hivemind = you; joins/leaves included):\n#{history}" unless history.empty?
     parts.join("\n\n")
   end
 
-  # Rolling console history: last HISTORY_SIZE decoded chat messages + join/
-  # leave events, oldest first. Chat lines are "player: message" (agent's
-  # own replies as "hivemind: …"); events are bare lines (player == nil).
-  # Long lines are clipped so the context stays bounded.
-  def chat_history_lines
-    @chat_history.map do |player, msg|
-      clipped = msg.each_char.first(HISTORY_LINE_LEN).join
-      player ? "  #{player}: #{clipped}" : "  #{clipped}"
-    end.join("\n")
+  # Console lines not yet included in any prompt: everything after
+  # @history_sent, formatted as "player: message" (or bare for events),
+  # clipped per line. `exclude:` skips one line that the caller states
+  # explicitly (the trigger message, or the join event being greeted).
+  # Agent replies (player == 'hivemind') are excluded too — they are
+  # already in the conversation as assistant messages. Advances the
+  # pointer so each line is sent exactly once.
+  def unread_console(exclude: nil)
+    @console_mutex.synchronize do
+      unread = @chat_history.drop(@history_sent)
+      unread.pop if exclude && unread.last == exclude
+      unread.reject! { |p, _| p == 'hivemind' }  # replies live in the conversation
+      @history_sent = @chat_history.size
+      unread.map do |player, msg|
+        clipped = msg.each_char.first(HISTORY_LINE_LEN).join
+        player ? "#{player}: #{clipped}" : clipped
+      end
+    end
   end
 
   # Append a chat/console line to the rolling history (ring buffer).
@@ -310,8 +335,10 @@ class HiveMindAgent
   def append_history(player, message)
     msg = message.to_s.strip
     return if msg.empty?
-    @chat_history << [player, msg]
-    @chat_history.shift if @chat_history.size > HISTORY_SIZE
+    @console_mutex.synchronize do
+      @chat_history << [player, msg]
+      @chat_history.shift if @chat_history.size > HISTORY_SIZE
+    end
   end
 
   # Names of players currently in-game. Primary source: the sniffer's
@@ -442,9 +469,10 @@ class HiveMindAgent
       "Alice: 5h12m (admin)", "Bob: 2h3m", "Carol: 1d3h (offline)"). Use
       these to answer questions like "who has played the longest" or
       "who is an admin".
-    - Recent console history (last ~20 lines: chat, "hivemind: …" lines
-      are YOUR OWN previous replies, and join/leave events like "alice
-      joined the game"). Use it to follow the conversation.
+    - Each prompt carries ONLY the console lines since the last prompt
+      (format "player: message", or "alice joined the game" for events).
+      Your previous replies are visible in the conversation itself. Use
+      the accumulated context to follow the conversation.
 
     Tools:
     - say: send your reply to in-game chat (always use this to respond).

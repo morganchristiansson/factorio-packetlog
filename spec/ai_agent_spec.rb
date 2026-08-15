@@ -68,15 +68,11 @@ class TestHiveMindAgent < Minitest::Test
 
   # ── Context ───────────────────────────────────────────────────
 
-  def test_system_prompt_includes_recent_chat
+  def test_system_prompt_has_no_history_section
     @agent.on_chat('alice', 'hey hivemind, whats the bus?')
     sp = @agent.send(:system_prompt)
-    assert_includes sp, 'Recent console (hivemind = you; joins/leaves included):'
-    assert_includes sp, 'alice: hey hivemind, whats the bus?'
-  end
-
-  def test_system_prompt_omits_history_when_empty
-    refute_includes @agent.send(:system_prompt), 'Recent console (hivemind = you'
+    refute_includes sp, 'Recent console'
+    refute_includes sp, 'alice: hey hivemind, whats the bus?'
   end
 
   def test_on_player_event_appends_join_and_leave
@@ -86,9 +82,9 @@ class TestHiveMindAgent < Minitest::Test
     # join event, then the leave (greeting is stubbed to send nothing)
     assert_equal [nil, 'alice joined the game'], history[0]
     assert_equal [nil, 'bob left the game'], history[1]
-    lines = @agent.send(:chat_history_lines)
-    assert_includes lines, '  alice joined the game'
-    assert_includes lines, '  bob left the game'
+    lines = @agent.send(:unread_console)
+    assert_includes lines, 'alice joined the game'
+    assert_includes lines, 'bob left the game'
   end
 
   def test_on_player_event_ignores_blank_name
@@ -96,10 +92,66 @@ class TestHiveMindAgent < Minitest::Test
     assert_empty @agent.instance_variable_get(:@chat_history)
   end
 
-  def test_system_prompt_includes_events
+  # ── Incremental console lines in prompts ──────────────────────
+
+  def capture_prompt(agent, &block)
+    seen = nil
+    agent.define_singleton_method(:complete) { |p| seen = p; '' }
+    block.call
+    seen
+  end
+
+  def test_ask_llm_includes_new_console_lines
+    @agent.on_chat('bob', 'nice rail setup')
+    prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind what is the bus?') }
+    assert_includes prompt, 'bob: nice rail setup'
+    assert_includes prompt, 'In-game chat from alice: hivemind what is the bus?'
+  end
+
+  def test_ask_llm_does_not_repeat_previous_prompt_lines
+    @agent.on_chat('bob', 'nice rail setup')
+    capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind first?') }
+    @agent.on_chat('carol', 'anyone have iron?')
+    prompt2 = capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind second?') }
+    assert_includes prompt2, 'carol: anyone have iron?'
+    refute_includes prompt2, 'nice rail setup'   # already sent in the first prompt
+    refute_includes prompt2, 'hivemind first?'   # the first trigger
+  end
+
+  def test_ask_llm_excludes_trigger_line_from_console_list
+    prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind the bus?') }
+    # the trigger is stated explicitly, not repeated in the console list
+    refute_includes prompt, 'New console lines'
+    assert_equal 1, prompt.scan('hivemind the bus?').size
+  end
+
+  def test_unread_console_excludes_hivemind_replies
+    @agent.on_chat('alice', 'hey')
+    @agent.send(:append_history, 'hivemind', 'greetings')
+    lines = @agent.send(:unread_console)
+    assert_includes lines, 'alice: hey'
+    refute_includes lines, 'hivemind: greetings'  # lives in the conversation
+  end
+
+  def test_unread_console_advances_pointer
+    @agent.send(:append_history, 'alice', 'one')
+    first = @agent.send(:unread_console)
+    assert_equal ['alice: one'], first
+    assert_empty @agent.send(:unread_console)  # nothing new since
+    @agent.send(:append_history, 'bob', 'two')
+    assert_equal ['bob: two'], @agent.send(:unread_console)
+  end
+
+  def test_unread_console_clips_long_lines
+    @agent.send(:append_history, 'alice', 'x' * 500)
+    line = @agent.send(:unread_console).first
+    assert_operator line.length, :<=, HiveMindAgent::HISTORY_LINE_LEN + 20
+  end
+
+  def test_ask_llm_includes_events
     @agent.on_player_event(:joined, 'alice')
-    sp = @agent.send(:system_prompt)
-    assert_includes sp, 'alice joined the game'
+    prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'bob', 'hivemind hi') }
+    assert_includes prompt, 'alice joined the game'
   end
 
   # ── Join greeting (LLM-generated) ─────────────────────────────
@@ -152,11 +204,5 @@ class TestHiveMindAgent < Minitest::Test
     agent.instance_variable_set(:@greet_on_join, false)
     agent.on_player_event(:joined, 'alice')
     assert_empty rcon.sent
-  end
-
-  def test_system_prompt_clips_long_lines
-    @agent.send(:append_history, 'alice', 'x' * 500)
-    line = @agent.send(:chat_history_lines)
-    assert_operator line.length, :<=, HiveMindAgent::HISTORY_LINE_LEN + 20
   end
 end

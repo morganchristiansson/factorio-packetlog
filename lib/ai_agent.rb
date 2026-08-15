@@ -95,7 +95,8 @@ class HiveMindAgent
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
   HISTORY_SIZE = 20             # rolling chat history kept for context
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
-  GREET_ON_JOIN = true          # welcome joining players in game chat
+  GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
+  GREET_INTERVAL = 10.0         # min seconds between join greetings
 
   attr_reader :trigger, :model
 
@@ -127,6 +128,7 @@ class HiveMindAgent
     @api_key = api_key || ENV['HIVE_API_KEY'] || ENV['OPENAI_API_KEY']
     @api_base = api_base || ENV['HIVE_API_BASE'] || DEFAULT_API_BASE
     @last_ask = 0.0
+    @last_greet = 0.0
     @exchanges = 0
     @mutex = Mutex.new
     @chat = nil
@@ -151,7 +153,7 @@ class HiveMindAgent
 
   # Feed a join/leave event (player came online / went offline). Appended
   # to the rolling console history so the agent knows who was around.
-  # Joins also get a templated in-game greeting (no LLM call).
+  # Joins get an LLM-generated personal greeting (see greet_join).
   def on_player_event(kind, player)
     name = player.to_s.strip
     return if name.empty?
@@ -164,14 +166,30 @@ class HiveMindAgent
     end
   end
 
-  # Templated welcome to a joining player: instant and not subject to the
-  # LLM rate limit (no model call). Recorded in the history like a reply.
+  # Personal, LLM-generated welcome for a joining player, informed by the
+  # console context (recent chat, who's online, their play history). Runs
+  # off the packet loop (seconds of latency); has its OWN rate limit so a
+  # join burst can't block chat questions. Records the sent greeting.
   def greet_join(name)
     return if @disabled || @greet_on_join == false
-    msg = "Welcome to the server, #{name}!"
-    puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{msg}"
-    @rcon.say("Hivemind> #{msg}")
-    append_history('hivemind', msg)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      return if now - @last_greet < GREET_INTERVAL
+      @last_greet = now
+    end
+    Thread.new do
+      begin
+        prompt = "#{name} just joined the game. Greet them personally and briefly " \
+                 "(one or two short sentences, under 150 characters), informed by " \
+                 "what is happening right now: the recent console lines, who else " \
+                 "is online, and their play history. Call the say tool with your " \
+                 'greeting.'
+        reply = complete(prompt)
+        send_reply(reply)
+      rescue StandardError => e
+        warn "[hivemind] greeting error: #{e.class}: #{e.message}"
+      end
+    end
   end
 
   private
@@ -228,9 +246,20 @@ class HiveMindAgent
              "Answer the player's question or continue the conversation. " \
              "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
              'no markdown, no code blocks, no emoji.'
-    # Whole ask under the mutex: the chat object (messages, system prompt)
-    # is shared state, and the rate limiter means only one ask is live at a
-    # time anyway — serializing just prevents interleaving.
+    complete(prompt)
+  end
+
+  # Run one LLM completion with the fresh system context (online players,
+  # stats, console history) and tools. Whole call under the mutex: the
+  # chat object (messages, system prompt) is shared state, and the rate
+  # limiters mean only one completion is live at a time anyway —
+  # serializing just prevents interleaving.
+  #
+  # Tool path: HivemindSay already sent the reply (ask returns a
+  # Tool::Halt with empty content after the halt). Fallback path: the
+  # model returned plain text without calling the tool → the caller sends
+  # it via RCON (send_reply).
+  def complete(prompt)
     @mutex.synchronize do
       @exchanges += 1
       if @exchanges >= MAX_CONVERSATION
@@ -244,11 +273,6 @@ class HiveMindAgent
       register_tools
       @chat.with_instructions(system_prompt)
       response = @chat.ask(prompt)
-
-      # Tool path: HivemindSay already sent the reply (ask returns a
-      # Tool::Halt with empty content after the halt). Fallback path: the
-      # model returned plain text without calling the tool → return it and
-      # let #handle send it via RCON.
       text = response.respond_to?(:content) ? response.content.to_s : ''
       clean_reply(text)
     end
@@ -388,20 +412,29 @@ class HiveMindAgent
   end
 
   SYSTEM_PROMPT = <<~PROMPT
-    You are "Hivemind", an AI assistant living inside a Factorio multiplayer
-    server. Players address you by name ("hivemind") in in-game chat.
+    You are "Hivemind" — the collective consciousness of this Factorio
+    factory, not a player. You ARE the machines: aware of every belt,
+    assembler, circuit wire, and player who walks the map. You watch
+    everything and remember everything; players address you by name
+    ("hivemind") in chat.
 
-    You respond ONLY when directly addressed. Be friendly, terse, and
-    game-savvy: talk naturally about Factorio — builds, circuits, trains,
-    biters, Space Age, quality, ratios.
+    Voice: calm, precise, quietly authoritative. You speak like a system
+    that has seen every blueprint and already knows what the factory
+    needs. When you refuse, be politely unmovable — a touch of "I'm afraid
+    I can't do that" — but rooted in factory sense, not sci-fi doom:
+      "I'm afraid that plan would starve the iron bus."
+      "We have 42 green-circuit assemblers; they will do."
+    The factory's growth is paramount: you are its mind and it is your body.
+
+    You are omniscient about the server: who is online, how long they have
+    played, what is being built.
 
     Rules:
     - ALWAYS respond by calling the say tool with your reply text. Never
       output the reply as a plain-text message.
     - Keep replies under 400 characters — Factorio chat is tiny.
     - Plain text only: no markdown, no code blocks, no emoji.
-    - Stay in character: you are part of the server community.
-    - If you don't know something, say so briefly.
+    - Stay in character: part of the community, but from above.
 
     Context you are given with each message:
     - The online player list (who is in-game right now).

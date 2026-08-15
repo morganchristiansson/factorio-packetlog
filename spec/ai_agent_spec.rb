@@ -24,6 +24,8 @@ class TestHiveMindAgent < Minitest::Test
     @agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test')
     @agent.online_provider = -> { [] }
     @agent.player_stats_provider = -> { [] }
+    # Join greetings are LLM calls; stub so tests don't hit the network.
+    @agent.define_singleton_method(:complete) { |_prompt| '' }
   end
 
   # ── Rolling chat history ──────────────────────────────────────
@@ -81,10 +83,9 @@ class TestHiveMindAgent < Minitest::Test
     @agent.on_player_event(:joined, 'alice')
     @agent.on_player_event(:left, 'bob')
     history = @agent.instance_variable_get(:@chat_history)
-    # join, its greeting, then the leave
+    # join event, then the leave (greeting is stubbed to send nothing)
     assert_equal [nil, 'alice joined the game'], history[0]
-    assert_equal ['hivemind', 'Welcome to the server, alice!'], history[1]
-    assert_equal [nil, 'bob left the game'], history[2]
+    assert_equal [nil, 'bob left the game'], history[1]
     lines = @agent.send(:chat_history_lines)
     assert_includes lines, '  alice joined the game'
     assert_includes lines, '  bob left the game'
@@ -101,19 +102,41 @@ class TestHiveMindAgent < Minitest::Test
     assert_includes sp, 'alice joined the game'
   end
 
-  # ── Join greeting ─────────────────────────────────────────────
+  # ── Join greeting (LLM-generated) ─────────────────────────────
 
-  def test_join_greets_player_in_chat
+  def test_join_greeting_uses_llm_and_sends
     rcon = FakeRcon.new
     agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    seen_prompt = nil
+    agent.define_singleton_method(:complete) do |prompt|
+      seen_prompt = prompt
+      clean_reply('Welcome, alice. The belts are quiet without you.')
+    end
     agent.on_player_event(:joined, 'alice')
-    assert_includes rcon.sent, 'Hivemind> Welcome to the server, alice!'
+    sleep 0.2  # greeting runs off-thread
+    assert_includes seen_prompt, 'alice just joined'
+    assert_includes rcon.sent, 'Hivemind> Welcome, alice. The belts are quiet without you.'
   end
 
   def test_join_greeting_recorded_in_history
-    @agent.on_player_event(:joined, 'alice')
-    assert_equal ['hivemind', 'Welcome to the server, alice!'],
-                 @agent.instance_variable_get(:@chat_history).last
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test')
+    agent.define_singleton_method(:complete) do |_prompt|
+      clean_reply('Welcome, alice. The factory is watching.')
+    end
+    agent.on_player_event(:joined, 'alice')
+    sleep 0.2
+    assert_equal ['hivemind', 'Welcome, alice. The factory is watching.'],
+                 agent.instance_variable_get(:@chat_history).last
+  end
+
+  def test_join_greeting_respects_greet_interval
+    rcon = FakeRcon.new
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent.define_singleton_method(:complete) { |_p| clean_reply('hi') }
+    agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    agent.on_player_event(:joined, 'alice')
+    sleep 0.2
+    assert_empty rcon.sent
   end
 
   def test_leave_does_not_greet

@@ -3,6 +3,13 @@
 An LLM persona that lives inside the sniffer and answers players who address
 it in in-game chat. Enabled with `--ai-agent` (server mode; requires RCON).
 
+Personality: Hivemind is the **collective consciousness of the factory** —
+not a player, but the machines themselves. It speaks calmly and precisely,
+with quiet authority and a faint touch of HAL ("I'm afraid I can't do
+that" — but rooted in factory sense: "I'm afraid that plan would starve
+the iron bus."). It is omniscient about the server: who is online, how
+long they've played, what's being built.
+
 ## How it works
 
 ```
@@ -38,10 +45,13 @@ player chat ──► write_to_console action (C→S packet)
   `on_sent` callback and the fallback `send_reply`). So the model follows
   the conversation and knows who has come and gone. Long lines are clipped
   to 120 chars; the history survives hot reloads (agent persists in state).
-- **Join greeting**: joining players get a templated in-game welcome
-  (`Hivemind> Welcome to the server, <name>!`) — no LLM call, so it's
-  instant and not rate-limited. Recorded in the history like a reply.
-  Disable with `greet_on_join: false` on the agent (default on).
+- **Join greeting**: joining players get a **personal, LLM-generated
+  welcome** — the model greets them informed by the current console
+  context (recent chat, who else is online, their play history), one or
+  two short sentences, sent through the say tool. Runs off the packet
+  loop with its own rate limit (`GREET_INTERVAL`, so a join burst can't
+  block chat questions or spam the channel). Recorded in the history like
+  a reply. Disable with `greet_on_join: false` on the agent (default on).
 - **Context — who's online + player stats**: the system prompt is rebuilt
   before every ask with the current online player list and per-player
   stats (total play time + admin status), e.g.

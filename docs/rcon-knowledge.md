@@ -62,8 +62,14 @@ helpers.write_file(filename, data, append?, for_player?)
   behavior there is a silent skip, like non-zero via `/sc`). non-zero
   writes for THAT PLAYER (transferred to their client, never readable
   server-side) and in the runtime stage (`/sc`) is **always skipped**.
-  So via RCON: pass nothing (nil) or `0` — never a player index, and do
-  not rely on `0` to broadcast anywhere.
+
+  **Why we always pass `false, 0`**: mod/scenario Lua runs determin-
+  istically on the server AND every client (lockstep prediction), so a
+  bare `write_file(f, d)` would execute on all of them — `for_player=0`
+  pins the write to the server's output explicitly. (RCON `/sc` itself
+  executes server-only, so `nil` was already equivalent; `0` makes the
+  intent unambiguous.) The sniffer guard (server_mode_spec) checks every
+  write_file call's last arg is `0` — never a player index.
 
 Writes land in `<user-data>/script-output/`. No size limit (unlike the
 ~4KB rcon.print cap). The user-data dir is the factorio process's

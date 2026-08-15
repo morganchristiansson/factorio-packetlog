@@ -52,7 +52,7 @@ puts "Server: factorio #{version}"
 # Full defines dump via helpers.write_file (no 4KB rcon.print cap)
 rcon.command(
   '/sc local t={} for k,v in pairs(defines.input_action) do t[#t+1]=v..\'=\'..k end ' \
-  'table.sort(t) helpers.write_file(\'input_actions_\'..helpers.game_version..\'.txt\', table.concat(t,\'\n\'))'
+  'table.sort(t) helpers.write_file(\'input_actions_\'..helpers.game_version..\'.txt\', table.concat(t,\'\n\'), false, 0)'
 )
 sleep 1
 dump = File.read(File.expand_path("~/factorio/script-output/input_actions_#{version}.txt"))

@@ -28,7 +28,7 @@ class RconClient
   # servers); the print variant is the fallback when script_output_dir is
   # unavailable (rcon.print truncates around 4KB).
   ROSTER_FILENAME = 'factorio-sniffer-players.json'
-  ROSTER_WRITE_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end helpers.write_file(' + ROSTER_FILENAME.inspect + ', helpers.table_to_json(t))'
+  ROSTER_WRITE_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end helpers.write_file(' + ROSTER_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   ROSTER_PRINT_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner returning player attributes for ALL known players (incl.
@@ -40,7 +40,7 @@ class RconClient
   # ~50 players.
   PLAYER_ATTRS_FILENAME = 'factorio-sniffer-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t))'
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
     'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(helpers.table_to_json(t))'
 
@@ -53,7 +53,7 @@ class RconClient
   # one line — /sc only applies to the first line.
   DUMP_PROTOTYPES_LUA =
     'local function d(k,f) local n={} for x in pairs(prototypes[k]) do n[#n+1]=x end ' \
-    'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n")) end ' \
+    'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n"), false, 0) end ' \
     'd("item","factorio-sniffer-items.txt") d("entity","factorio-sniffer-entities.txt")'
 
   # Build a client from ServerDetect.detect output, or nil when no RCON

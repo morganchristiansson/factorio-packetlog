@@ -103,12 +103,13 @@ either on a client or on the game server host (server mode, with RCON).
   cap). `/players` lists names only (no index). See
   `docs/rcon-knowledge.md` for the full API knowledge base (incl.
   `helpers.write_file` for large dumps, `prototypes.*` ordering).
-- **RCON writes are SERVER-side only**: `helpers.write_file` is NEVER
-  called with the `for_player` argument — a non-zero index writes to
-  that player's client (and is silently skipped via `/sc` runtime), so
-  every dump must land in the server's `script-output/` where the sniffer
-  reads it locally. Guarded by a spec (server_mode_spec checks the Lua
-  constants).
+- **RCON writes are SERVER-side only**: `helpers.write_file` is ALWAYS
+  called with `for_player = 0` (explicit server target) — never a player
+  index, which writes to that player's client and is skipped via `/sc`.
+  Deterministic mod code would run on server + all clients, so `0` pins
+  the write to the server's `script-output/` where the sniffer reads it
+  locally. Guarded by a spec (server_mode_spec checks every write_file
+  call's last arg is 0).
 
 ## Usage
 

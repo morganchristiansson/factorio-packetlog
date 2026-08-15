@@ -287,13 +287,22 @@ check(attrs == [
 ], 'parse_player_attrs + afk_time')
 check(RconClient.parse_player_attrs('garbage').nil?, 'non-JSON payload → nil')
 
-# Hard invariant: NEVER pass for_player to helpers.write_file. A non-zero
-# index writes to that player's CLIENT (unreadable server-side) and via
-# /sc runtime is skipped entirely — a silent no-op. All write_file Lua
-# constants must stay server-side only (filename, data).
+# Hard invariant: helpers.write_file must ALWAYS target the server only.
+# Deterministic mod code runs on server + every client, so a bare call
+# would write everywhere — we pass for_player=0 explicitly (server output;
+# verified live). A non-zero index writes to that player's CLIENT and via
+# /sc runtime is skipped entirely. Guard: every write_file call's LAST
+# argument must be 0 (or absent).
 %w[ROSTER_WRITE_LUA PLAYER_ATTRS_WRITE_LUA DUMP_PROTOTYPES_LUA].each do |const|
-  check(!RconClient.const_get(const).to_s.include?('for_player'),
-        "#{const}: no for_player arg (server-side write only)")
+  lua = RconClient.const_get(const).to_s
+  # Match each helpers.write_file call, allowing one nested paren level
+  # (e.g. helpers.table_to_json(t), table.concat(o,"\n")).
+  calls = lua.scan(/helpers\.write_file\((?:[^()]|\([^()]*\))*\)/)
+  ok = calls.all? do |call|
+    tail = call.sub(/\Ahelpers\.write_file\(/, '').sub(/\)\z/, '').split(',').last.to_s.strip
+    tail == '0' || tail.empty?
+  end
+  check(ok, "#{const}: write_file targets server only (for_player=0, got #{calls.map { |c| c.sub(/\Ahelpers\.write_file\(/, '') }})")
 end
 
 # refresh_roster → load_roster: initial load only (new players come from

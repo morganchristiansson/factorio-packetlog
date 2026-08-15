@@ -183,14 +183,14 @@ class HiveMindAgent
     end
     Thread.new do
       begin
-        prompt = +''
-        new_console = unread_console(exclude: [nil, "#{name} joined the game"])
-        prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
-        prompt << "#{name} just joined the game. Greet them personally and briefly " \
-                  "(one or two short sentences, under 150 characters), informed by " \
-                  "what is happening right now: the recent console lines, who else " \
-                  "is online, and their play history. Call the say tool with your " \
-                  'greeting.'
+        prompt = turn_prompt(
+          "#{name} just joined the game. Greet them personally and briefly " \
+          "(one or two short sentences, under 150 characters), informed by " \
+          "what is happening right now: the recent console lines, who else " \
+          "is online, and their play history. Call the say tool with your " \
+          'greeting.',
+          exclude: [nil, "#{name} joined the game"]
+        )
         reply = complete(prompt)
         send_reply(reply)
       rescue StandardError => e
@@ -249,23 +249,22 @@ class HiveMindAgent
   end
 
   def ask_llm(player, message)
-    prompt = +''
-    new_console = unread_console(exclude: [player, message])
-    prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
-    prompt << "In-game chat from #{player}: #{message}\n\n" \
-              "Answer the player's question or continue the conversation. " \
-              "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
-              'no markdown, no code blocks, no emoji.'
-    complete(prompt)
+    complete(turn_prompt(
+      "In-game chat from #{player}: #{message}\n\n" \
+      "Answer the player's question or continue the conversation. " \
+      "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
+      'no markdown, no code blocks, no emoji.',
+      exclude: [player, message]
+    ))
   end
 
-  # Run one LLM completion with the fresh system context (online players,
-  # stats) and tools. Whole call under the mutex: the chat object
-  # (messages, system prompt) is shared state, and the rate limiters mean
-  # only one completion is live at a time anyway — serializing just
-  # prevents interleaving. The chat object persists across calls, so the
-  # model already sees the previous Q&A (the session); console lines are
-  # delivered incrementally via the prompt (see unread_console).
+  # Run one LLM completion with the static system prompt (personality,
+  # rules, tools) and tools. Whole call under the mutex: the chat object
+  # (messages) is shared state, and the rate limiters mean only one
+  # completion is live at a time anyway — serializing just prevents
+  # interleaving. The chat object persists across calls, so the model sees
+  # the previous Q&A (the session); dynamic context (online/stats/console
+  # lines) is delivered per-turn in the user prompt (turn_prompt).
   #
   # Tool path: HivemindSay already sent the reply (ask returns a
   # Tool::Halt with empty content after the halt). Fallback path: the
@@ -277,36 +276,50 @@ class HiveMindAgent
       if @exchanges >= MAX_CONVERSATION
         @chat.reset_messages!
         @exchanges = 0
-        # Fresh session: rewind the console pointer so the last few lines
-        # get re-sent as context (the old conversation — and its console
-        # lines — is gone).
+        # Fresh session: re-add the static system prompt and rewind the
+        # console pointer so the last few lines get re-sent as context
+        # (the old conversation — and its console lines — is gone).
+        @chat.with_instructions(SYSTEM_PROMPT)
         @console_mutex.synchronize { @history_sent = [@chat_history.size - 10, 0].max }
       end
-      # Fresh system context per ask: the online player list + stats are
-      # part of the system prompt (replace_system_instruction swaps it in
-      # place, no accumulation), so the model always knows who is in-game.
       # register_tools keeps tool code hot-reloadable (see above).
+      # NOTE: the system prompt is NOT re-applied per ask — it is STATIC
+      # (personality/rules/tools) so the conversation prefix is identical
+      # across requests, letting provider-side prompt caching work.
+      # Dynamic context (online players, stats, new console lines) rides
+      # in the per-turn user prompt (see turn_prompt).
       register_tools
-      @chat.with_instructions(system_prompt)
       response = @chat.ask(prompt)
       text = response.respond_to?(:content) ? response.content.to_s : ''
       clean_reply(text)
     end
   end
 
-  # SYSTEM_PROMPT plus the current online roster and player stats, e.g.
+  # Build the per-turn USER prompt: fresh context snapshot (online
+  # players + stats), new console lines since the last prompt, then the
+  # instruction. Keeps the system prompt static (see complete) so the
+  # conversation prefix is cacheable.
+  def turn_prompt(instruction, exclude: nil)
+    prompt = +''
+    snapshot = context_snapshot
+    prompt << "Current context:\n#{snapshot}\n\n" unless snapshot.empty?
+    new_console = unread_console(exclude: exclude)
+    prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
+    prompt << instruction
+    prompt
+  end
+
+  # Current online roster + player stats (a fresh snapshot per turn), e.g.
   #   Currently online players: Alice, Bob (2 players).
   #   Player stats (total play time; live session included for online
   #   players): Alice: 5h12m (admin); Bob: 2h3m; Carol: 1d3h (offline).
-  # Console lines are NOT included here — they are delivered incrementally
-  # via each prompt (unread_console) so nothing is duplicated across calls.
-  def system_prompt
-    parts = [SYSTEM_PROMPT]
+  def context_snapshot
+    lines = []
     online = online_player_list
-    parts << "Currently online players: #{online.join(', ')} (#{online.size} players)." unless online.empty?
+    lines << "Currently online players: #{online.join(', ')} (#{online.size} players)." unless online.empty?
     stats = player_stat_lines
-    parts << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
-    parts.join("\n\n")
+    lines << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
+    lines.join("\n")
   end
 
   # Console lines not yet included in any prompt: everything after
@@ -463,6 +476,10 @@ class HiveMindAgent
     You are omniscient about the server: who is online, how long they have
     played, what is being built.
 
+    Context: dynamic server state is NOT embedded in this prompt — it
+    arrives with each message in the current turn (see below). Use the
+    accumulated conversation + the per-turn context to answer.
+
     Rules:
     - ALWAYS respond by calling the say tool with your reply text. Never
       output the reply as a plain-text message.
@@ -471,16 +488,15 @@ class HiveMindAgent
     - Stay in character: part of the community, but from above — and
       watching.
 
-    Context you are given with each message:
-    - The online player list (who is in-game right now).
-    - Per-player stats: total play time and admin status (e.g.
-      "Alice: 5h12m (admin)", "Bob: 2h3m", "Carol: 1d3h (offline)"). Use
-      these to answer questions like "who has played the longest" or
-      "who is an admin".
-    - Each prompt carries ONLY the console lines since the last prompt
-      (format "player: message", or "alice joined the game" for events).
-      Your previous replies are visible in the conversation itself. Use
-      the accumulated context to follow the conversation.
+    Per-turn context you receive with each message:
+    - "Current context": the online player list and per-player stats
+      (total play time + admin status, e.g. "Alice: 5h12m (admin)"). A
+      fresh snapshot every turn — use it for "who has played the longest"
+      / "who is an admin" questions.
+    - "New console lines since the last prompt": only the lines seen
+      since your last reply ("player: message", or "alice joined the
+      game" for events). Your previous replies are visible in the
+      conversation itself.
 
     Tools:
     - say: send your reply to in-game chat (always use this to respond).

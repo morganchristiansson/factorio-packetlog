@@ -68,11 +68,33 @@ class TestHiveMindAgent < Minitest::Test
 
   # ── Context ───────────────────────────────────────────────────
 
-  def test_system_prompt_has_no_history_section
-    @agent.on_chat('alice', 'hey hivemind, whats the bus?')
-    sp = @agent.send(:system_prompt)
-    refute_includes sp, 'Recent console'
-    refute_includes sp, 'alice: hey hivemind, whats the bus?'
+  def test_system_prompt_is_static
+    # The system prompt is personality/rules only — dynamic context lives
+    # in the per-turn user prompt (turn_prompt).
+    sp = HiveMindAgent::SYSTEM_PROMPT
+    refute_includes sp, 'Current context:'
+    refute_includes sp, 'Currently online players:'
+  end
+
+  def test_turn_prompt_includes_snapshot_and_console
+    @agent.on_player_event(:joined, 'alice')
+    @agent.on_player_event(:left, 'bob')
+    prompt = @agent.send(:turn_prompt, 'INSTRUCTION')
+    assert_includes prompt, 'INSTRUCTION'
+    assert_includes prompt, 'alice joined the game'
+    assert_includes prompt, 'bob left the game'
+  end
+
+  def test_context_snapshot_includes_online_and_stats
+    @agent.online_provider = -> { ['alice'] }
+    @agent.player_stats_provider = -> { [{ name: 'alice', index: 1, connected: true, admin: true, online_time_ticks: 5_040_000 }] }
+    snap = @agent.send(:context_snapshot)
+    assert_includes snap, 'Currently online players: alice (1 players).'
+    assert_includes snap, 'alice: 23h20m (admin)'
+  end
+
+  def test_context_snapshot_empty_without_providers
+    assert_empty @agent.send(:context_snapshot)
   end
 
   def test_on_player_event_appends_join_and_leave

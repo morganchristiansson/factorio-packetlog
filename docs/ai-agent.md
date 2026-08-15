@@ -59,16 +59,20 @@ player chat ──► write_to_console action (C→S packet)
   In server mode the join signal is the msg-4 + first-C→S-heartbeat
   confirm (the server's S→C NewPeerInfo broadcast isn't analyzed); clean
   leaves are detected via C→S msg 14.
-- **Context — who's online + player stats**: the system prompt is rebuilt
-  before every ask with the current online player list and per-player
-  stats (total play time + admin status), e.g.
-  `Player stats (total play time across sessions; live session included for
-  online players): Alice: 23h20m (admin); Bob: 8h30m (offline).`
-  The list comes from the sniffer's packet-driven online tracking
-  (`online_players`) and mirrored `PlayerAttrs` (seeded from RCON,
-  maintained by packets); if the sniffer's attrs are empty, the agent falls
-  back to a direct RCON `player_attributes` query. So the AI can answer
-  "who has played the longest", "who is an admin", etc.
+- **Context — static system prompt + per-turn snapshot**: the system
+  prompt is set ONCE (personality/rules/tools, in `lib/ai_agent.rb`
+  SYSTEM_PROMPT) — it is NOT rebuilt per ask, so the conversation prefix
+  is identical across requests and provider-side prompt caching can work.
+  Dynamic context rides in the per-turn USER prompt (`turn_prompt`): a
+  fresh `Current context:` snapshot (online players + per-player stats:
+  total play time + admin status, e.g.
+  `Player stats (...): Alice: 23h20m (admin); Bob: 8h30m (offline).`)
+  plus the new console lines since the last prompt. The list comes from
+  the sniffer's packet-driven online tracking (`online_players`) and
+  mirrored `PlayerAttrs` (seeded from RCON, maintained by packets); if
+  the sniffer's attrs are empty, the agent falls back to a direct RCON
+  `player_attributes` query. So the AI can answer "who has played the
+  longest", "who is an admin", etc.
   If no provider is wired (agent standalone), it falls back to RCON.
 - **Reply = a tool**: the model responds by calling `HivemindSay`
   (`say(text: ...)`), a RubyLLM tool that sends the text through RCON

@@ -129,7 +129,7 @@ class HiveMindAgent
   # api_base override the defaults and HIVE_* env vars. Chat completions
   # need an API key (HIVE_API_KEY / --ai-api-key / OPENAI_API_KEY).
   def initialize(rcon:, model: nil, provider: nil, api_key: nil,
-                 api_base: nil, trigger: TRIGGER)
+                 api_base: nil, trigger: TRIGGER, session_path: nil)
     @rcon = rcon
     @trigger = trigger
     @model = model || ENV['HIVE_MODEL'] || DEFAULT_MODEL
@@ -155,8 +155,13 @@ class HiveMindAgent
     @console_queue = []
     @recent_console = []
     @console_mutex = Mutex.new
+    # Session persistence: console history + LLM conversation are saved to
+    # disk so a full RESTART (not just Ctrl-C) can resume — packets while
+    # stopped are lost, but the context carries over.
+    @session_path = session_path || ENV['HIVE_SESSION']
 
     configure_llm(provider)
+    load_session if @session_path && !@disabled
   end
 
   # Feed a decoded chat message (player name, message text). Called by the
@@ -310,6 +315,8 @@ class HiveMindAgent
       text = response.respond_to?(:content) ? response.content.to_s : ''
       clean_reply(text)
     end
+  ensure
+    persist! if @session_path  # conversation changed — save for restart
   end
 
   # Build the per-turn USER prompt: fresh context snapshot (online
@@ -376,6 +383,7 @@ class HiveMindAgent
         end
       end
     end
+    persist_queue! if @session_path
   end
 
   # Names of players currently in-game. Primary source: the sniffer's
@@ -534,4 +542,81 @@ class HiveMindAgent
       admin/permission changes, no build/destroy/reset commands, no /sc
       Lua that writes or mutates. Read-only only.
   PROMPT
+
+  # ── Session persistence (restart-safe) ──────────────────────────
+
+  # Restore console history + LLM conversation from the session file so a
+  # RESTART (not just Ctrl-C) can resume. A corrupt/missing file starts
+  # fresh. Tool-call and tool-result messages are skipped (no text); the
+  # meaningful user prompts (which carry the console lines) and assistant
+  # replies are kept.
+  def load_session
+    return unless @session_path && File.exist?(@session_path)
+    data = JSON.parse(File.read(@session_path))
+    @exchanges = data['exchanges'].to_i
+    if data['console_queue'].is_a?(Array)
+      @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] }
+    end
+    if data['recent_console'].is_a?(Array)
+      @recent_console = data['recent_console'].map { |e| [e[0], e[1].to_s] }
+    end
+    (data['messages'] || []).each do |m|
+      next unless m['role'] && m['content']
+      @chat.add_message(role: m['role'].to_sym, content: m['content'])
+    end
+    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, #{data['messages']&.size || 0} conversation messages"
+  rescue JSON::ParserError, StandardError => e
+    warn "[hivemind] session load failed (#{e.class}: #{e.message}) — starting fresh"
+    @console_queue = []
+    @recent_console = []
+    @exchanges = 0
+  end
+
+  # Full persist: console queue + recent + conversation messages. Called
+  # after each completion (conversation changed).
+  def persist!
+    @console_mutex.synchronize do
+      data = {
+        'version' => 1,
+        'exchanges' => @exchanges,
+        'console_queue' => @console_queue,
+        'recent_console' => @recent_console,
+        'messages' => serialize_messages,
+      }
+      write_session(data)
+    end
+  end
+
+  # Cheap persist (queue/recent only) — called from append_history on the
+  # packet thread so a crash between triggers doesn't lose unread lines.
+  def persist_queue!
+    @console_mutex.synchronize do
+      write_session({
+        'version' => 1,
+        'exchanges' => @exchanges,
+        'console_queue' => @console_queue,
+        'recent_console' => @recent_console,
+      })
+    end
+  end
+
+  def write_session(data)
+    tmp = "#{@session_path}.tmp"
+    File.write(tmp, JSON.generate(data))
+    File.rename(tmp, @session_path)
+  rescue StandardError => e
+    warn "[hivemind] session persist failed: #{e.class}: #{e.message}"
+  end
+
+  # Conversation as role/content pairs (skips the static system prompt and
+  # empty tool-call/tool-result messages).
+  def serialize_messages
+    return [] unless @chat
+    @chat.messages.filter_map do |m|
+      next if m.role == :system
+      c = m.content
+      next if c.nil? || c.to_s.empty?
+      { 'role' => m.role.to_s, 'content' => c.to_s }
+    end
+  end
 end

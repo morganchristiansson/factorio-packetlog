@@ -75,6 +75,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--ai-provider PROVIDER', 'LLM provider slug (default: openai)') { |v| options[:ai_provider] = v }
     opts.on('--ai-api-key KEY', 'LLM API key for the OpenAI-compatible endpoint (or HIVE_API_KEY / OPENAI_API_KEY env)') { |v| options[:ai_api_key] = v }
     opts.on('--ai-api-base URL', "OpenAI-compatible endpoint base (default: #{HiveMindAgent::DEFAULT_API_BASE}; the /chat/completions path is appended)") { |v| options[:ai_api_base] = v }
+    opts.on('--ai-session PATH', 'Persist the AI session (console history + conversation) to PATH so a RESTART can resume (default: hivemind-session.json)') { |v| options[:ai_session] = v }
 
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
     opts.on('--map-player ID:NAME', 'Map player ID to name (e.g. 1:dlbattle)') do |v|
@@ -92,6 +93,7 @@ if __FILE__ == $PROGRAM_NAME
   options[:ai_provider] ||= ENV['HIVE_PROVIDER']
   options[:ai_api_key] ||= ENV['HIVE_API_KEY']
   options[:ai_api_base] ||= ENV['HIVE_API_BASE']
+  options[:ai_session] ||= ENV['HIVE_SESSION'] || 'hivemind-session.json'
 
   if options[:server_ip] && !options[:server]
     warn 'Warning: --server-ip has no effect without --server'

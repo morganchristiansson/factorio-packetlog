@@ -66,6 +66,44 @@ class TestHiveMindAgent < Minitest::Test
     assert_kind_of Proc, tool.instance_variable_get(:@on_sent)
   end
 
+  # ── Session persistence (restart-safe) ─────────────────────────
+
+  def test_session_persists_and_restores_across_restart
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a1.online_provider = -> { [] }
+      a1.player_stats_provider = -> { [] }
+      a1.on_chat('alice', 'goals: build the bus first')
+      a1.on_player_event(:joined, 'bob')
+      a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
+      a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
+      a1.instance_variable_set(:@exchanges, 3)
+      a1.send(:persist!)
+      assert File.exist?(sess), 'session file written'
+
+      # fresh agent = a restart
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      assert_equal [['alice', 'goals: build the bus first'], [nil, 'bob joined the game']],
+                   a2.instance_variable_get(:@console_queue)
+      assert_equal 3, a2.instance_variable_get(:@exchanges)
+      texts = a2.instance_variable_get(:@chat).messages.map { |m| [m.role, m.content.to_s] }
+      assert_includes texts, [:user, 'turn: what is the bus?']
+      assert_includes texts, [:assistant, 'the bus is at 1k spm']
+      assert a2.instance_variable_get(:@chat).messages.any? { |m| m.role == :system }
+    end
+  end
+
+  def test_corrupt_session_starts_fresh
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      File.write(sess, '{broken json')
+      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      assert_empty a.instance_variable_get(:@console_queue)
+      assert_equal 0, a.instance_variable_get(:@exchanges)
+    end
+  end
+
   # ── Context ───────────────────────────────────────────────────
 
   def test_system_prompt_is_static

@@ -54,6 +54,7 @@ player chat ──► write_to_console action (C→S packet)
   warning when no trigger happens for a long while); after a
   conversation reset the last ~10 lines are re-seeded as fresh context.
   The queue survives hot reloads (agent persists in state).
+- **Restart persistence (`--ai-session PATH`, default `hivemind-session.json`)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `HIVE_SESSION` env overrides.
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or

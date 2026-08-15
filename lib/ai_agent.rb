@@ -17,10 +17,13 @@ class HivemindSay < RubyLLM::Tool
 
   attr_reader :last_sent
 
-  def initialize(rcon:, prefix: 'Hivemind> ')
+  # on_sent: optional callback invoked with the sent text (the agent uses
+  # it to append its own replies to the rolling chat history).
+  def initialize(rcon:, prefix: 'Hivemind> ', on_sent: nil)
     @rcon = rcon
     @prefix = prefix
     @last_sent = nil
+    @on_sent = on_sent
   end
 
   def execute(text:)
@@ -29,6 +32,7 @@ class HivemindSay < RubyLLM::Tool
 
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{@last_sent}"
     @rcon.say("#{@prefix}#{@last_sent}")
+    @on_sent&.call(@last_sent)
     halt('')
   end
 end
@@ -89,6 +93,8 @@ class HiveMindAgent
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
+  HISTORY_SIZE = 20             # rolling chat history kept for context
+  HISTORY_LINE_LEN = 120        # per-line clip in the history context
 
   attr_reader :trigger, :model
 
@@ -123,6 +129,12 @@ class HiveMindAgent
     @exchanges = 0
     @mutex = Mutex.new
     @chat = nil
+    # Rolling chat history (player, message) — INCLUDING the agent's own
+    # replies (appended via HivemindSay#on_sent / the fallback send_reply).
+    # Fed into the system context on every trigger so the model sees what
+    # was said around the message it is answering. Survives hot reloads
+    # (the agent persists in SnifferState).
+    @chat_history = []
 
     configure_llm(provider)
   end
@@ -131,6 +143,7 @@ class HiveMindAgent
   # sniffer from log_action for write_to_console actions. Returns true when
   # a response was dispatched (trigger matched, rate limit passed).
   def on_chat(player, message)
+    append_history(player, message)
     handle(player, message)
   end
 
@@ -179,7 +192,7 @@ class HiveMindAgent
   # name, so this is idempotent and cheap.
   def register_tools
     return unless @chat
-    @chat.with_tool(HivemindSay.new(rcon: @rcon))
+    @chat.with_tool(HivemindSay.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
     @chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
   end
 
@@ -224,7 +237,27 @@ class HiveMindAgent
     parts << "Currently online players: #{online.join(', ')} (#{online.size} players)." unless online.empty?
     stats = player_stat_lines
     parts << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
+    history = chat_history_lines
+    parts << "Recent chat (hivemind = you):\n#{history}" unless history.empty?
     parts.join("\n\n")
+  end
+
+  # Rolling chat history: last HISTORY_SIZE decoded chat messages, oldest
+  # first, one "player: message" per line. Long lines are clipped so the
+  # context stays bounded. The agent's own replies appear as "hivemind: …".
+  def chat_history_lines
+    @chat_history.map do |player, msg|
+      clipped = msg.each_char.first(HISTORY_LINE_LEN).join
+      "  #{player}: #{clipped}"
+    end.join("\n")
+  end
+
+  # Append a chat message to the rolling history (ring buffer).
+  def append_history(player, message)
+    msg = message.to_s.strip
+    return if msg.empty?
+    @chat_history << [player.to_s, msg]
+    @chat_history.shift if @chat_history.size > HISTORY_SIZE
   end
 
   # Names of players currently in-game. Primary source: the sniffer's
@@ -318,6 +351,7 @@ class HiveMindAgent
   # can't break out of the /sc game.print(...) string.
   def send_reply(text)
     return if text.nil? || text.empty?
+    append_history('hivemind', text)
     prefix = 'Hivemind> '
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{text}"
     @rcon.say("#{prefix}#{text}")
@@ -345,6 +379,8 @@ class HiveMindAgent
       "Alice: 5h12m (admin)", "Bob: 2h3m", "Carol: 1d3h (offline)"). Use
       these to answer questions like "who has played the longest" or
       "who is an admin".
+    - Recent chat history (last ~20 messages, "hivemind: …" lines are
+      YOUR OWN previous replies). Use it to follow the conversation.
 
     Tools:
     - say: send your reply to in-game chat (always use this to respond).

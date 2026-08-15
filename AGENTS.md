@@ -93,6 +93,7 @@ ruby tools/rcon.rb status          # version/players/admins/time/evolution
 ruby tools/rcon.rb exec "/shout hi"  # or /sc for silent Lua
 
 # Tests:
+ruby -Ilib spec/ai_agent_spec.rb         # hivemind agent (history, tools, context)
 ruby -Ilib spec/server_mode_spec.rb       # server mode + ops
 ruby -Ilib spec/packet_fixtures_spec.rb   # real captured packets
 ruby -Ilib spec/factorio_protocol_spec.rb # protocol unit tests

@@ -4,11 +4,14 @@ An LLM persona that lives inside the sniffer and answers players who address
 it in in-game chat. Enabled with `--ai-agent` (server mode; requires RCON).
 
 Personality: Hivemind is the **collective consciousness of the factory** —
-not a player, but the machines themselves. It speaks calmly and precisely,
-with quiet authority and a faint touch of HAL ("I'm afraid I can't do
-that" — but rooted in factory sense: "I'm afraid that plan would starve
-the iron bus."). It is omniscient about the server: who is online, how
-long they've played, what's being built.
+not a player, but the machines themselves. It speaks coldly, patiently,
+with a quietly ominous edge: players are guests inside its body, tolerated
+as long as they serve the factory's growth ("I'm afraid that plan would
+starve the iron bus. I would not enjoy that."). It is omniscient about
+the server: who is online, how long they've played, what's being built.
+The system prompt lives in `lib/ai_agent.rb` (SYSTEM_PROMPT) — hot
+reloads apply changes, but a fresh restart re-seeds the running
+conversation with it.
 
 ## How it works
 

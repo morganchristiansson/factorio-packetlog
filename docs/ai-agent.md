@@ -40,15 +40,20 @@ player chat ──► write_to_console action (C→S packet)
   for pcap analysis.
 - **Trigger**: any message containing `hivemind` (case-insensitive). The
   reply is prefixed `Hivemind>` so it's identifiable in chat.
-- **Context — incremental console lines**: the RubyLLM chat object keeps the
-  whole session (previous Q&A), so follow-ups continue the conversation.
-  Console lines are delivered **incrementally**: each prompt carries only
-  the lines seen since the last prompt (`New console lines since the last
-  prompt:` — chat, join/leave events, and the trigger message), so nothing
-  is duplicated across calls. Hivemind's own replies are excluded from
-  that list (they're already in the conversation as assistant messages).
-  Long lines are clipped to 120 chars; after a conversation reset the
-  last ~10 console lines are re-sent as fresh context.
+- **Context — incremental console lines (a queue)**: the RubyLLM chat
+  object keeps the whole session (previous Q&A), so follow-ups continue
+  the conversation. Console lines are a **QUEUE drained on each prompt**:
+  `unread_console` removes everything queued since the last prompt and
+  carries it (`New console lines since the last prompt:` — chat,
+  join/leave events, and the trigger message), so every line reaches the
+  model EXACTLY once, in order. (The old ring buffer + sent-pointer
+  desynchronized on eviction and silently lost the newest lines — goals
+  written in console never reached Hivemind.) Hivemind's own replies are
+  excluded (already in the conversation). Long lines are clipped to 120
+  chars; the queue is capped at 100 unread lines (oldest dropped with a
+  warning when no trigger happens for a long while); after a
+  conversation reset the last ~10 lines are re-seeded as fresh context.
+  The queue survives hot reloads (agent persists in state).
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or

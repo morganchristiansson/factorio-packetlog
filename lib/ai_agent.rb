@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'set'
 require 'time'
 require 'ruby_llm'
 
@@ -93,8 +94,9 @@ class HiveMindAgent
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
-  HISTORY_SIZE = 20             # rolling chat history kept for context
+  HISTORY_SIZE = 100            # max UNREAD console lines kept between prompts
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
+  RESEED_LINES = 10             # console lines re-seeded after a context reset
   GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
 
@@ -133,15 +135,19 @@ class HiveMindAgent
     @mutex = Mutex.new
     @chat = nil
     @greet_on_join = GREET_ON_JOIN
-    # Rolling console history (player, message) — chat lines, join/leave
-    # events, and the agent's own replies (via HivemindSay#on_sent / the
-    # fallback send_reply). @history_sent tracks how many lines have been
-    # included in prompts so far: each prompt carries ONLY the lines since
-    # the last one (no duplication across calls). Guarded by @console_mutex
-    # (separate from @mutex so the packet thread never blocks on a slow
-    # LLM call). Survives hot reloads (the agent persists in state).
-    @chat_history = []
-    @history_sent = 0
+    # Console lines are a QUEUE drained on each prompt: append_history
+    # enqueues (chat lines, join/leave events, the agent's own replies via
+    # HivemindSay#on_sent / the fallback send_reply); unread_console drains
+    # it, so each line reaches the model EXACTLY once. A ring buffer with a
+    # sent-pointer was buggy: evicting from the front desynchronized the
+    # pointer and silently lost the newest lines (goals written in console
+    # never reached Hivemind). @recent_console keeps the last RESEED_LINES
+    # for re-seeding a fresh conversation after MAX_CONVERSATION reset.
+    # Guarded by @console_mutex (separate from @mutex so the packet thread
+    # never blocks on a slow LLM call). Survives hot reloads (the agent
+    # persists in state).
+    @console_queue = []
+    @recent_console = []
     @console_mutex = Mutex.new
 
     configure_llm(provider)
@@ -276,11 +282,16 @@ class HiveMindAgent
       if @exchanges >= MAX_CONVERSATION
         @chat.reset_messages!
         @exchanges = 0
-        # Fresh session: re-add the static system prompt and rewind the
-        # console pointer so the last few lines get re-sent as context
-        # (the old conversation — and its console lines — is gone).
+        # Fresh session: re-add the static system prompt and re-seed the
+        # console queue with the last few lines so the fresh conversation
+        # (which lost all memory) regains context. Skip lines already
+        # queued/unread to avoid duplication.
         @chat.with_instructions(SYSTEM_PROMPT)
-        @console_mutex.synchronize { @history_sent = [@chat_history.size - 10, 0].max }
+        @console_mutex.synchronize do
+          in_queue = @console_queue.to_set
+          reseed = @recent_console.reject { |l| in_queue.include?(l) }
+          @console_queue.unshift(*reseed) unless reseed.empty?
+        end
       end
       # register_tools keeps tool code hot-reloadable (see above).
       # NOTE: the system prompt is NOT re-applied per ask — it is STATIC
@@ -322,19 +333,17 @@ class HiveMindAgent
     lines.join("\n")
   end
 
-  # Console lines not yet included in any prompt: everything after
-  # @history_sent, formatted as "player: message" (or bare for events),
-  # clipped per line. `exclude:` skips one line that the caller states
-  # explicitly (the trigger message, or the join event being greeted).
-  # Agent replies (player == 'hivemind') are excluded too — they are
-  # already in the conversation as assistant messages. Advances the
-  # pointer so each line is sent exactly once.
+  # Console lines not yet included in any prompt: drains the queue (each
+  # line is sent EXACTLY once). `exclude:` skips one line that the caller
+  # states explicitly (the trigger message, or the join event being
+  # greeted). Agent replies (player == 'hivemind') are excluded too — they
+  # are already in the conversation as assistant messages.
   def unread_console(exclude: nil)
     @console_mutex.synchronize do
-      unread = @chat_history.drop(@history_sent)
+      unread = @console_queue.dup
+      @console_queue.clear
       unread.pop if exclude && unread.last == exclude
       unread.reject! { |p, _| p == 'hivemind' }  # replies live in the conversation
-      @history_sent = @chat_history.size
       unread.map do |player, msg|
         clipped = msg.each_char.first(HISTORY_LINE_LEN).join
         player ? "#{player}: #{clipped}" : clipped
@@ -342,15 +351,24 @@ class HiveMindAgent
     end
   end
 
-  # Append a chat/console line to the rolling history (ring buffer).
-  # player is nil for bare console lines (join/leave events); chat and
-  # replies carry the speaker name.
+  # Enqueue a chat/console line. player is nil for bare console lines
+  # (join/leave events); chat and replies carry the speaker name. When the
+  # queue exceeds HISTORY_SIZE (no hivemind trigger in a long while), the
+  # OLDEST unread lines are dropped with a warning — the next prompt stays
+  # bounded. @recent_console keeps the last RESEED_LINES regardless.
   def append_history(player, message)
     msg = message.to_s.strip
     return if msg.empty?
     @console_mutex.synchronize do
-      @chat_history << [player, msg]
-      @chat_history.shift if @chat_history.size > HISTORY_SIZE
+      @console_queue << [player, msg]
+      @recent_console << [player, msg]
+      @recent_console.shift if @recent_console.size > RESEED_LINES
+      if @console_queue.size > HISTORY_SIZE
+        dropped = @console_queue.shift(@console_queue.size - HISTORY_SIZE)
+        if dropped.any?
+          warn "[hivemind] console history truncated: #{dropped.size} oldest lines dropped (no trigger in a while)"
+        end
+      end
     end
   end
 

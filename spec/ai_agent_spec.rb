@@ -33,32 +33,32 @@ class TestHiveMindAgent < Minitest::Test
   def test_on_chat_appends_to_history
     @agent.on_chat('alice', 'hey hivemind')
     @agent.on_chat('bob', 'nice base')
-    history = @agent.instance_variable_get(:@chat_history)
+    history = @agent.instance_variable_get(:@console_queue)
     assert_equal [['alice', 'hey hivemind'], ['bob', 'nice base']], history
   end
 
   def test_history_ignores_blank_messages
     @agent.send(:append_history, 'alice', '   ')
-    assert_empty @agent.instance_variable_get(:@chat_history)
+    assert_empty @agent.instance_variable_get(:@console_queue)
   end
 
-  def test_history_is_a_ring_buffer
-    HiveMindAgent::HISTORY_SIZE.times { |i| @agent.send(:append_history, 'p', "msg #{i}") }
-    history = @agent.instance_variable_get(:@chat_history)
+  def test_history_caps_unread_lines_with_eviction
+    (HiveMindAgent::HISTORY_SIZE + 5).times { |i| @agent.send(:append_history, 'p', "msg #{i}") }
+    history = @agent.instance_variable_get(:@console_queue)
     assert_equal HiveMindAgent::HISTORY_SIZE, history.size
-    assert_equal 'msg 0', history.first[1]
+    assert_equal 'msg 5', history.first[1]  # oldest 5 dropped
   end
 
   def test_hivemind_say_tool_appends_reply
     tool = HivemindSay.new(rcon: FakeRcon.new,
                            on_sent: ->(t) { @agent.send(:append_history, 'hivemind', t) })
     tool.call('text' => 'bus is at 1k spm')
-    assert_equal ['hivemind', 'bus is at 1k spm'], @agent.instance_variable_get(:@chat_history).last
+    assert_equal ['hivemind', 'bus is at 1k spm'], @agent.instance_variable_get(:@console_queue).last
   end
 
   def test_send_reply_fallback_appends_reply
     @agent.send(:send_reply, 'fallback reply')
-    assert_equal ['hivemind', 'fallback reply'], @agent.instance_variable_get(:@chat_history).last
+    assert_equal ['hivemind', 'fallback reply'], @agent.instance_variable_get(:@console_queue).last
   end
 
   def test_register_tools_wires_on_sent_callback
@@ -100,7 +100,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_on_player_event_appends_join_and_leave
     @agent.on_player_event(:joined, 'alice')
     @agent.on_player_event(:left, 'bob')
-    history = @agent.instance_variable_get(:@chat_history)
+    history = @agent.instance_variable_get(:@console_queue)
     # join event, then the leave (greeting is stubbed to send nothing)
     assert_equal [nil, 'alice joined the game'], history[0]
     assert_equal [nil, 'bob left the game'], history[1]
@@ -111,7 +111,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_on_player_event_ignores_blank_name
     @agent.on_player_event(:joined, '  ')
-    assert_empty @agent.instance_variable_get(:@chat_history)
+    assert_empty @agent.instance_variable_get(:@console_queue)
   end
 
   # ── Incremental console lines in prompts ──────────────────────
@@ -159,9 +159,27 @@ class TestHiveMindAgent < Minitest::Test
     @agent.send(:append_history, 'alice', 'one')
     first = @agent.send(:unread_console)
     assert_equal ['alice: one'], first
-    assert_empty @agent.send(:unread_console)  # nothing new since
+    assert_empty @agent.send(:unread_console)  # queue drained
     @agent.send(:append_history, 'bob', 'two')
     assert_equal ['bob: two'], @agent.send(:unread_console)
+  end
+
+  def test_lines_survive_across_prompts_and_eviction
+    # Regression: a ring buffer with a sent-pointer silently LOST the
+    # newest lines once eviction from the front desynchronized the pointer
+    # — goals written in console never reached Hivemind. The queue drains
+    # on send, so every line reaches the model exactly once, in order.
+    20.times { |i| @agent.send(:append_history, 'p', "before #{i}") }
+    prompt1 = @agent.send(:unread_console)  # drains 20
+    assert_equal 20, prompt1.size
+    assert_includes prompt1, 'p: before 0'
+
+    10.times { |i| @agent.send(:append_history, 'p', "goal #{i}") }
+    prompt2 = @agent.send(:unread_console)  # must include ALL 10 new lines
+    assert_equal 10, prompt2.size
+    assert_includes prompt2, 'p: goal 0'
+    assert_includes prompt2, 'p: goal 9'
+    assert_empty @agent.send(:unread_console)
   end
 
   def test_unread_console_clips_long_lines
@@ -200,7 +218,7 @@ class TestHiveMindAgent < Minitest::Test
     agent.on_player_event(:joined, 'alice')
     sleep 0.2
     assert_equal ['hivemind', 'Welcome, alice. The factory is watching.'],
-                 agent.instance_variable_get(:@chat_history).last
+                 agent.instance_variable_get(:@console_queue).last
   end
 
   def test_join_greeting_respects_greet_interval

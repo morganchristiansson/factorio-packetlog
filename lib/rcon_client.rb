@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'json'
 require 'rcon'
 require_relative 'server_detect'
 
@@ -9,24 +10,30 @@ require_relative 'server_detect'
 # Getting data OUT of a Lua command over RCON: the console's `rcon` object
 # sends its argument back through the RCON connection as the command
 # response — the one clean channel:
-#   /sc rcon.print(serpent.line(t))  →  body == "{{i = 1, n = \"morganc\"}}\n"
+#   /sc rcon.print(helpers.table_to_json(t))  →  body == a JSON string
+#
+# JSON (helpers.table_to_json) beats serpent.line + regex: serpent emits
+# Lua table syntax with NO guaranteed key order (it sorts keys
+# alphabetically, which silently broke an order-sensitive regex), and
+# escapes must be hand-unescaped. JSON parses with stdlib JSON.parse.
 #
 # The built-in `/players` command also works over RCON but only lists NAMES
 # (no player index), so it can't bind actions — which carry game player
-# indexes — to names. serpent.line is available in the console environment.
+# indexes — to names.
 class RconClient
   # One-liner (keeps the reported Lua line number at 1) building
-  # {index, name} pairs for connected players.
-  ROSTER_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(serpent.line(t))'
+  # {index, name} pairs for connected players as JSON.
+  ROSTER_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner returning player attributes for ALL known players (incl.
   # offline) — index, name, connected, admin, online_time (total ticks
-  # across all sessions). Seeds PlayerAttrs at startup; afterwards the
-  # sniffer maintains these from the packet stream. Note the ~4KB
-  # rcon.print cap: very large rosters may be truncated (players dropped
-  # from the tail — acceptable, attrs are enrichment).
+  # across all sessions), afk_time (ticks since last action). Seeds
+  # PlayerAttrs at startup; afterwards the sniffer maintains these from
+  # the packet stream. Note the ~4KB rcon.print cap: very large rosters
+  # may be truncated (players dropped from the tail — acceptable, attrs
+  # are enrichment).
   PLAYER_ATTRS_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(serpent.line(t))'
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -52,12 +59,16 @@ class RconClient
 
   # Parse a bare rcon.print roster payload into [{index:, name:}].
   # Returns [] for a valid empty roster, nil when the payload isn't a roster.
+  # Parse a JSON roster payload (see ROSTER_LUA) into [{index:, name:}].
+  # Returns [] for a valid empty roster, nil when the payload isn't JSON.
+  # A truncated payload (rcon.print cap) parses as a partial list.
   def self.parse_roster(body)
-    return nil unless body
-    body = body.strip
-    records = body.scan(/\{i = (\d+), n = "((?:[^"\\]|\\.)*)"\}/)
-    return nil if records.empty? && !body.include?('{}')
-    records.map { |i, n| { index: i.to_i, name: n.gsub(/\\(.)/, '\1') } }
+    parsed = parse_json(body)
+    return nil unless parsed.is_a?(Array)
+    parsed.filter_map do |r|
+      next unless r.is_a?(Hash) && r['i'] && r['n']
+      { index: r['i'].to_i, name: r['n'].to_s }
+    end
   end
 
   # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
@@ -65,27 +76,30 @@ class RconClient
   # nil when the payload isn't one. A truncated payload (rcon.print cap)
   # parses as a partial list.
   #
-  # Order-agnostic: serpent.line sorts record keys alphabetically
-  # (a, c, i, k, n, o), NOT in insertion order — an order-sensitive regex
-  # silently matched nothing (the attrs seed never populated).
+  # JSON (helpers.table_to_json) instead of serpent.line: serpent sorts
+  # keys alphabetically (a, c, i, k, n, o), which silently broke an
+  # order-sensitive regex — the attrs seed never populated.
   def self.parse_player_attrs(body)
-    return nil unless body
-    records = body.scan(/\{([^{}]*)\}/)
-    return nil if records.empty? && !body.include?('{}')
-    records.filter_map do |(inner)|
-      h = {}
-      inner.scan(/(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|true|false|-?\d+)/) do |k, v|
-        v = v[1..-2] if v.start_with?('"')  # unquote string values
-        h[k] = v
-      end
-      next unless h['i'] && h['n']
-      { index: h['i'].to_i,
-        name: h['n'].gsub(/\\(.)/, '\1'),
-        connected: h['c'] == 'true',
-        admin: h['a'] == 'true',
-        online_time: h['o'].to_i,
-        afk_time: h['k'].to_i }
+    parsed = parse_json(body)
+    return nil unless parsed.is_a?(Array)
+    parsed.filter_map do |r|
+      next unless r.is_a?(Hash) && r['i'] && r['n']
+      { index: r['i'].to_i,
+        name: r['n'].to_s,
+        connected: r['c'] == true,
+        admin: r['a'] == true,
+        online_time: r['o'].to_i,
+        afk_time: r['k'].to_i }
     end
+  end
+
+  # Parse the rcon.print body as JSON (helpers.table_to_json output).
+  # Returns the parsed value, or nil for non-JSON payloads.
+  def self.parse_json(body)
+    return nil unless body && !body.strip.empty?
+    JSON.parse(body.strip)
+  rescue JSON::ParserError
+    nil
   end
 
   def initialize(host:, port:, password:, script_output_dir: nil)

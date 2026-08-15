@@ -12,11 +12,15 @@ RCON connection as the command response.
 
 ```lua
 rcon.print("hello")                    -- response body == "hello\n"
-rcon.print(serpent.line(t))            -- tables: serialize first!
+rcon.print(helpers.table_to_json(t))   -- tables → JSON (preferred)
+rcon.print(serpent.line(t))            -- fallback: Lua syntax, keys SORTED alphabetically
 ```
 
-- `serpent.line` is available in the console environment. Without it, tables
-  print as `table: 0x...`.
+- **Prefer `helpers.table_to_json`**: JSON parses with stdlib `JSON.parse`
+  (`RconClient.parse_json`). `serpent.line` emits Lua table syntax and
+  sorts keys alphabetically (NOT insertion order) — an order-sensitive
+  regex silently matched nothing and starved the agent's player stats.
+- Without either, tables print as `table: 0x...`.
 - Every command is executed with `/sc ` prefix (silent: nothing is shown to
   players) in `RconClient#execute`.
 - **One-liner rule**: `/sc` only applies to the FIRST line of the command.
@@ -93,11 +97,10 @@ Built-in command lists only player NAMES — no game index. Use
 `game.connected_players` + `p.index`/`p.name` for the roster:
 
 ```lua
-local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(serpent.line(t))
+local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))
 ```
 
-Parsed by `RconClient.parse_roster` (records `{i = N, n = "name"}` — also
-used for prototype dumps, which emit the same shape).
+Parsed by `RconClient.parse_roster` (JSON array of `{"i":N,"n":"name"}`).
 
 ## Connection details
 
@@ -108,7 +111,7 @@ used for prototype dumps, which emit the same shape).
 ## Gotchas checklist
 
 - [ ] One-liner (multi-line `/sc` silently fails past line 1)
-- [ ] `serpent.line` for any non-scalar value
+- [ ] `helpers.table_to_json` for any non-scalar value (serpent sorts keys!)
 - [ ] Response ≤ ~4KB or use `helpers.write_file`
 - [ ] `prototypes.<kind>`, never `game.<kind>_prototypes`
 - [ ] Iteration order IS the wire ID order (both lists, 1-indexed)

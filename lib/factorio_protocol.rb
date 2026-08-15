@@ -5,6 +5,7 @@
 module FactorioProtocol
   require_relative 'factorio_protocol/packets/heartbeat_packet'
   require_relative 'factorio_protocol/packets/connection_packets'
+  require_relative 'input_actions_20'
 
   # ── Message Types ──────────────────────────────────────────────────
   MESSAGE_TYPES = {
@@ -395,13 +396,54 @@ ACTIONS = {
   # ── Action Name / Length Lookup ────────────────────────────────────
 
   def self.action_name(type)
-    entry = ACTIONS[type]
+    entry = actions[type]
     entry ? entry[0] : "Unknown(#{type})"
   end
 
   def self.action_len(type)
-    entry = ACTIONS[type]
+    entry = actions[type]
     entry ? entry[1] : nil
+  end
+
+  # ── Version-dependent tables (2.0 vs 2.1) ───────────────────────
+
+  # The wire numbering of input actions is version-dependent: 2.0 and 2.1
+  # use different defines.input_action values (verified on a live 2.0.77
+  # session — start_walking=67, write_to_console=104 — vs the 2.1 table's
+  # 69 / 106). ACTIONS (below) is the 2.1 mapping; ACTIONS_20 is 2.0.
+  #
+  # Main action types and input-action SEGMENT types BOTH follow the
+  # server version's enum. select_version picks both maps; defaults to 2.1
+  # (ACTIONS). Survives hot reloads via SnifferState + #select_version.
+  class << self
+    attr_accessor :actions, :segment_types
+  end
+  self.actions = ACTIONS
+  self.segment_types = ACTIONS
+
+  # Name for an input-action segment type under the selected protocol
+  # version. Values in SEGMENT_TYPES_20 are bare strings; ACTIONS entries
+  # are [name, data_len] pairs.
+  def self.segment_action_name(type)
+    entry = segment_types[type]
+    name = entry.is_a?(Array) ? entry[0] : entry
+    name || "Unknown(#{type})"
+  end
+
+  # Pick the main-action + segment-type mapping for a server version
+  # string ("2.0.77", "2.1", or a bare "2.0"). Anything 2.0.x uses the
+  # defines dump; 2.1+ (and unknown) keep the main ACTIONS table. Returns
+  # the chosen label ("2.0" / "2.1+") for logging.
+  def self.select_version(version)
+    if version.to_s.match?(/\A2\.0(\.|\z)/)
+      self.actions = ACTIONS_20
+      self.segment_types = SEGMENT_TYPES_20
+      '2.0'
+    else
+      self.actions = ACTIONS
+      self.segment_types = ACTIONS
+      '2.1+'
+    end
   end
 
   # ── Network Header ─────────────────────────────────────────────────

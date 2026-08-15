@@ -104,8 +104,46 @@ local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.na
   ONE auth reply, the gem's default expects two and times out.
 - `/sc` (silent) instead of `/c` so commands don't print to players.
 
+Protocol version detection (`RconClient#server_version`):
+`rcon.print(helpers.game_version)` → `"2.0.77"`. The sniffer uses it to
+pick the input-action tables (`FactorioProtocol.select_version`) — both
+main actions and segments differ between 2.0 and 2.1 (start_walking 67 vs
+69, write_to_console 104 vs 106). `--protocol-version 2.0` overrides
+(pcap analysis). `tools/validate_actions.rb` re-validates IDs against
+`/toggle-action-logging` output. See docs/protocol-notes.md.
+
 `tools/rcon.rb` — CLI wrapper: `status`, `players`, `exec`, `raw`; env
 overrides `RCON_HOST` / `RCON_PORT` / `RCON_PASSWORD`.
+
+## Interactive Filter Console (stdin)
+
+While running in a terminal, type commands at the sniffer (no restart, no
+Ctrl-C needed) to filter the console output:
+
+```
+/show morganc              only show this player's actions
+/show morganc alice        only show these players
+/show +alice               add a player to the whitelist
+/show -alice               remove a player
+/show *                    clear the whitelist (show everyone)
+/hide NAME...              hide a player's actions (same + / - / * modifiers)
+/actions build             only show these action types
+/noise change_multiplayer_config   hide these action types
+/chat                      toggle chat-only mode (hide all non-chat actions)
+/quiet                     toggle quiet mode (noise actions: wire_dragging/nothing)
+/filter                    show current filter state
+/players                   list online players
+/stats                     session summary
+/help                      list commands
+```
+
+- Chat (`write_to_console`) is **always printed and exempt from all
+  filters** — including the agent's decoded chat feed.
+- Player/action matching is case-insensitive; filters survive Ctrl-C hot
+  reloads (carried in SnifferState).
+- The console reads stdin in a background thread and re-points at the
+  current sniffer after every reload, so it works across hot reloads. It
+  exits silently when stdin isn't available (nohup/systemd/pcap mode).
 
 ## Hot Reload
 

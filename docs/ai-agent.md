@@ -1,0 +1,129 @@
+# Hivemind AI Agent
+
+An LLM persona that lives inside the sniffer and answers players who address
+it in in-game chat. Enabled with `--ai-agent` (server mode; requires RCON).
+
+## How it works
+
+```
+player chat ──► write_to_console action (C→S packet)
+                   │  FactorioProtocol.decode_chat
+                   ▼
+        lib/ai_agent.rb  HiveMindAgent#on_chat(player, message)
+                   │  message contains "hivemind" (case-insensitive)?
+                   ▼
+        RubyLLM chat (OpenAI-compatible endpoint, default opencode.ai/zen)
+         system context: currently-online player list (from the sniffer)
+                   │  model responds by calling the say tool
+                   ▼
+        HivemindSay tool ──► RCON /sc game.print("Hivemind> <reply>")
+                                  ──► everyone sees it
+```
+
+- **Input**: packet-decoded `write_to_console` actions, fed from
+  `FactorioSniffer#log_action`. No server-side mods or log tailing needed —
+  chat is read straight off the wire. Note: chat arrives as an input-action
+  **segment** whose type follows the server's `defines.input_action`
+  (2.0: 104, 2.1: 106). The sniffer auto-detects the protocol version via
+  RCON `/version` (server mode) and switches the segment map
+  (`FactorioProtocol.select_version`); `--protocol-version 2.0` overrides
+  for pcap analysis.
+- **Trigger**: any message containing `hivemind` (case-insensitive). The
+  reply is prefixed `Hivemind>` so it's identifiable in chat.
+- **Context — who's online + player stats**: the system prompt is rebuilt
+  before every ask with the current online player list and per-player
+  stats (total play time + admin status), e.g.
+  `Player stats (total play time across sessions; live session included for
+  online players): Alice: 23h20m (admin); Bob: 8h30m (offline).`
+  The list comes from the sniffer's packet-driven online tracking
+  (`online_players`) and mirrored `PlayerAttrs` (seeded from RCON,
+  maintained by packets); if the sniffer's attrs are empty, the agent falls
+  back to a direct RCON `player_attributes` query. So the AI can answer
+  "who has played the longest", "who is an admin", etc.
+  If no provider is wired (agent standalone), it falls back to RCON.
+- **Reply = a tool**: the model responds by calling `HivemindSay`
+  (`say(text: ...)`), a RubyLLM tool that sends the text through RCON
+  `game.print` (`RconClient#say`, Lua-quoted so output can't inject code)
+  and halts the conversation loop — the reply lands in game chat on the
+  first round trip, no follow-up completion. If a model ignores tools and
+  returns plain text, the fallback `#send_reply` still puts it in chat.
+- **Context**: a rolling conversation is kept in the RubyLLM chat object
+  (follow-ups make sense), reset after 40 exchanges to bound token use.
+- **Truncation**: tool text is sent as-is (the model is told to stay under
+  400 chars); the fallback path truncates to 400.
+
+## Auth (you set this up)
+
+The agent never stores a key — it reads one at startup from:
+
+1. `--ai-api-key KEY` (CLI flag)
+2. `HIVE_API_KEY` env var
+3. `OPENAI_API_KEY` env var
+
+Same for the endpoint/model:
+
+| Setting   | Flag              | Env             | Default                            |
+|-----------|-------------------|-----------------|------------------------------------|
+| endpoint  | `--ai-api-base`   | `HIVE_API_BASE` | `https://opencode.ai/zen/go/v1`    |
+| model     | `--ai-model`      | `HIVE_MODEL`    | `gpt-5.6-luna`                     |
+| provider  | `--ai-provider`   | `HIVE_PROVIDER` | `openai`                           |
+
+The `/chat/completions` path is appended to the base (RubyLLM OpenAI
+provider). Model list: `curl https://opencode.ai/zen/go/v1/models`.
+
+Example:
+
+```bash
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --ai-agent
+# or
+sudo ruby factorio-sniffer.rb --ai-agent --ai-api-key "$HIVE_API_KEY" --ai-model glm-5.3
+```
+
+Without an API key the agent starts disabled with a warning and chat is
+ignored (no LLM calls are made). `HIVE_AGENT=1` enables the agent via env
+alone (equivalent to `--ai-agent`).
+
+## Guards
+
+- **Rate limit**: at most one LLM call per 5 seconds (any burst of
+  "hivemind hivemind hivemind" or a rapid-fire multi-player mention gets one
+  reply). Atomic under a mutex, so concurrent feeds can't both fire.
+- **Silent failure**: if the LLM call errors at runtime (bad key, network),
+  the agent logs the error to the sniffer console but does NOT spam game
+  chat. The agent is only visible in chat when it has something to say.
+- **No feedback loop**: replies use `game.print`, which does not produce a
+  `write_to_console` action; and in server mode the sniffer only analyzes
+  C→S packets anyway, so the agent never sees its own replies.
+
+## Hot reload
+
+The agent survives Ctrl-C code reloads (kept in `SnifferState.ai_agent`),
+so LLM context, the rate limiter, and the RubyLLM connection carry over.
+Only a second Ctrl-C (quit) ends it — and since it's a plain object with no
+threads, there's nothing to clean up.
+
+## Tools
+
+Tools are `RubyLLM::Tool` subclasses constructed with their dependencies
+and registered with `@chat.with_tool(...)` (RubyLLM accepts instances).
+They are **re-registered fresh before every ask**, so Ctrl-C hot reloads
+rebind tool classes immediately — no restart needed for tool changes.
+
+- **`HivemindSay`** (`say(text: ...)`) — the reply path: sends text to
+  in-game chat via RCON `game.print` (`RconClient#say`, Lua-quoted so
+  output can't inject code) and halts the conversation loop — the reply
+  lands on the first round trip.
+- **`RconQuery`** (`rcon_query(command: ...)`) — runs a READ-ONLY RCON
+  console command (`/players`, `/admins`, `/time`, `/evolution`,
+  `/sc rcon.print(...)` Lua queries) and returns the output (truncated to
+  1500 chars). The tool desc and system prompt instruct read-only use: no
+  admin/permission changes, no state mutation. A leading `/` is added if
+  missing.
+
+Future candidates (same pattern):
+
+- `item_lookup` / `entity_lookup` — map wire prototype IDs to names via
+  `ItemDB` (`@item_db` / `@entity_db` on the sniffer).
+- `recent_actions` — what players have been doing (from the packet decoder).
+
+Not wired up yet, per requirements.

@@ -19,6 +19,15 @@ class RconClient
   # {index, name} pairs for connected players.
   ROSTER_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(serpent.line(t))'
 
+  # One-liner returning player attributes for ALL known players (incl.
+  # offline) — index, name, connected, admin, online_time (total ticks
+  # across all sessions). Seeds PlayerAttrs at startup; afterwards the
+  # sniffer maintains these from the packet stream. Note the ~4KB
+  # rcon.print cap: very large rosters may be truncated (players dropped
+  # from the tail — acceptable, attrs are enrichment).
+  PLAYER_ATTRS_LUA =
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time} end rcon.print(serpent.line(t))'
+
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
   # 1-indexed ids ARE the `prototypes.<kind>` iteration order
@@ -51,6 +60,24 @@ class RconClient
     records.map { |i, n| { index: i.to_i, name: n.gsub(/\\(.)/, '\1') } }
   end
 
+  # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
+  # [{index:, name:, connected:, admin:, online_time:}]. Returns nil when
+  # the payload isn't one. A truncated payload (rcon.print cap) parses as a
+  # partial list.
+  def self.parse_player_attrs(body)
+    return nil unless body
+    body = body.strip
+    records = body.scan(/\{i = (\d+), n = "((?:[^"\\]|\\.)*)", c = (\w+), a = (\w+), o = (\d+)\}/)
+    return nil if records.empty? && !body.include?('{}')
+    records.map do |i, n, c, a, o|
+      { index: i.to_i,
+        name: n.gsub(/\\(.)/, '\1'),
+        connected: c == 'true',
+        admin: a == 'true',
+        online_time: o.to_i }
+    end
+  end
+
   def initialize(host:, port:, password:, script_output_dir: nil)
     @host, @port, @password = host, port, password
     @script_output_dir = script_output_dir
@@ -66,6 +93,12 @@ class RconClient
     self.class.parse_roster(execute(ROSTER_LUA))
   end
 
+  # [{index:, name:, connected:, admin:, online_time:}] for ALL known
+  # players (incl. offline), or nil if the query failed.
+  def player_attributes
+    self.class.parse_player_attrs(execute(PLAYER_ATTRS_LUA))
+  end
+
   # Write item + entity prototype name dumps to the server's script-output
   # dir (files factorio-sniffer-items.txt / factorio-sniffer-entities.txt)
   # via helpers.write_file. Returns true when the command ran; the caller
@@ -73,6 +106,43 @@ class RconClient
   def dump_prototype_files
     execute(DUMP_PROTOTYPES_LUA)
     true
+  end
+
+  # Send a chat message visible to all players (game.print via /sc). The
+  # message is Lua-string-quoted, so arbitrary content (quotes, backslashes,
+  # newlines) can't break out of the string or inject Lua. Used by the
+  # HiveMind agent to reply to in-game chat.
+  def say(text)
+    return if text.nil? || text.empty?
+    escaped = text.gsub('\\', '\\\\').gsub('"', '\\"').gsub(/[\r\n]+/, ' ')
+    execute("game.print(\"#{escaped}\")")
+  end
+
+  # Server version string (e.g. "2.0.77") via the rcon.print data channel
+  # (helpers.game_version — game.version doesn't exist), or nil on failure.
+  # Used to pick the protocol's segment-type mapping
+  # (FactorioProtocol.select_version).
+  def server_version
+    body = execute('rcon.print(helpers.game_version)').strip
+    body.empty? ? nil : body
+  end
+
+  # Run an arbitrary RCON console command (raw, NO /sc Lua prefix) and
+  # return its body. Used by the Hivemind agent's rcon_query tool — the
+  # model passes full commands like "/players" or "/sc rcon.print(...)".
+  # Reconnects once on failure, same as #execute.
+  def command(cmd)
+    body = nil
+    @mutex.synchronize { body = @client.execute(cmd).body.to_s }
+    body
+  rescue => e
+    begin
+      @client = connect
+      @mutex.synchronize { @client.execute(cmd).body.to_s }
+    rescue => e2
+      warn "RCON execute failed: #{e2.class}: #{e2.message}"
+      ''
+    end
   end
 
   private

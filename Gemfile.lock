@@ -1,7 +1,16 @@
 GEM
   remote: https://rubygems.org/
   specs:
+    event_stream_parser (1.0.0)
+    faraday (2.14.3)
+    faraday-multipart (1.2.0)
+    faraday-net_http (3.4.4)
+    faraday-retry (2.4.0)
+    marcel (1.2.1)
     pcaprub (0.13.3)
+    ruby_llm (1.16.0)
+    ruby_llm-schema (0.4.0)
+    zeitwerk (2.8.3)
 
 PLATFORMS
   ruby
@@ -9,6 +18,7 @@ PLATFORMS
 
 DEPENDENCIES
   pcaprub (~> 0.13)
+  ruby_llm (~> 1.16)
 
 BUNDLED WITH
    2.6.9

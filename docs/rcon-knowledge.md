@@ -55,6 +55,18 @@ Pattern: one `/sc` one-liner writes the whole dump to a file, then read the
 file from `script-output/`. Used by `lib/rcon_client.rb#dump_prototype_files`
 and `tools/item_db.rb` (items + entities, no chunking needed).
 
+## helpers.game_version — server version (single value)
+
+```lua
+rcon.print(helpers.game_version)   -- → "2.0.77"
+```
+
+`helpers.game_version` exists on 2.0.x and 2.1.x (`game.version` does NOT
+— `LuaGameScript` has no `version` key). Used by
+`lib/rcon_client.rb#server_version` to pick the protocol's segment-type
+mapping (`FactorioProtocol.select_version`; chat segment type is 104 on
+2.0, 106 on 2.1 — see docs/protocol-notes.md).
+
 ## prototypes.* — wire prototype IDs
 
 The wire protocol references items/entities by 1-indexed ID. Those IDs are

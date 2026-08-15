@@ -11,6 +11,12 @@ require 'factorio_types'
 FIXTURE_DIR = File.join(__dir__, 'fixtures')
 
 class FixtureTests < Minitest::Test
+  def teardown
+    # Never leak the version-dependent tables into other tests.
+    FactorioProtocol.actions = FactorioProtocol::ACTIONS
+    FactorioProtocol.segment_types = FactorioProtocol::ACTIONS
+  end
+
   def parse_fixture(name)
     path = File.join(FIXTURE_DIR, "#{name}.bin")
     refute_nil path, "Fixture #{name}.bin not found"
@@ -111,6 +117,52 @@ class FixtureTests < Minitest::Test
 
   # ── Chat decode unit tests ─────────────────────────────────
   # These test the REAL FactorioProtocol.decode_chat, not a private copy.
+
+  # A 2.0.77 live capture of the player typing "hivemind, are you there?"
+  # (extracted from factorio.pcap). Chat arrives as an input-action SEGMENT
+  # whose type follows the server version's defines.input_action:
+  # 2.0 → 104, 2.1 → 106. Main action types are version-stable.
+  def test_chat_20_segment_decodes_under_2_0_mapping
+    FactorioProtocol.select_version('2.0.77')
+    result = parse_fixture('chat_20_segment')
+    actions = extract_actions(result)
+    act = actions.find { |a| a[:name] == 'write_to_console' }
+    refute_nil act, "expected write_to_console action, got: #{actions.map { |a| a[:name] }.inspect}"
+    assert_equal 'hivemind, are you there?', FactorioProtocol.decode_chat(act[:data])
+  end
+
+  def test_chat_20_segment_is_gui_click_under_2_1_default
+    # Regression: with the 2.1 segment map (the tool's original default),
+    # the 2.0 chat segment type 104 resolves to gui_click, so the sniffer's
+    # log_action chat branch (act[:name] == 'write_to_console') never fires
+    # and the message is never treated as chat.
+    FactorioProtocol.segment_types = FactorioProtocol::ACTIONS
+    result = parse_fixture('chat_20_segment')
+    act = extract_actions(result).first
+    assert_equal 'gui_click', act[:name]
+    refute_equal 'write_to_console', act[:name]
+  end
+
+  def test_segment_type_names_per_version
+    FactorioProtocol.select_version('2.0.77')
+    assert_equal 'write_to_console', FactorioProtocol.segment_action_name(104)
+    assert_equal 'gui_click', FactorioProtocol.segment_action_name(102)
+    FactorioProtocol.select_version('2.1')
+    assert_equal 'write_to_console', FactorioProtocol.segment_action_name(106)
+    assert_equal 'gui_click', FactorioProtocol.segment_action_name(104)
+  end
+
+  def test_select_version_bare_2_0
+    FactorioProtocol.select_version('2.0')
+    assert_equal 'write_to_console', FactorioProtocol.segment_action_name(104)
+  end
+
+  def test_select_version_unknown_keeps_2_1
+    FactorioProtocol.select_version('9.9')
+    assert_equal 'gui_click', FactorioProtocol.segment_action_name(104)
+  end
+
+  # ── Chat decode unit tests (2.1 fixtures) ───────────────────
 
   def test_chat_05_segment
     assert_equal 'hello', FactorioProtocol.decode_chat(([0x05, 5] + 'hello'.bytes).pack('C*'))

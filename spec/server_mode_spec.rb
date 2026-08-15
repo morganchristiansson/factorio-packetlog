@@ -78,9 +78,10 @@ check(out.include?('outgoing broadcasts skipped (server mode)=1'),
       "outgoing counter == 1 (got: #{out[/outgoing broadcasts skipped[^\n]*/].inspect})")
 check(!out.include?('[summary] packets=4'), 'no packet 4 expected (all 3 accounted for)')
 
-# capture file: client chat (incoming) + server echo (outgoing) are
-# captured; only msg13 TransferBlocks are excluded from capture in server
-# mode. Close the writer to flush the background thread's buffer.
+# capture file: only the incoming client packet is captured — outgoing
+# server broadcasts and msg13 TransferBlocks are excluded from capture in
+# server mode (analysis never reads them; --full-capture keeps everything).
+# Close the writer to flush the background thread's buffer.
 sniffer.instance_variable_get(:@pcap_writer).close
 pcap_bytes = File.binread(capture_path)
 recs = 0
@@ -96,7 +97,7 @@ while off + 16 <= pcap_bytes.bytesize
   off += incl
 end
 puts "  INFO: captured #{recs} records, #{bad} large (>=500B) payloads"
-check(recs == 2, "capture has 2 records (client + echo), msg13 excluded (got #{recs})")
+check(recs == 1, "capture has 1 record (client only), echo + msg13 excluded (got #{recs})")
 check(bad.zero?, 'no 503-byte TransferBlock payloads in capture')
 
 # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
@@ -300,6 +301,59 @@ sr4 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }
 sr4.instance_variable_set(:@rcon, fake3)
 sr4.send(:load_roster)              # reload — must NOT query again
 check(queries == 1, 'roster queried exactly once across hot reload')
+
+# ── Test 7: capture filters (keepalives, directions, full-capture) ────
+puts "\nTest 7: capture filters"
+def capture_records(sniffer)
+  w = sniffer.instance_variable_get(:@pcap_writer)
+  w.close
+  recs = []
+  off = 24
+  data = File.binread(w.instance_variable_get(:@path))
+  while off + 16 <= data.bytesize
+    _, _, incl, _ = data.unpack('VVVV', offset: off)
+    off += 16
+    break if off + incl > data.bytesize
+    payload = data[off + 14, incl - 14] # strip Ethernet header only
+    recs << payload if payload && payload.bytesize >= 1
+    off += incl
+  end
+  recs
+end
+
+# keepalive-only C→S heartbeat (flags 0x0e: single all-empty closure)
+keepalive = "\x06\x0e\x00\x00\x00\x00".b
+# C→S heartbeat with input action (flags 0x02: closures, not all-empty)
+acting = "\x06\x02\x00\x00\x00\x00".b
+# S→C echoed heartbeat (flags 0x02) — outgoing, dropped in server mode
+s2c = "\x07\x02\x00\x00\x00\x00".b
+
+f1 = File.join(Dir.tmpdir, 'filt.pcap')
+File.delete(f1) if File.exist?(f1)
+cap_path = f1
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, save_capture: cap_path) do |s|
+  ts = 1_700_000_000.0
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
+  s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
+  s.send(:process_packet, 3, ts, SERVER_IP, CLIENT_IP, 34197, 34197, s2c, "\x00" * 14 + s2c)
+end
+recs = capture_records(sn)
+check(recs.size == 1, "server mode keeps only the incoming action heartbeat (got #{recs.size})")
+check(recs[0] && recs[0].bytesize == acting.bytesize && recs[0].start_with?("\x06\x02"), 'kept record is the C→S action heartbeat')
+
+# full-capture keeps everything (keepalives + outgoing echo + msg13)
+f2 = File.join(Dir.tmpdir, 'full.pcap')
+File.delete(f2) if File.exist?(f2)
+cap_path = f2
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, save_capture: cap_path, full_capture: true) do |s|
+  ts = 1_700_000_000.0
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
+  s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
+  s.send(:process_packet, 3, ts, SERVER_IP, CLIENT_IP, 34197, 34197, s2c, "\x00" * 14 + s2c)
+  s.send(:process_packet, 4, ts, SERVER_IP, CLIENT_IP, 34197, 34197, msg13_packet, "\x00" * 14 + msg13_packet)
+end
+recs = capture_records(sn)
+check(recs.size == 4, "--full-capture records all 4 packets (got #{recs.size})")
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

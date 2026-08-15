@@ -24,6 +24,7 @@ require_relative 'lib/player_db'
 require_relative 'lib/pcap'
 require_relative 'lib/live_capture'
 require_relative 'lib/rcon_client'
+require_relative 'lib/ai_agent'
 require_relative 'lib/factorio_sniffer'
 
 # ─────────────────────────────────────────────────────────────────────
@@ -53,13 +54,25 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--server', 'Server mode: run on the game server host (auto-enabled when a factorio server is detected on this host). Analyzes only incoming (client→server) packets — no broadcast duplicates — and excludes map-download save packets (msg 13) from analysis and capture.') { |v| options[:server] = true }
     opts.on('--server-ip IP', 'Server IP for --server mode (default: auto-detected from local interfaces)') { |v| options[:server_ip] = v }
     opts.on('--no-rcon', 'Disable the RCON roster sync (server mode)') { |v| options[:no_rcon] = true }
-    opts.on('--save-capture PATH', 'Save captured packets to a pcap file') { |v| options[:save_capture] = v }
+    opts.on('--save-capture PATH', 'Save captured packets to a pcap file (append .gz to write gzip-compressed)') { |v| options[:save_capture] = v }
+    opts.on('--save-transfer-blocks', 'Also record map-download TransferBlock packets (msg 13, raw save data) in the capture. Off by default: they contain no player actions and add ~12% to the file size. Required if you later want tools/extract_save_from_pcap.rb to reconstruct the save.') { |v| options[:save_transfer_blocks] = true }
+    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth (deletes older rotated files). Bounds disk usage on long-running captures.') { |v| options[:keep] = v }
+    opts.on('--full-capture', 'Record every packet as-is: no TransferBlock exclusion, no keepalive-heartbeat filtering, no server-mode direction filter (implies --save-transfer-blocks)') { |v| options[:full_capture] = true }
     opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
     opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }
     opts.on('--entity-db PATH', 'Entity prototype dump file (entity_prototypes_runtime.txt) for entity name lookup (pipette from world)') { |v| options[:entity_db] = v }
     opts.on('--dump-raw-types', 'Dump raw action type IDs with hex data (for reverse engineering)') { |v| options[:dump_raw_types] = v }
     opts.on('--validate', 'Show warnings about unknown action types and potential length mismatches') { |v| options[:validate] = v }
+    opts.on('--protocol-version VERSION', 'Factorio server version for segment-type mapping ("2.0" or "2.1"; default: auto-detect via RCON in server mode, else 2.1). Main action types are version-stable — only input-action segment types differ between 2.0 and 2.1.') { |v| options[:protocol_version] = v }
     opts.on('-q', '--quiet', 'Quiet mode: hide noise actions (wire_dragging, nothing)') { |v| options[:quiet] = v }
+
+    opts.separator ''
+    opts.separator 'Hivemind AI agent:'
+    opts.on('--ai-agent', 'Enable the Hivemind AI agent: answers in-game chat when someone says "hivemind" (case-insensitive). Chat comes from packet-decoded write_to_console actions; requires RCON (server mode) to reply. Needs an API key: --ai-api-key or HIVE_API_KEY/OPENAI_API_KEY.') { |v| options[:ai_agent] = true }
+    opts.on('--ai-model MODEL', "LLM model id (default: #{HiveMindAgent::DEFAULT_MODEL}; see the endpoint's /v1/models list)") { |v| options[:ai_model] = v }
+    opts.on('--ai-provider PROVIDER', 'LLM provider slug (default: openai)') { |v| options[:ai_provider] = v }
+    opts.on('--ai-api-key KEY', 'LLM API key for the OpenAI-compatible endpoint (or HIVE_API_KEY / OPENAI_API_KEY env)') { |v| options[:ai_api_key] = v }
+    opts.on('--ai-api-base URL', "OpenAI-compatible endpoint base (default: #{HiveMindAgent::DEFAULT_API_BASE}; the /chat/completions path is appended)") { |v| options[:ai_api_base] = v }
 
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
     opts.on('--map-player ID:NAME', 'Map player ID to name (e.g. 1:dlbattle)') do |v|
@@ -69,6 +82,14 @@ if __FILE__ == $PROGRAM_NAME
   end
 
   op.parse!
+
+  # Hivemind agent env-var fallbacks (flags win): HIVE_AGENT=1 enables,
+  # HIVE_MODEL / HIVE_PROVIDER / HIVE_API_KEY / HIVE_API_BASE.
+  options[:ai_agent] = true if options[:ai_agent].nil? && ENV['HIVE_AGENT'] && ENV['HIVE_AGENT'] != '0'
+  options[:ai_model] ||= ENV['HIVE_MODEL']
+  options[:ai_provider] ||= ENV['HIVE_PROVIDER']
+  options[:ai_api_key] ||= ENV['HIVE_API_KEY']
+  options[:ai_api_base] ||= ENV['HIVE_API_BASE']
 
   if options[:server_ip] && !options[:server]
     warn 'Warning: --server-ip has no effect without --server'
@@ -183,7 +204,7 @@ if __FILE__ == $PROGRAM_NAME
   # pressed later (more than 5s after the last) is a fresh reload instead —
   # so you can reload repeatedly while editing code, and double-tap to quit.
   SNIFFER_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client ai_agent player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -196,8 +217,25 @@ if __FILE__ == $PROGRAM_NAME
   state = SnifferState.new
   last_interrupt = nil
 
+  # Interactive filter console: reads commands from stdin in a background
+  # thread and dispatches them to the CURRENT sniffer (the loop re-points
+  # it after every hot reload). Commands: /show /hide /actions /noise
+  # /chat /quiet /filter /players /stats — see /help. Exits silently when
+  # stdin is closed/not a tty (nohup, systemd, pcap mode).
+  current_sniffer = nil
+  filter_console = Thread.new do
+    while (line = $stdin.gets)
+      current_sniffer&.handle_command(line)
+    end
+  rescue IOError, Errno::EIO, Errno::EBADF, SystemCallError
+    nil  # stdin unavailable — console disabled
+  end
+  filter_console.name = 'filter-console'
+  puts 'Filter console active — type /help for commands' if $stdin.tty?
+
   loop do
     sniffer = FactorioSniffer.new(options, state)
+    current_sniffer = sniffer
     begin
       sniffer.run
       # Natural completion (pcap exhausted or capture loop ended) → finalize.

@@ -7,6 +7,8 @@ require_relative 'player_db'
 require_relative 'pcap'
 require_relative 'live_capture'
 require_relative 'rcon_client'
+require_relative 'ai_agent'
+require_relative 'player_attrs'
 
 # Mutable session state carried across hot reloads. The entry point keeps
 # one of these; on Ctrl-C it snapshots the running sniffer into it, reloads
@@ -15,7 +17,10 @@ require_relative 'rcon_client'
 class SnifferState
   attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
                 :self_ip, :self_name, :self_index, :peer_names, :conn_names,
-                :roster_loaded
+                :roster_loaded, :ai_agent, :online, :attrs, :game_tick,
+                :attrs_loaded, :protocol_version,
+                :show_players, :hide_players, :show_actions, :hide_actions,
+                :chat_only, :quiet
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -27,8 +32,8 @@ class FactorioSniffer
     @state = state || SnifferState.new
     @player_db = @state.player_db || PlayerDatabase.new(options[:player_db])
     @grief = nil
-    @stats = @state.stats || { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0 }
-    @pcap_writer = @state.pcap_writer || (options[:save_capture] ? PcapWriter.new(options[:save_capture]) : nil)
+    @stats = @state.stats || { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
+    @pcap_writer = @state.pcap_writer || (options[:save_capture] ? PcapWriter.new(options[:save_capture], gzip: options[:save_capture].end_with?('.gz'), keep: options[:keep]) : nil)
     @unknown_writer = @state.unknown_writer || (options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil)
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
@@ -49,6 +54,26 @@ class FactorioSniffer
     # peer_id (network) -> name, for join/leave events (peer ids are NOT
     # game indexes; game indexes come from heartbeat actions instead).
     @peer_names = @state.peer_names || {}
+    # name -> game index for players currently in-game. Unlike player_db
+    # (permanent mapping) this tracks ONLINE status: seeded from the RCON
+    # roster, added on NewPeerInfo (join), index bound from the first C→S
+    # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
+    @online = @state.online || {}
+    # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
+    # once from RCON, maintained by packet decoding. See PlayerAttrs.
+    @attrs = @state.attrs || PlayerAttrs.new
+    # Latest game tick observed in heartbeat tick closures — the clock for
+    # lazy online_time computation (60 ticks/s, tick is in every closure).
+    @game_tick = @state.game_tick || 0
+    # Interactive output filters (stdin console, /show /hide /chat /quiet).
+    # Survive hot reloads via state. Empty list = no restriction.
+    @show_players = @state.show_players || []
+    @hide_players = @state.hide_players || []
+    @show_actions = @state.show_actions || []
+    @hide_actions = @state.hide_actions || []
+    @chat_only = @state.chat_only || false
+    # Runtime toggle overrides the --quiet startup flag (state wins).
+    @quiet = @state.quiet.nil? ? !!@options[:quiet] : @state.quiet
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -100,7 +125,44 @@ class FactorioSniffer
           warn "Prototype DB from RCON failed: #{e.class}: #{e.message}"
         end
       end
+      # Protocol version → input-action SEGMENT-type mapping. Explicit
+      # --protocol-version wins; otherwise ask RCON for
+      # helpers.game_version (cached in state so hot reloads keep it). Main
+      # action types are version-stable and need no switch — only segments
+      # follow defines.input_action.
+      # HiveMind AI agent: reads packet-decoded chat and answers players who
+      # say "hivemind". Survives hot reloads (kept in SnifferState so the
+      # LLM context and rate limiter carry over).
+      @agent = @state.ai_agent
+      # Re-point the agent's online-player source at THIS sniffer instance —
+      # needed on every construction (fresh or hot-reloaded) since the agent
+      # persists while the sniffer object is rebuilt.
+      @agent.online_provider = -> { online_players } if @agent
+      @agent.player_stats_provider = -> { player_stats } if @agent
+      if options[:ai_agent] && !@agent
+        if @rcon
+          @agent = HiveMindAgent.new(
+            rcon: @rcon,
+            model: options[:ai_model],
+            provider: options[:ai_provider],
+            api_key: options[:ai_api_key],
+            api_base: options[:ai_api_base],
+          )
+          @agent.online_provider = -> { online_players }
+          @agent.player_stats_provider = -> { player_stats }
+          unless @agent.disabled?
+            puts "[hivemind] AI agent online — answering chat for \"#{@agent.trigger}\" (model #{@agent.model})"
+          end
+        else
+          warn '[hivemind] --ai-agent requires RCON (server mode); agent disabled'
+        end
+      end
     end
+
+    # Version → segment-type mapping (server mode may also query RCON here;
+    # the RCON client is only created in server mode). Runs on every
+    # construction, including hot reloads.
+    select_protocol_version
   end
 
   # Run the capture/analysis loop. Blocks until the source is exhausted
@@ -118,6 +180,11 @@ class FactorioSniffer
       puts 'SERVER MODE: analyzing only incoming (client→server) packets — no broadcast duplicates'
       puts "  server IP(s): #{@server_ips.join(', ')}"
       puts '  map-download TransferBlocks (save file) excluded from analysis and capture'
+      if @pcap_writer && !@options[:full_capture]
+        puts '  capture: incoming-only + no keepalive-only heartbeats (~20MB per 5h vs ~460MB; --full-capture to record everything)'
+      end
+    elsif @pcap_writer && !@options[:save_transfer_blocks] && !@options[:full_capture]
+      puts '  capture: TransferBlocks (msg 13) and keepalive-only heartbeats excluded (--full-capture to record everything)'
     end
 
     if @options[:pcap]
@@ -128,10 +195,11 @@ class FactorioSniffer
       # known from the start (RCON is authoritative; later joiners are
       # learned from the packet stream). One-shot — see load_roster.
       load_roster if @rcon
+      load_player_attrs if @rcon
       capturer = LiveCapture.new(
         interface: @options[:interface],
         port: @options[:port],
-        transfer_block_sink: @pcap_writer,
+        transfer_block_sink: (@options[:save_transfer_blocks] || @options[:full_capture] ? @pcap_writer : nil),
       )
       puts "Listening on #{@options[:interface]} port #{@options[:port]}..."
       puts 'Press Ctrl+C to reload code; Ctrl+C again to quit.'
@@ -165,10 +233,49 @@ class FactorioSniffer
       st.peer_names = @peer_names
       st.conn_names = @conn_names
       st.roster_loaded = @state.roster_loaded
+      st.ai_agent = @agent
+      st.online = @online
+      st.attrs = @attrs
+      st.game_tick = @game_tick
+      st.attrs_loaded = @state.attrs_loaded
+      st.protocol_version = @state.protocol_version
+      st.show_players = @show_players
+      st.hide_players = @hide_players
+      st.show_actions = @show_actions
+      st.hide_actions = @hide_actions
+      st.chat_only = @chat_only
+      st.quiet = @quiet
     end
   end
 
   private
+
+  # Whether to persist this packet to the capture file. --full-capture keeps
+  # everything; otherwise drop (a) keepalive-only heartbeats (no input
+  # actions / sync actions / heartbeat requests — ~40% of packets in a
+  # typical session) and (b) in server mode, outgoing (server→client)
+  # broadcasts: analysis only reads incoming packets, so the outgoing
+  # direction is N duplicates of the same data (~47% of a server capture).
+  def capture_recordable?(src_ip, dst_ip, udp_data)
+    return true if @options[:full_capture]
+    if @options[:server]
+      return false unless @server_ips.include?(dst_ip)
+    end
+    recordable_heartbeat?(udp_data)
+  end
+
+  # Cheap flag-byte check: keep heartbeats that carry heartbeat requests
+  # (0x01), a synchronizer action (0x10), or tick closures that are not
+  # all-empty (0x02 set, 0x08 clear). Drop pure keepalives. Fragmented
+  # heartbeats are always kept (byte 1 is message_id there, not flags).
+  def recordable_heartbeat?(udp_data)
+    return true if udp_data.bytesize < 2
+    mt = udp_data.getbyte(0) & 0x1F
+    return true unless mt == 6 || mt == 7
+    return true if (udp_data.getbyte(0) & 0x40) != 0
+    f = udp_data.getbyte(1)
+    (f & 0x01) != 0 || (f & 0x10) != 0 || ((f & 0x02) != 0 && (f & 0x08) == 0)
+  end
 
   # Local IPv4 addresses, used in server mode to classify packet direction
   # (dst = incoming/client→server, src = outgoing/server→client).
@@ -190,29 +297,47 @@ class FactorioSniffer
     # Server mode: the server already has the save on disk, so the map
     # download (msg 13 TransferBlocks, ~40 MB per joining player) is dropped
     # entirely — no analysis, no capture. Avoids capture-buffer pressure and
-    # pointless disk usage from N copies of the same save.
-    if @options[:server] && (udp_data.getbyte(0) & 0x1F) == 13
+    # pointless disk usage from N copies of the same save. --full-capture
+    # overrides (falls through to the msg-13 gate below, which writes).
+    if @options[:server] && (udp_data.getbyte(0) & 0x1F) == 13 && !@options[:full_capture]
+      @stats[:capture_skipped] += 1 if @pcap_writer
       return
     end
 
-    # Fast path for map download bursts: TransferBlock (msg 13) packets carry
-    # raw save data — nothing to parse, and at ~20k pps the per-packet parse
-    # cost is what overflowed the capture buffer before. Just persist the
-    # frame (if saving) and move on.
-    if raw_frame && (udp_data.getbyte(0) & 0x1F) == 13
-      @pcap_writer.write_frame(raw_frame, Time.at(ts)) if @pcap_writer
+    # TransferBlock (msg 13) packets carry raw save data — never analyzed,
+    # and at ~20k pps the per-packet parse cost is what overflowed the
+    # capture buffer before. Record them only when explicitly requested
+    # (--save-transfer-blocks / --full-capture); the default is to drop them:
+    # they contain no player actions and added ~12% to a 4.9M-packet capture.
+    if (udp_data.getbyte(0) & 0x1F) == 13
+      if @pcap_writer && (@options[:save_transfer_blocks] || @options[:full_capture])
+        if raw_frame
+          @pcap_writer.write_frame(raw_frame, Time.at(ts))
+        else
+          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
+          @pcap_writer.write_packet(pkt)
+        end
+      else
+        @stats[:capture_skipped] += 1 if @pcap_writer
+      end
       return
     end
 
     # Save to pcap if requested. When a raw frame is available (live capture)
     # write it as-is — much cheaper than rebuilding a fake IP/UDP packet per
     # packet, which matters during map-download bursts (~20k pps).
+    # capture_recordable? drops keepalive-only heartbeats and (server mode)
+    # outgoing broadcasts from the file — analysis-uninteresting packets.
     if @pcap_writer
-      if raw_frame
-        @pcap_writer.write_frame(raw_frame, Time.at(ts))
+      if capture_recordable?(src_ip, dst_ip, udp_data)
+        if raw_frame
+          @pcap_writer.write_frame(raw_frame, Time.at(ts))
+        else
+          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
+          @pcap_writer.write_packet(pkt)
+        end
       else
-        pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
-        @pcap_writer.write_packet(pkt)
+        @stats[:capture_skipped] += 1
       end
     end
 
@@ -280,22 +405,34 @@ class FactorioSniffer
 
     return unless (hb = parsed[:heartbeat])
 
+    # Track the game tick (clock for lazy online_time): the last tick closure
+    # carries the current tick. Anchor any connected players seeded from RCON
+    # whose live-session start we haven't observed yet.
+    if (last_tc = hb[:tick_closures]&.last) && last_tc[:tick]
+      @game_tick = last_tc[:tick] if last_tc[:tick] > @game_tick
+      @attrs.anchor_sessions(@game_tick)
+    end
+
     # synchronizer actions
     hb[:sync_actions]&.each do |sa|
       if sa[:username]  # NewPeerInfo — a player joined (or is this client)
         @peer_names[sa[:peer_id]] = sa[:username]
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
         @player_db.add(pid, sa[:username])
+        @online[sa[:username]] ||= nil  # index bound once a C→S heartbeat confirms it
+        @attrs.connect(sa[:username], @game_tick)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
         unless @self_name == sa[:username]
-          puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})"
+          puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})" if player_visible?(sa[:username])
         end
       end
       if sa[:name] == 'PeerDisconnect' && sa[:peer_id]
         pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
+        @online.delete(pname) if pname
+        @attrs.disconnect(pname, @game_tick) if pname
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-        puts "#{ts_str}  #{pname} left the game"
+        puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
       end
     end
 
@@ -320,6 +457,8 @@ class FactorioSniffer
           if name
             @player_db.add(idx + 1, name)
             @player_db.remove_other_entries_for(name, idx + 1)
+            @online[name] = idx + 1
+            @attrs.set_index(name, idx + 1)
             ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
             puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
           end
@@ -329,6 +468,8 @@ class FactorioSniffer
           # Peer-id-based guess (peer_id+1) may differ for returning players;
           # remove any other slot claiming our name.
           @player_db.remove_other_entries_for(@self_name, idx + 1)
+          @online[@self_name] = idx + 1
+          @attrs.set_index(@self_name, idx + 1)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
         end
@@ -467,8 +608,8 @@ class FactorioSniffer
     return '' unless act[:data] && act[:data].bytesize > 0
     d = act[:data]
 
-    case act[:type]
-    when ActionType::START_WALKING
+    case act[:name]
+    when "start_walking"
       if d.bytesize >= 16
         x = d.unpack1('E', offset: 0)
         y = d.unpack1('E', offset: 8)
@@ -485,7 +626,7 @@ class FactorioSniffer
           return " dir=(#{'%.1f' % x}, #{'%.1f' % y})"
         end
       end
-    when ActionType::BEGIN_MINING_TERRAIN, ActionType::DROP_ITEM
+    when "begin_mining_terrain", "drop_item"
       if d.bytesize >= 8
         raw_x = d.unpack1('i', offset: 0)
         raw_y = d.unpack1('i', offset: 4)
@@ -493,7 +634,7 @@ class FactorioSniffer
         y = raw_y / 256.0
         return " pos=(#{'%.3f' % x}, #{'%.3f' % y})"
       end
-    when ActionType::DECONSTRUCT
+    when "deconstruct"
       if d.bytesize >= 16
         x1 = d.unpack1('i', offset: 0)
         y1 = d.unpack1('i', offset: 4)
@@ -501,19 +642,19 @@ class FactorioSniffer
         y2 = d.unpack1('i', offset: 12)
         return " area=(#{'%.3f' % (x1/256.0)}, #{'%.3f' % (y1/256.0)})-(#{'%.3f' % (x2/256.0)}, #{'%.3f' % (y2/256.0)})"
       end
-    when ActionType::OPEN_ITEM, ActionType::USE_ITEM, ActionType::START_REPAIR
+    when "open_item", "use_item", "start_repair"
       if d.bytesize >= 4
         eid = d.unpack1('V')
         return " entity=##{eid}"
       end
-    when ActionType::CHANGE_SHOOTING_STATE
+    when "change_shooting_state"
       if d.bytesize >= 9
         flag = d.getbyte(0)
         x = d.unpack1('V', offset: 1) / 256.0
         y = d.unpack1('V', offset: 5) / 256.0
         return " shooting=#{flag} pos=(#{'%.3f' % x}, #{'%.3f' % y})"
       end
-    when ActionType::BUILD
+    when "build"
       if d.bytesize >= 9
         x = d.unpack1('i', offset: 0)
         y = d.unpack1('i', offset: 4)
@@ -521,18 +662,18 @@ class FactorioSniffer
         dname = DIR_NAMES[dir] || dir
         return " pos=(#{'%.3f' % (x/256.0)}, #{'%.3f' % (y/256.0)}) dir=#{dname}"
       end
-    when ActionType::ROTATE_ENTITY
+    when "rotate_entity"
       return " dir=#{d.getbyte(0)}"
-    when ActionType::FAST_ENTITY_SPLIT
+    when "fast_entity_split"
       return " slot=#{d.getbyte(0)}"
-    when ActionType::FAST_ENTITY_TRANSFER
+    when "fast_entity_transfer"
       dir = d.getbyte(0) == 1 ? 'put' : 'take'
       return " #{dir}"
-    when ActionType::CHANGE_RIDING_STATE
+    when "change_riding_state"
       return " vehicle=#{d.unpack1('v')}" if d.bytesize >= 2
-    when ActionType::CRAFT
+    when "craft"
       return " recipe_id=#{d.unpack1('V')}" if d.bytesize >= 4
-    when ActionType::CURSOR_TRANSFER
+    when "cursor_transfer"
       if d.bytesize >= 9
         item_id = d.unpack1('v')
         item_name = @item_db ? @item_db.name(item_id) : "item_#{item_id}"
@@ -540,7 +681,7 @@ class FactorioSniffer
         act = action == 1 ? 'put' : 'clear'
         return " #{item_name} #{act}"
       end
-    when ActionType::OPEN_GUI
+    when "open_gui"
       if d.bytesize >= 14
         gt = d.getbyte(0)
         flag = d.getbyte(1)
@@ -566,12 +707,14 @@ class FactorioSniffer
         state = flag == 0 ? 'open' : 'close'
         return " #{state} #{gname} tick=#{tick}"
       end
-    when ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE,
-         ActionType::SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE,
-         ActionType::SELECTED_ENTITY_CHANGED_RELATIVE
+    when "selected_entity_changed_very_close",
+         "selected_entity_changed_very_close_precise",
+         "selected_entity_changed_relative"
       # Client form: [payload][tick(4)][pad(4)] — payload len 1/2/4
       # Server echo: [payload][ref(4)][token(4)][tick-1(4)][pad(4)]
-      plen = { 266 => 1, 267 => 2, 268 => 4 }[act[:type]] || 0
+      plen = { 'selected_entity_changed_very_close' => 1,
+               'selected_entity_changed_very_close_precise' => 2,
+               'selected_entity_changed_relative' => 4 }[act[:name]] || 0
       if d.bytesize >= plen + 12 && d.getbyte(plen) == 0x54
         payload = d[0, plen].unpack1('H*')
         tok = d.unpack1('V', offset: plen + 4)
@@ -582,7 +725,7 @@ class FactorioSniffer
         tick = d.unpack1('V', offset: plen)
         return " payload=#{payload} tick=#{tick}"
       end
-    when ActionType::SELECTED_ENTITY_CLEARED
+    when "selected_entity_cleared"
       # Client: [tick(4)][pad(4)]; server echo: [ref(4)][token(4)]
       if d.bytesize >= 8 && d.getbyte(0) == 0x54
         tok = d.unpack1('V', offset: 4)
@@ -591,12 +734,12 @@ class FactorioSniffer
         tick = d.unpack1('V', offset: 0)
         return " tick=#{tick}"
       end
-    when ActionType::ZOOM_AROUND_POINT
+    when "zoom_around_point"
       if d.bytesize >= 24
         a, b, c = d.unpack('E3')
         return " (#{'%.2f' % a}, #{'%.2f' % b}, #{'%.2f' % c})"
       end
-    when ActionType::MOVE_ON_PAN
+    when "move_on_pan"
       if d.bytesize >= 17
         x = d.unpack1('l', offset: 0) / 256.0
         y = d.unpack1('l', offset: 4) / 256.0
@@ -604,18 +747,18 @@ class FactorioSniffer
         f = d.unpack1('e', offset: 12)
         return " pos=(#{'%.2f' % x}, #{'%.2f' % y}) int=#{v} f=#{'%.2f' % f}"
       end
-    when ActionType::RENDER_MODE_CHANGED
+    when "render_mode_changed"
       return " mode=#{d.getbyte(0)}" if d.bytesize >= 1
-    when ActionType::REMOTE_VIEW_SURFACE
+    when "remote_view_surface"
       if d.bytesize >= 4
         surf_id = d[0, 4].unpack1('N')
         return " surface=#{surf_id}"
       end
-    when ActionType::SETUP_ASSEMBLING_MACHINE
+    when "setup_assembling_machine"
       return " recipe=#{d.unpack1('v')}" if d.bytesize >= 2
-    when ActionType::CONNECT_ROLLING_STOCK, ActionType::DISCONNECT_ROLLING_STOCK
+    when "connect_rolling_stock", "disconnect_rolling_stock"
       return " ref=#{d.unpack1('V')}" if d.bytesize >= 4
-    when ActionType::PIPETTE
+    when "pipette"
       if d.bytesize >= 9
         src = d.getbyte(0)
         ref = d.unpack1('V', offset: 1)
@@ -634,20 +777,20 @@ class FactorioSniffer
         end
         return " src=#{src} ref=#{ref} qual=#{qual}"
       end
-    when ActionType::STACK_TRANSFER, ActionType::INVENTORY_TRANSFER
+    when "stack_transfer", "inventory_transfer"
       if d.bytesize >= 5
         item_id = d.unpack1('v')
         item_name = @item_db ? @item_db.name(item_id) : "item_#{item_id}"
         count = d.unpack1('v', offset: 2)
         return " #{item_name} count=#{count}"
       end
-    when ActionType::QUICK_BAR_PICK
+    when "quick_bar_pick_slot"
       if d.bytesize >= 2
         row = d.getbyte(0)
         slot = d.getbyte(1)
         return " row=#{row} slot=#{slot}"
       end
-    when ActionType::QUICK_BAR_SET
+    when "quick_bar_set_slot"
       if d.bytesize >= 9
         row = d.getbyte(0)
         slot = d.getbyte(1)
@@ -661,9 +804,9 @@ class FactorioSniffer
           return " move row=#{src_row} slot=#{src_slot} -> row=#{row} slot=#{slot}"
         end
       end
-    when ActionType::COPY
+    when "copy"
       return " flags=#{d.unpack1('v')}" if d.bytesize >= 2
-    when ActionType::CHEAT
+    when "cheat"
       return ''
     end
 
@@ -680,18 +823,22 @@ class FactorioSniffer
     # Dump raw type info for reverse engineering
     pname = @player_db.lookup(pid)
 
-
-    # Chat messages
+    # Chat messages: ALWAYS printed (exempt from all filters) and fed to
+    # the agent — chat is the important signal, filters are for action
+    # spam. /chat chat-only mode still hides non-chat actions.
     if act[:name] == 'write_to_console'
       msg = FactorioProtocol.decode_chat(act[:data])
       if msg
+        @agent&.on_chat(pname, msg)
         puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
         return
       end
     end
 
+    return unless visible?(pname, act)
+
     # Skip noise only in quiet mode
-    return if @options[:quiet] && FactorioProtocol::NOISE_ACTIONS.include?(act[:name])
+    return if @quiet && FactorioProtocol::NOISE_ACTIONS.include?(act[:name])
     return if act[:name].start_with?('Unknown')
     # Skip server-internal actions (no real player)
     return if act[:player] == 0xFFFF
@@ -702,12 +849,35 @@ class FactorioSniffer
 
     # Format action data (position, entity refs, etc.)
     data_str = format_action_data(act)
-    suffix = ghost && act[:type] == 68 ? ' [ghost]' : ''
+    suffix = ghost && act[:name] == 'build' ? ' [ghost]' : ''
     if @options[:dump_raw_types]
       hex = act[:data] ? act[:data].unpack1('H*') : ''
       data_str += " [#{hex}]"
     end
     puts "#{ts_str}  #{arrow} #{pname.ljust(16)} #{act[:name].ljust(28)}#{data_str}#{suffix}"
+  end
+
+  # ── Interactive filter console (stdin) ──────────────────────────
+
+  # Visibility of an action line: player filters (AND) + chat-only + action
+  # filters. Filters are stored downcased; names are matched case-
+  # insensitively.
+  def visible?(pname, act)
+    name = pname.to_s.downcase
+    return false if @hide_players.include?(name)
+    return false if @show_players.any? && !@show_players.include?(name)
+    return false if @chat_only && act[:name] != 'write_to_console'
+    return false if @hide_actions.include?(act[:name])
+    return false if @show_actions.any? && !@show_actions.include?(act[:name])
+    true
+  end
+
+  # Same player filtering for join/leave lines (no action criteria).
+  def player_visible?(name)
+    n = name.to_s.downcase
+    return false if @hide_players.include?(n)
+    return false if @show_players.any? && !@show_players.include?(n)
+    true
   end
 
   # Query the RCON roster once and merge {name -> index} into the player
@@ -728,14 +898,148 @@ class FactorioSniffer
     players.each do |p|
       @player_db.add(p[:index], p[:name])
       @player_db.remove_other_entries_for(p[:name], p[:index])
+      @online[p[:name]] = p[:index]  # authoritative online seed (name → game index)
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts}  [rcon]  connected players (#{players.size}): " +
          players.map { |p| "#{p[:name]} (##{p[:index]})" }.join(', ')
   end
 
+  public
+
+  # Names of players currently in-game (online tracking): seeded from the
+  # RCON roster at startup, updated from NewPeerInfo / PeerDisconnect and
+  # bound to game indexes by C→S heartbeats. Sorted for stable output.
+  # Used by the HiveMind agent to know who is online.
+  def online_players
+    @online.keys.sort
+  end
+
+  # Snapshot of mirrored player attributes for the AI agent, with
+  # online_time computed lazily against the current game tick:
+  # [{name:, index:, connected:, admin:, online_time_ticks:}]
+  def player_stats
+    @attrs.snapshot(@game_tick)
+  end
+
+  # Pick the input-action SEGMENT-type mapping for the server's protocol
+  # version. Explicit options[:protocol_version] (--protocol-version) wins;
+  # else query RCON helpers.game_version once and cache in state (survives
+  # hot reloads, which reset FactorioProtocol.segment_types to 2.1 default).
+  def select_protocol_version
+    version = @options[:protocol_version] || @state.protocol_version
+    if version.nil? && @rcon
+      version = @rcon.server_version
+      @state.protocol_version = version if version
+    end
+    return unless version
+    label = FactorioProtocol.select_version(version)
+    puts "[protocol] factorio #{version} — action tables: #{label}"
+  rescue => e
+    warn "Protocol version detection failed: #{e.class}: #{e.message}"
+  end
+
+  # ── Interactive filter console (stdin) ──────────────────────────
+
+  # Handle one line from the interactive filter console. Called by the
+  # entry point's stdin thread; survives hot reloads (filters live in
+  # state, the thread re-points at each new sniffer instance). Chat
+  # (write_to_console) is always printed and exempt from these filters.
+  def handle_command(line)
+    parts = line.strip.split(/\s+/)
+    return if parts.empty?
+    case parts[0]
+    when '/help', '/?'
+      puts <<~HELP
+        filter console (type a command, Enter):
+          /players                     list online players
+          /show NAME...                only show these players (* = clear)
+          /show +NAME  /show -NAME     add / remove one player
+          /hide NAME...                hide these players
+          /hide +NAME  /hide -NAME
+          /actions NAME...             only show these action types
+          /noise NAME...               hide these action types
+          /chat                        toggle chat-only mode (hide all non-chat)
+          /quiet                       toggle quiet mode (noise actions)
+          /filter                      show current filter state
+          /stats                       print session stats
+      HELP
+    when '/players'
+      puts "online (#{online_players.size}): #{online_players.join(', ')}"
+    when '/filter'
+      puts "show_players=#{@show_players.inspect} hide_players=#{@hide_players.inspect}"
+      puts "show_actions=#{@show_actions.inspect} hide_actions=#{@hide_actions.inspect}"
+      puts "chat_only=#{@chat_only} quiet=#{@quiet}"
+    when '/show'  then modify_filter(:@show_players, parts[1..])
+    when '/hide'  then modify_filter(:@hide_players, parts[1..])
+    when '/actions' then modify_filter(:@show_actions, parts[1..])
+    when '/noise' then modify_filter(:@hide_actions, parts[1..])
+    when '/chat'
+      @chat_only = !@chat_only
+      puts "chat-only mode: #{@chat_only ? 'ON' : 'OFF'}"
+    when '/quiet'
+      @quiet = !@quiet
+      puts "quiet mode: #{@quiet ? 'ON' : 'OFF'}"
+    when '/stats'
+      print_summary
+    else
+      puts "unknown command #{parts[0]} — try /help"
+    end
+  rescue StandardError => e
+    warn "filter console error: #{e.class}: #{e.message}"
+  end
+
+  # /show|/hide|/actions|/noise argument handling: replace mode (bare
+  # names), +add / -remove modifiers, or * to clear. Filters are downcased.
+  def modify_filter(iv, args)
+    list = instance_variable_get(iv)
+    if args.nil? || args.empty?
+      puts "#{iv}: #{list.inspect}"
+    elsif args == ['*']
+      list = []
+    elsif args.first.start_with?('+', '-')
+      args.each do |a|
+        name = a[1..].downcase
+        a.start_with?('+') ? list = (list + [name]).uniq : list -= [name]
+      end
+    else
+      list = args.map(&:downcase)
+    end
+    instance_variable_set(iv, list)
+    puts "#{iv}: #{list.inspect}"
+  end
+
+  private
+
+  # (everything below here is private as before)
+
+  # One-shot seed of mirrored LuaPlayer attributes (connected/admin/
+  # online_time) from RCON for ALL known players. After this, the packet
+  # stream maintains them (PlayerAttrs). A failed/truncated query is
+  # non-fatal — attrs are enrichment; the roster/stream keep working.
+  def load_player_attrs
+    return if @state.attrs_loaded
+    @state.attrs_loaded = true
+    return unless @rcon
+    attrs = @rcon.player_attributes
+    return if attrs.nil? || attrs.empty?
+    attrs.each do |a|
+      @attrs.seed(a[:name], index: a[:index], connected: a[:connected],
+                   admin: a[:admin], online_time: a[:online_time])
+      # Players already online per RCON are authoritative for @online too
+      @online[a[:name]] ||= a[:index] if a[:connected]
+    end
+    ts = Time.now.strftime('%H:%M:%S.%L')
+    admins = attrs.select { |a| a[:admin] }.map { |a| a[:name] }
+    puts "#{ts}  [rcon]  player attrs seeded (#{attrs.size} players): " +
+         (admins.empty? ? 'no admins' : "admins: #{admins.join(', ')}")
+  rescue => e
+    warn "Player attrs seed failed: #{e.class}: #{e.message}"
+  end
+
   def print_summary
     puts "[summary] packets=#{@stats[:packets]} factorio=#{@stats[:factorio_packets]} actions=#{@stats[:actions]}"
+    puts "[summary] packets not captured (keepalives/outgoing/transfer)=#{@stats[:capture_skipped]}" if @stats[:capture_skipped]&.positive?
     puts "[summary] outgoing broadcasts skipped (server mode)=#{@stats[:outgoing_skipped]}" if @options[:server]
   end
 end

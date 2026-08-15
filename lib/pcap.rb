@@ -1,18 +1,28 @@
 # frozen_string_literal: true
 
+require 'zlib'
+require 'stringio'
+
 # PCAP Writer (for saving live capture)
 # ─────────────────────────────────────────────────────────────────────
 class PcapWriter
-  def initialize(path)
+  # gzip: true = write the stream gzip-compressed (use a .gz path).
+  # keep: rolling retention in HOURS — rotate the capture every hour
+  #   (renaming the finished file with a timestamp) and delete rotated
+  #   files older than `keep` hours. nil = single file, keep everything.
+  def initialize(path, gzip: false, keep: nil)
     @path = path
-    @file = File.open(path, 'wb')
+    @gzip = gzip
+    @keep_hours = keep
+    @start_time = Time.now
+    @file_start = Time.now
+    @file = open_file(@path)
     # Write pcap global header directly (avoids pack issues)
     @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
     @file.write([2, 4].pack('v2'))  # version
     @file.write([0, 0].pack('V2'))  # timezone, sigfigs
     @file.write([65535].pack('V'))   # snaplen
     @file.write([1].pack('V'))       # linktype = Ethernet
-    @start_time = Time.now
     # Buffered writes flushed by a BACKGROUND thread: the capture loop only
     # appends to the buffer (fast, non-blocking). Flushing on the capture
     # thread stalls it on disk I/O (the workspace is a Docker bind mount),
@@ -39,28 +49,72 @@ class PcapWriter
     @mutex.synchronize do
       @file.write(@buf) unless @buf.empty?
       @buf = +''.b
+      @file.close if @file
+      @file = nil
     end
-    @file.close if @file
   end
 
   private
+
+  def open_file(path)
+    io = File.open(path, 'wb')
+    @gzip ? Zlib::GzipWriter.new(io) : io
+  end
 
   def write_record(ts, data)
     ts_sec = ts.to_i
     ts_usec = ((ts.to_f - ts_sec) * 1_000_000).to_i
     hdr = [ts_sec, ts_usec, data.bytesize, data.bytesize].pack('VVVV')
-    @mutex.synchronize { @buf << hdr << data.b }
+    @mutex.synchronize do
+      return if @closed || @file.nil?
+      rotate_if_due
+      @buf << hdr << data.b
+    end
+  end
+
+  # Hourly rotation + retention: flush/close the finished active file,
+  # rename it with a timestamp, open a fresh one, prune files older than
+  # the retention window. Runs under the write mutex (once per hour — a few
+  # ms of disk I/O on the capture thread is negligible off-burst).
+  def rotate_if_due
+    return unless @keep_hours
+    return if Time.now - @file_start < 3600
+    @file.write(@buf) unless @buf.empty?
+    @buf = +''.b
+    @file.close
+    @file = nil
+    finished = timestamped_path(@file_start.strftime('%Y%m%d-%H%M%S'))
+    File.rename(@path, finished) if File.exist?(@path)
+    @file = open_file(@path)
+    @file_start = Time.now
+    prune_rotated
+  end
+
+  def timestamped_path(ts)
+    ext = File.extname(@path)
+    "#{@path[0...-ext.length]}-#{ts}#{ext}"
+  end
+
+  def prune_rotated
+    cutoff = Time.now - (@keep_hours * 3600)
+    ext = File.extname(@path)
+    stem = File.basename(@path, ext)
+    Dir.glob(File.join(File.dirname(@path), "#{stem}-*#{ext}")).each do |f|
+      File.delete(f) if File.mtime(f) < cutoff
+    end
+  rescue Errno::ENOENT
+    # file vanished between glob and delete
   end
 
   def flush_loop
     until @closed
       sleep 0.2
-      chunk = @mutex.synchronize do
-        c = @buf
+      @mutex.synchronize do
+        next if @buf.empty? || @file.nil?
+        chunk = @buf
         @buf = +''.b
-        c
+        @file.write(chunk)
       end
-      @file.write(chunk) unless chunk.empty?
     end
   rescue IOError
     # file closed
@@ -74,8 +128,37 @@ class PcapReader
     @path = path
   end
 
+  private
+
+  # Decompress a gzip stream, tolerating a missing trailer (capture being
+  # written concurrently): return everything that decompresses.
+  def gunzip_best_effort(raw)
+    out = +''.b
+    gz = Zlib::GzipReader.new(StringIO.new(raw))
+    loop { out << gz.readpartial(1 << 20) }
+    out
+  rescue EOFError
+    out
+  rescue Zlib::GzipFile::Error => e
+    warn "Warning: gzip stream incomplete (#{e.message}); using #{out.bytesize} decompressed bytes"
+    out
+  end
+
+  public
+
   def each_packet(&block)
-    data = File.binread(@path)
+    raw = File.binread(@path)
+    # Gzip-autodetect: [0x1f 0x8b] magic → gunzip in memory (keeps all
+    # downstream tools — extract_save_from_pcap, analysis — working on
+    # compressed captures unchanged). A gz file being written concurrently
+    # has no trailer yet; read what decompresses and warn on truncation.
+    data =
+      if raw.bytesize >= 2 && raw.getbyte(0) == 0x1f && raw.getbyte(1) == 0x8b
+        gunzip_best_effort(raw)
+      else
+        raw
+      end
+
     magic = data.unpack1('V')
     endian = (magic == 0xa1b2c3d4) ? :little : :big
     raise "Not a pcap file" unless [:little, :big].include?(endian)

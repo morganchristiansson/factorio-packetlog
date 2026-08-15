@@ -57,6 +57,14 @@ The player index is computed as: `player = (previous_player + delta) & 0xFFFF`
 where `previous_player` starts at `0xFFFF` (65535) at the beginning of each
 tick closure.
 
+> **Version note**: input-action IDs are version-dependent (2.0 vs 2.1
+> differ — start_walking 67 vs 69, write_to_console 104 vs 106, etc.).
+> `FactorioProtocol.select_version` picks both the main and segment maps;
+> the sniffer auto-detects via RCON `helpers.game_version` (or
+> `--protocol-version`). Verified with `tools/validate_actions.rb`.
+> See [protocol-notes.md](protocol-notes.md) and
+> [lib/input_actions_20.rb](../lib/input_actions_20.rb).
+
 ### Variable-Length Integer Encoding
 
 Factorio uses a variable-length encoding for integers:

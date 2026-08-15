@@ -63,5 +63,43 @@ sudo tcpdump -i eth0 -w session.pcap 'udp port 34197'
 - `tools/extract_save_from_pcap.rb` — reconstruct a chosen download's save
   from the pcap and decompress intact level.dat chunks (handles internally-
   zlib method-0 chunks; outputs `level.dat`, per-chunk files, other entries).
+  Requires the capture to include TransferBlocks: run the sniffer with
+  `--save-transfer-blocks` (off by default since 2025 — TransferBlocks are
+  ~12% of file size and contain no player actions).
 - `tools/extract_players_from_save.rb` — parse the console buffer from a
   decompressed level.dat → 1-indexed name→index JSON.
+
+## Capture size note (verified on a 4.9M-packet / 444 MB client-mode capture)
+
+Most of the file is NOT the input actions: ~64% is fixed per-packet framing
+(16 B pcap record header + 14 B Ethernet + 20 B IP + 8 B UDP), and ~40% of
+packets are **empty keepalive heartbeats** (msg 6/7 with no tick closures, no
+sync actions, no requests — only ~0.4% carry a sync action). TransferBlocks
+(one ~44 MB save download) are ~12%. The input actions themselves are ~2.6M
+actions in ~86 MB of heartbeat payload across 4.9M tiny packets.
+
+## Capture filtering / compression / retention (since 2025)
+
+The sniffer's `--save-capture` now filters and can compress/rotate:
+
+- **TransferBlocks (msg 13)** are excluded by default (no player actions,
+  ~12% of file size); `--save-transfer-blocks` keeps them for save
+  extraction, `--full-capture` records everything.
+- **Keepalive-only heartbeats** (flags byte: no heartbeat requests 0x01, no
+  synchronizer action 0x10, tick closures all-empty 0x08) are dropped —
+  ~40% of packets in a typical session. This is a single-byte check, no
+  parse cost.
+- **Server mode** additionally captures only incoming (C→S) packets: the
+  outgoing direction is the same actions broadcast to every client, and
+  analysis never reads it. A 5h server capture dropped from ~460MB to
+  ~20MB with the two filters combined.
+- **Gzip**: name the capture path with a `.gz` suffix → the stream is
+  written gzip-compressed (measured ~3.4x on a full capture; much better
+  once keepalives are filtered). `PcapReader` auto-detects and gunzips,
+  so `-r` analysis and `tools/extract_save_from_pcap.rb` work unchanged.
+- **Rolling retention**: `--keep HOURS` rotates the capture every hour
+  (timestamped files) and deletes rotated files older than HOURS — bounds
+  disk usage on long-running captures. Combine with `.gz` paths.
+
+All of it is bypassed with `--full-capture` (record every packet as-is,
+implies `--save-transfer-blocks`).

@@ -158,8 +158,8 @@ module FactorioProtocol
       # for player delta decoding; it is filtered at display) plus the FIRST real
       # action, then drop trailing metadata entries.
       if is_server && tc[:actions].size > 1
-        wrapper = tc[:actions].take_while { |a| a[:type] == 84 }
-        real = tc[:actions].find { |a| a[:type] != 84 && a[:type] != 0 }
+        wrapper = tc[:actions].take_while { |a| a[:name] == 'server_tick_info' }
+        real = tc[:actions].find { |a| a[:name] != 'server_tick_info' && a[:type] != 0 }
         tc[:actions] = real ? wrapper + [real] : [tc[:actions].first]
         # Metadata actions may have set hit_unknown; reset so segment parsing proceeds
         tc[:hit_unknown] = false
@@ -185,8 +185,12 @@ module FactorioProtocol
             if existing
               existing[:data] = payload
             else
-              # Add new action from segment
-              seg_name = FactorioProtocol.action_name(seg_type)
+              # Add new action from segment. Segment types follow the
+              # server version's defines.input_action (see
+              # FactorioProtocol.segment_types) — NOT the version-stable
+              # main-action table. 2.0.77: chat arrives as a segment with
+              # type 104 (write_to_console); 2.1: type 106.
+              seg_name = FactorioProtocol.segment_action_name(seg_type)
               tc[:actions] << {
                 type: seg_type, name: seg_name,
                 player: seg_green, game_player: seg_green + 1,
@@ -214,7 +218,9 @@ module FactorioProtocol
       raw_player = (last_index + delta) & 0xFFFF
       game_player = raw_player + 1
       data_start = offset
-      entry = ACTIONS[type]
+      # Version-dependent table (ACTIONS_20 for 2.0, ACTIONS for 2.1) —
+      # names AND data lengths come from the selected map.
+      entry = FactorioProtocol.actions[type]
       name = entry ? entry[0] : "Unknown(#{type})"
       alen = entry ? entry[1] : nil
 
@@ -225,7 +231,8 @@ module FactorioProtocol
       # phantom action (e.g. zoom_around_point Player_252 from the position's
       # x-byte 0x80). S→C echoes send the position as a separate counted action
       # (11B build + 10B position), so it is only folded in for client packets.
-      if type == 68
+      # Version-agnostic: matched by NAME (2.0: build=66, 2.1: 68).
+      if name == 'build'
         if is_drag && !is_server && offset + 21 <= data.bytesize &&
            data.getbyte(offset + 9) == 0x01 && data.getbyte(offset + 10) == 0x01
           alen = 21
@@ -244,7 +251,7 @@ module FactorioProtocol
       #     with a bogus player delta).
       #   Server echo: 14 bytes when it appends entity ref + token + tick,
       #     else the bare 2-byte form [gui_type][flags] (no entity info).
-      if type == 5
+      if name == 'open_gui'
         alen = if is_server
           (offset + 14 <= data.bytesize) ? 14 : 2
         else
@@ -252,27 +259,27 @@ module FactorioProtocol
         end
       end
 
-      # open_character_gui (61) / open_blueprint_library_gui (64):
-      # direction-dependent like open_gui. C→S carries only the 1-byte GUI
-      # type; the S→C echo appends 14 bytes of metadata (15 total). Reading
-      # 15 bytes for C→S swallowed the following hover/266 actions and
-      # re-parsed their headers as phantom actions (e.g. gui_inventory_bar_changed
-      # Player_267, alt_select_blueprint_entities).
-      if type == 61 || type == 64
+      # open_character_gui (2.0: 6 / 2.1: 61) / open_blueprint_library_gui
+      # (2.0: 63 / 2.1: 64): direction-dependent like open_gui. C→S carries
+      # only the 1-byte GUI type; the S→C echo appends 14 bytes of metadata
+      # (15 total). Reading 15 bytes for C→S swallowed the following
+      # hover/266 actions and re-parsed their headers as phantom actions
+      # (e.g. gui_inventory_bar_changed Player_267, alt_select_blueprint_entities).
+      if name == 'open_character_gui' || name == 'open_blueprint_library_gui'
         alen = is_server ? 15 : 1
       end
 
-      # selected_entity_cleared (9): the 8 bytes ACTIONS lists are the C→S
-      # closure [tick][pad] trailer — the game sends the action with NO data
-      # of its own, and the closure trailer follows the LAST action (hb tick
-      # - 8 in captures). Intermediate actions carry no bytes; consuming 8
+      # selected_entity_cleared (2.0/2.1 both 9): the 8 bytes ACTIONS lists are
+      # the C→S closure [tick][pad] trailer — the game sends the action with NO
+      # data of its own, and the closure trailer follows the LAST action (hb
+      # tick - 8 in captures). Intermediate actions carry no bytes; consuming 8
       # here used to eat the next action's header (phantom Player_192/etc.).
       # S→C echo: [ref(4)][token(4)] = 8 bytes (tail follows separately).
-      if type == 9
+      if name == 'selected_entity_cleared'
         alen = is_server ? 8 : (is_last ? 8 : 0)
       end
 
-      # Hover/selection/zoom family (265-268, 128/129, 262, 60, 310): the
+      # Hover/selection/zoom family (2.0/2.1 IDs differ; matched by name): the
       # ACTIONS len is the C→S payload only. C→S tick closures carry ONE
       # 8-byte [tick(4)][pad(4)] trailer after the LAST action (hb tick - 3
       # in captures); intermediate actions carry no trailer. Adding +8 to
@@ -280,7 +287,10 @@ module FactorioProtocol
       # payload bytes as phantom actions (zoom→swap_tile_slots Player_192,
       # selected_entity_changed→drag_train_wait_condition Player_64).
       # S→C echoes append [ref(4)][token(4)][tick-1(4)][pad(4)] = +16.
-      if alen && [60, 128, 129, 262, 265, 266, 267, 268, 310].include?(type)
+      if alen && %w[close_gui zoom_around_point move_on_pan close_remote_view
+                    change_picking_state selected_entity_changed_very_close
+                    selected_entity_changed_very_close_precise
+                    selected_entity_changed_relative render_mode_changed].include?(name)
         alen = if is_server
           alen + 16
         else
@@ -297,14 +307,14 @@ module FactorioProtocol
       elsif alen == 0
         adata = ''.b
       elsif alen.nil?
-        case type
-        when 259 # remote_view_surface — read 4 bytes for surface ID, then stop
+        case name
+        when 'remote_view_surface' # read 4 bytes for surface ID, then stop
           if offset + 4 <= data.bytesize
             adata = data[offset, 4]
             offset += 4
           end
           hit_unknown = true  # stop parsing further actions in this tick
-        when 106 # write_to_console
+        when 'write_to_console'
           s_off, s_len = decode_uint32v(data, offset)
           if s_len && s_off + s_len <= data.bytesize
             adata = data[offset, s_off - offset + s_len]

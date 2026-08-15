@@ -54,6 +54,14 @@ either on a client or on the game server host (server mode, with RCON).
   from the RCON roster, updated on NewPeerInfo / PeerDisconnect, indexes
   bound by C→S heartbeats. Survives hot reloads. Fed to the Hivemind agent
   as context (`HiveMindAgent#online_provider`).
+- **Join/leave in server mode (C→S only)**: server mode has NO S→C
+  analysis (the server's NewPeerInfo/PeerDisconnect broadcasts are
+  dropped — N duplicates per event; possible future: dedup and analyze
+  them). Joins are instead detected at the msg-4 +
+  first-C→S-heartbeat confirm ("confirmed as game player #N") →
+  `HiveMindAgent#on_player_event(:joined, …)` (fires the greeting); clean
+  leaves via C→S msg 14 (RequestForHeartbeatWhenDisconnecting). Crashes/
+  timeouts don't send msg 14 — those linger in @online until reload.
 - **PlayerAttrs** (`lib/player_attrs.rb`): mirrored LuaPlayer attributes
   (connected/admin/online_time) seeded once from RCON at startup, then
   maintained by packets (NewPeerInfo/PeerDisconnect/index binding).

@@ -53,6 +53,9 @@ player chat ──► write_to_console action (C→S packet)
   loop with its own rate limit (`GREET_INTERVAL`, so a join burst can't
   block chat questions or spam the channel). Recorded in the history like
   a reply. Disable with `greet_on_join: false` on the agent (default on).
+  In server mode the join signal is the msg-4 + first-C→S-heartbeat
+  confirm (the server's S→C NewPeerInfo broadcast isn't analyzed); clean
+  leaves are detected via C→S msg 14.
 - **Context — who's online + player stats**: the system prompt is rebuilt
   before every ask with the current online player list and per-player
   stats (total play time + admin status), e.g.

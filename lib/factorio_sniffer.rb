@@ -17,8 +17,8 @@ require_relative 'player_attrs'
 class SnifferState
   attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
                 :self_ip, :self_name, :self_index, :peer_names, :conn_names,
-                :roster_loaded, :ai_agent, :online, :attrs, :game_tick,
-                :attrs_loaded, :protocol_version,
+                :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
+                :game_tick, :attrs_loaded, :protocol_version,
                 :show_players, :hide_players, :show_actions, :hide_actions,
                 :chat_only, :quiet
 end
@@ -59,6 +59,9 @@ class FactorioSniffer
     # roster, added on NewPeerInfo (join), index bound from the first C→S
     # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
     @online = @state.online || {}
+    # src_ip → name for CONFIRMED (in-game) players — lets C→S msg 14
+    # (clean disconnect) resolve the leaver without S→C analysis.
+    @conn_ip_name = @state.conn_ip_name || {}
     # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
     # once from RCON, maintained by packet decoding. See PlayerAttrs.
     @attrs = @state.attrs || PlayerAttrs.new
@@ -232,6 +235,7 @@ class FactorioSniffer
       st.self_index = @self_index
       st.peer_names = @peer_names
       st.conn_names = @conn_names
+      st.conn_ip_name = @conn_ip_name
       st.roster_loaded = @state.roster_loaded
       st.ai_agent = @agent
       st.online = @online
@@ -293,6 +297,15 @@ class FactorioSniffer
 
   def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data, raw_frame = nil)
     @stats[:packets] += 1
+
+    # RequestForHeartbeatWhenDisconnecting (msg 14) — sent C→S by a client
+    # on a clean quit. Server mode has no S→C analysis (the server's
+    # PeerDisconnect broadcast is dropped), so this is the leave signal:
+    # resolve the src_ip to a confirmed player and mark them offline.
+    if (udp_data.getbyte(0) & 0x1F) == 14
+      handle_client_disconnect(src_ip, ts)
+      return
+    end
 
     # Server mode: the server already has the save on disk, so the map
     # download (msg 13 TransferBlocks, ~40 MB per joining player) is dropped
@@ -461,6 +474,12 @@ class FactorioSniffer
             @player_db.remove_other_entries_for(name, idx + 1)
             @online[name] = idx + 1
             @attrs.set_index(name, idx + 1)
+            # src_ip → name for connected players: lets msg 14 (clean
+            # disconnect) resolve the leaver on C→S alone. Server mode has
+            # no S→C analysis (NewPeerInfo/PeerDisconnect broadcasts are
+            # dropped), so joins are detected here and leaves via msg 14.
+            @conn_ip_name[src_ip] = name
+            @agent&.on_player_event(:joined, name)
             ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
             puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
           end
@@ -1043,5 +1062,19 @@ class FactorioSniffer
     puts "[summary] packets=#{@stats[:packets]} factorio=#{@stats[:factorio_packets]} actions=#{@stats[:actions]}"
     puts "[summary] packets not captured (keepalives/outgoing/transfer)=#{@stats[:capture_skipped]}" if @stats[:capture_skipped]&.positive?
     puts "[summary] outgoing broadcasts skipped (server mode)=#{@stats[:outgoing_skipped]}" if @options[:server]
+  end
+
+  # C→S msg 14 (RequestForHeartbeatWhenDisconnecting) — a clean quit.
+  # Resolve the player by src_ip and mark them offline. Note: crashes and
+  # timeouts don't send msg 14 — those leave stale @online entries until a
+  # reload/restart (server mode has no S→C PeerDisconnect analysis).
+  def handle_client_disconnect(src_ip, ts)
+    name = @conn_ip_name.delete(src_ip)
+    return unless name
+    @online.delete(name)
+    @attrs.disconnect(name, @game_tick)
+    @agent&.on_player_event(:left, name)
+    ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+    puts "#{ts_str}  #{name} left the game" if player_visible?(name)
   end
 end

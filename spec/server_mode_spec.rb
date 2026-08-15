@@ -355,5 +355,44 @@ end
 recs = capture_records(sn)
 check(recs.size == 4, "--full-capture records all 4 packets (got #{recs.size})")
 
+# ── Test 9: C→S join/leave detection feeds the agent ──────────────────
+puts "\nTest 9: C→S join/leave detection (agent events)"
+
+# A fake agent that records join/leave events (no LLM).
+fake_agent_class = Class.new do
+  attr_reader :events
+  define_method(:initialize) { @events = [] }
+  define_method(:on_player_event) { |kind, name| @events << [kind, name] }
+  define_method(:on_chat) { |_p, _m| }
+end
+
+# Server mode: joins are detected at the msg4 + first-C→S-heartbeat confirm
+# (the S→C NewPeerInfo broadcast is not analyzed), leaves via C→S msg 14.
+joined = left = nil
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+  agent = fake_agent_class.new
+  s.instance_variable_set(:@agent, agent)
+  ts = 1_700_000_000.0
+  # msg 4 ConnectionRequestReplyConfirm — connection attempt with username
+  msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
+  # first C→S heartbeat with a real action → confirm → :joined
+  s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
+  # msg 14 RequestForHeartbeatWhenDisconnecting — clean quit → :left
+  s.send(:process_packet, 3, ts, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
+  joined, left = agent.events[0], agent.events[1]
+end
+check(joined == [:joined, 'alice'], "join detected on confirm (got #{joined.inspect})")
+check(left == [:left, 'alice'], "leave detected on msg 14 (got #{left.inspect})")
+
+# A disconnected-but-never-confirmed src_ip should not produce a leave.
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+  agent = fake_agent_class.new
+  s.instance_variable_set(:@agent, agent)
+  s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
+  @events = agent.events
+end
+check(@events.empty?, 'msg 14 from unknown src_ip → no leave event')
+
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

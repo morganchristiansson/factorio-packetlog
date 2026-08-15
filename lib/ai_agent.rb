@@ -94,7 +94,13 @@ class HiveMindAgent
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
-  HISTORY_SIZE = 100            # max UNREAD console lines kept between prompts
+  # Max UNREAD console lines kept between prompts. NOT a limit on what the
+  # model sees (that's the conversation) — the queue drains on every
+  # prompt, so this only bounds the case of a LONG silence with no
+  # "hivemind" trigger, where thousands of lines would otherwise overflow
+  # the next prompt's context. 1000 ≈ ~40k tokens, far beyond any real
+  # gap; older lines are dropped with a warning if ever exceeded.
+  HISTORY_SIZE = 1000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   RESEED_LINES = 10             # console lines re-seeded after a context reset
   GREET_ON_JOIN = true          # welcome joining players (LLM greeting)

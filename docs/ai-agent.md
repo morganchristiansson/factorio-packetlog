@@ -50,7 +50,7 @@ player chat ──► write_to_console action (C→S packet)
   desynchronized on eviction and silently lost the newest lines — goals
   written in console never reached Hivemind.) Hivemind's own replies are
   excluded (already in the conversation). Long lines are clipped to 120
-  chars; the queue is capped at 100 unread lines (oldest dropped with a
+  chars; the queue is capped at 1000 unread lines (oldest dropped with a
   warning when no trigger happens for a long while); after a
   conversation reset the last ~10 lines are re-seeded as fresh context.
   The queue survives hot reloads (agent persists in state).

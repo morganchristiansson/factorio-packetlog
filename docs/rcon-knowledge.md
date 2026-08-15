@@ -53,6 +53,16 @@ readlink /proc/<pid>/cwd        # → /home/factorio/factorio
 ls /home/factorio/factorio/script-output/
 ```
 
+**Server-side only**: `for_player` (the 4th arg) must be left NIL — passing
+it redirects the file to THAT PLAYER'S CLIENT data (transferred to their
+machine, not written to the server's script-output), which we can never
+read back. All sniffer calls pass only `(filename, data)`; a `p.index`
+inside the data is just the player index being serialized INTO the JSON,
+not the `for_player` arg. This is how the roster / player-attrs queries
+(and the item/entity prototype dumps) avoid the ~4KB rcon.print cap on
+100+ player servers (`RconClient#json_query` reads the file straight from
+script-output — the sniffer runs on the server host).
+
 In code: `ServerDetect.script_output_dir(pid)`.
 
 Pattern: one `/sc` one-liner writes the whole dump to a file, then read the

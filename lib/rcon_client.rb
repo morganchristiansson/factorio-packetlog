@@ -22,17 +22,26 @@ require_relative 'server_detect'
 # indexes — to names.
 class RconClient
   # One-liner (keeps the reported Lua line number at 1) building
-  # {index, name} pairs for connected players as JSON.
-  ROSTER_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))'
+  # {index, name} pairs for connected players as JSON. Two variants:
+  # WRITE_* writes the JSON to <user-data>/script-output via
+  # helpers.write_file (no 4KB response cap — safe for 100+ player
+  # servers); the print variant is the fallback when script_output_dir is
+  # unavailable (rcon.print truncates around 4KB).
+  ROSTER_FILENAME = 'factorio-sniffer-players.json'
+  ROSTER_WRITE_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end helpers.write_file(' + ROSTER_FILENAME.inspect + ', helpers.table_to_json(t))'
+  ROSTER_PRINT_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner returning player attributes for ALL known players (incl.
   # offline) — index, name, connected, admin, online_time (total ticks
   # across all sessions), afk_time (ticks since last action). Seeds
   # PlayerAttrs at startup; afterwards the sniffer maintains these from
-  # the packet stream. Note the ~4KB rcon.print cap: very large rosters
-  # may be truncated (players dropped from the tail — acceptable, attrs
-  # are enrichment).
-  PLAYER_ATTRS_LUA =
+  # the packet stream. Same write_file/print duality as the roster — at
+  # ~80 B/player the attrs JSON exceeds the 4KB rcon.print cap beyond
+  # ~50 players.
+  PLAYER_ATTRS_FILENAME = 'factorio-sniffer-attrs.json'
+  PLAYER_ATTRS_WRITE_LUA =
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t))'
+  PLAYER_ATTRS_PRINT_LUA =
     'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
@@ -113,14 +122,33 @@ class RconClient
   attr_reader :script_output_dir
 
   # [{index:, name:}] for connected players, or nil if the query failed.
+  # Prefers the write_file path (no 4KB cap) when script_output_dir is
+  # available; falls back to rcon.print.
   def connected_players
-    self.class.parse_roster(execute(ROSTER_LUA))
+    self.class.parse_roster(json_query(ROSTER_FILENAME, ROSTER_WRITE_LUA, ROSTER_PRINT_LUA))
   end
 
-  # [{index:, name:, connected:, admin:, online_time:}] for ALL known
-  # players (incl. offline), or nil if the query failed.
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:}] for ALL
+  # known players (incl. offline), or nil if the query failed. Same
+  # write_file-first path as the roster (attrs exceed 4KB beyond ~50
+  # players).
   def player_attributes
-    self.class.parse_player_attrs(execute(PLAYER_ATTRS_LUA))
+    self.class.parse_player_attrs(json_query(PLAYER_ATTRS_FILENAME, PLAYER_ATTRS_WRITE_LUA, PLAYER_ATTRS_PRINT_LUA))
+  end
+
+  # Fetch a JSON payload, preferring helpers.write_file to <user-data>
+  # script-output (no 4KB rcon.print response cap) when the server's
+  # script-output dir is known locally — the sniffer runs ON the server
+  # host, so the file is read straight from disk. Falls back to the
+  # rcon.print variant (may truncate on very large results).
+  def json_query(filename, write_lua, print_lua)
+    if @script_output_dir
+      execute(write_lua)
+      path = File.join(@script_output_dir, filename)
+      body = File.read(path) if File.exist?(path)
+      return body if body && !body.empty?
+    end
+    execute(print_lua)
   end
 
   # Write item + entity prototype name dumps to the server's script-output

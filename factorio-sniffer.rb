@@ -54,9 +54,11 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--server', 'Server mode: run on the game server host (auto-enabled when a factorio server is detected on this host). Analyzes only incoming (client→server) packets — no broadcast duplicates — and excludes map-download save packets (msg 13) from analysis and capture.') { |v| options[:server] = true }
     opts.on('--server-ip IP', 'Server IP for --server mode (default: auto-detected from local interfaces)') { |v| options[:server_ip] = v }
     opts.on('--no-rcon', 'Disable the RCON roster sync (server mode)') { |v| options[:no_rcon] = true }
-    opts.on('--save-capture PATH', 'Save captured packets to a pcap file (append .gz to write gzip-compressed)') { |v| options[:save_capture] = v }
+    opts.on('--save-capture [PATH]', 'Save captured packets to a pcap file. Bare flag = auto-named (captures/server-<port>-<ts>.pcap in server mode, client-<ip>-<ts>.pcap in client mode); an explicit PATH is used as-is.') { |v| options[:save_capture] = v.nil? ? true : v }
+    opts.on('--save-capture-gz', 'Compress the (auto-named or explicit) capture stream with gzip (~3-4x smaller)') { |v| options[:save_capture_gz] = true }
     opts.on('--save-transfer-blocks', 'Also record map-download TransferBlock packets (msg 13, raw save data) in the capture. Off by default: they contain no player actions and add ~12% to the file size. Required if you later want tools/extract_save_from_pcap.rb to reconstruct the save.') { |v| options[:save_transfer_blocks] = true }
     opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth (deletes older rotated files). Bounds disk usage on long-running captures.') { |v| options[:keep] = v }
+    opts.on('--max-size MB', Integer, 'Rolling capture: rotate the capture file when it exceeds this size (MB) and prune rotated files to keep total rotated size bounded. Restarts always preserve the previous capture (renamed with a timestamp).') { |v| options[:max_size] = v }
     opts.on('--full-capture', 'Record every packet as-is: no TransferBlock exclusion, no keepalive-heartbeat filtering, no server-mode direction filter (implies --save-transfer-blocks)') { |v| options[:full_capture] = true }
     opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
     opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }

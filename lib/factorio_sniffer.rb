@@ -33,7 +33,27 @@ class FactorioSniffer
     @player_db = @state.player_db || PlayerDatabase.new(options[:player_db])
     @grief = nil
     @stats = @state.stats || { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
-    @pcap_writer = @state.pcap_writer || (options[:save_capture] ? PcapWriter.new(options[:save_capture], gzip: options[:save_capture].end_with?('.gz'), keep: options[:keep]) : nil)
+    # --save-capture [PATH]: bare flag = ALWAYS auto-name the capture
+    # (default captures/ dir; server-<port> in server mode, client-<ip>
+    # in client mode — deferred until the first packet reveals the
+    # server). An explicit PATH still works for tests/tools. The state's
+    # writer (hot reload) is always reused.
+    @pcap_writer = @state.pcap_writer
+    @pending_capture = nil
+    if options[:save_capture] && !@pcap_writer
+      cap = options[:save_capture]
+      if cap == true
+        dir = default_capture_dir
+        if options[:server]
+          @pcap_writer = new_pcap_writer(auto_capture_path(dir, "server-#{options[:port]}"))
+          puts "capturing to #{@pcap_writer.path}"
+        else
+          @pending_capture = dir  # resolved on the first packet (client mode)
+        end
+      else
+        @pcap_writer = new_pcap_writer(cap)
+      end
+    end
     @unknown_writer = @state.unknown_writer || (options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil)
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
@@ -303,6 +323,11 @@ class FactorioSniffer
 
   def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data, raw_frame = nil)
     @stats[:packets] += 1
+
+    # Client mode auto-named capture: resolve the server IP from the first
+    # identifiable packet and create the writer (server mode creates it at
+    # init — server-<port>).
+    ensure_pcap_writer(src_ip, dst_ip) if @pending_capture
 
     # RequestForHeartbeatWhenDisconnecting (msg 14) — sent C→S by a client
     # on a clean quit. Server mode has no S→C analysis (the server's
@@ -1093,8 +1118,7 @@ class FactorioSniffer
   # Resolve the player by src_ip and mark them offline. Note: crashes and
   # timeouts don't send msg 14 — those leave stale @online entries until a
   # reload/restart (server mode has no S→C PeerDisconnect analysis).
-  def handle_client_disconnect(src_ip, ts)
-    name = @conn_ip_name.delete(src_ip)
+  def handle_client_disconnect(src_ip, ts)    name = @conn_ip_name.delete(src_ip)
     return unless name
     @online.delete(name)
     @attrs.disconnect(name, @game_tick)
@@ -1110,8 +1134,7 @@ class FactorioSniffer
   # or nil while the group is incomplete (skip printing/feeding until the
   # full message arrives). Buffers older than 15s are dropped (UDP loss
   # may strand a fragment).
-  def chat_action_data(act, pname, ts)
-    total = act[:total_segs]
+  def chat_action_data(act, pname, ts)    total = act[:total_segs]
     data = act[:data]
     return data unless total && total > 1
 
@@ -1128,5 +1151,43 @@ class FactorioSniffer
     merged = (0...total).map { |n| group[n] }.join
     @chat_segments.delete(key)
     merged
+  end
+
+  # ── Auto-named capture (--save-capture flag) ─────────────────────
+
+  def new_pcap_writer(path)
+    PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: @options[:keep], max_size: @options[:max_size])
+  end
+
+  # Default captures/ directory (created on demand), relative to cwd.
+  def default_capture_dir
+    dir = File.join(Dir.pwd, 'captures')
+    FileUtils.mkdir_p(dir) unless File.directory?(dir)
+    dir
+  end
+
+  # <identity>-<timestamp>.pcap[.gz] — unique per run, never overwrites.
+  def auto_capture_path(dir, id)
+    ts = Time.now.strftime('%Y%m%d-%H%M%S')
+    ext = @options[:save_capture_gz] ? '.pcap.gz' : '.pcap'
+    File.join(dir, "#{id}-#{ts}#{ext}")
+  end
+
+  # Client mode: the server IP is unknown at startup — resolve it from the
+  # first packet where one endpoint is the local client (--local-ip) and
+  # the other is the server; fall back to plain "client" otherwise.
+  def ensure_pcap_writer(src_ip, dst_ip)
+    return unless @pending_capture
+    local = @options[:local_ip]
+    server_ip = if local && src_ip == local
+      dst_ip
+    elsif local && dst_ip == local
+      src_ip
+    end
+    id = server_ip ? "client-#{server_ip}" : 'client'
+    path = auto_capture_path(@pending_capture, id)
+    @pcap_writer = new_pcap_writer(path)
+    @pending_capture = nil
+    puts "capturing to #{path}"
   end
 end

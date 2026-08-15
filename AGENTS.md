@@ -35,6 +35,9 @@ either on a client or on the game server host (server mode, with RCON).
   issues, unknown types, chat formats, echo lengths, version-dependent IDs
 - `docs/ai-agent.md` — Hivemind agent: tools, context (online/stats/
   incremental console lines), join greetings, auth, personality
+- `docs/grief-analysis.md` — investigating "who did X at position Y"
+  from captures (position-bearing actions, mining's blind spot,
+  correlation workflow)
 - `docs/server-mode.md` — Server mode, auto-detection, RCON, hot reload,
   interactive filter console
 - `docs/rcon-knowledge.md` — RCON knowledge base: rcon.print / helpers.table_to_json
@@ -77,8 +80,11 @@ either on a client or on the game server host (server mode, with RCON).
   in SnifferState).
 - **Server mode** (default when run on the server host): analyzes only
   incoming C→S packets (no broadcast duplicates), drops save-download
-  TransferBlocks. `--local-ip` forces client mode. Captured pcaps
-  (`--save-capture`) are filtered by default: TransferBlocks (msg 13),
+  TransferBlocks. `--local-ip` forces client mode. `--save-capture`
+  (bare flag) auto-names captures to `captures/` (server-<port> /
+  client-<server_ip>, unique per run; `--keep HOURS` / `--max-size MB`
+  rotate + prune; restarts preserve the previous capture). Captured
+  pcaps are filtered by default: TransferBlocks (msg 13),
   keepalive-only heartbeats, and (server mode) outgoing S→C broadcasts are
   excluded — a 5h server capture went from ~460MB to ~20MB. `--full-capture`
   records everything; `--save-transfer-blocks` keeps just the TransferBlocks

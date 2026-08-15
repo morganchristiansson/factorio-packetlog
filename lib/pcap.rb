@@ -2,20 +2,29 @@
 
 require 'zlib'
 require 'stringio'
+require 'fileutils'
 
 # PCAP Writer (for saving live capture)
 # ─────────────────────────────────────────────────────────────────────
 class PcapWriter
+  attr_reader :path
+
   # gzip: true = write the stream gzip-compressed (use a .gz path).
   # keep: rolling retention in HOURS — rotate the capture every hour
   #   (renaming the finished file with a timestamp) and delete rotated
   #   files older than `keep` hours. nil = single file, keep everything.
-  def initialize(path, gzip: false, keep: nil)
+  # max_size: rotate a capture file when it exceeds this size (MB) and
+  #   prune rotated files so TOTAL rotated size stays ≤ max_size.
+  # Restarts: a pre-existing capture at `path` is renamed with a
+  #   timestamp on open instead of being overwritten.
+  def initialize(path, gzip: false, keep: nil, max_size: nil)
     @path = path
     @gzip = gzip
     @keep_hours = keep
+    @max_size_bytes = max_size ? max_size * 1024 * 1024 : nil
     @start_time = Time.now
     @file_start = Time.now
+    rotate_on_restart  # never silently destroy the previous run's capture
     @file = open_file(@path)
     # Write pcap global header directly (avoids pack issues)
     @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
@@ -72,13 +81,28 @@ class PcapWriter
     end
   end
 
-  # Hourly rotation + retention: flush/close the finished active file,
-  # rename it with a timestamp, open a fresh one, prune files older than
-  # the retention window. Runs under the write mutex (once per hour — a few
-  # ms of disk I/O on the capture thread is negligible off-burst).
+  # If @path already holds a capture (previous run / restart), rename it
+  # with a timestamp instead of overwriting — history is preserved.
+  def rotate_on_restart
+    return unless File.exist?(@path) && File.size(@path) > 0
+    finished = timestamped_path(File.mtime(@path).strftime('%Y%m%d-%H%M%S'))
+    finished = timestamped_path(Time.now.strftime('%Y%m%d-%H%M%S')) if File.exist?(finished)
+    File.rename(@path, finished)
+    prune_rotated
+  end
+
+  # Hourly and/or size-based rotation + retention: flush/close the
+  # finished active file, rename it with a timestamp, open a fresh one,
+  # prune rotated files beyond the retention bounds. Runs under the write
+  # mutex (once per hour / per size threshold — a few ms of disk I/O on
+  # the capture thread is negligible off-burst).
   def rotate_if_due
-    return unless @keep_hours
-    return if Time.now - @file_start < 3600
+    due = @keep_hours && (Time.now - @file_start) >= 3600
+    if @max_size_bytes
+      sz = (File.size(@path) rescue 0) + @buf.bytesize
+      due = true if sz >= @max_size_bytes
+    end
+    return unless due
     @file.write(@buf) unless @buf.empty?
     @buf = +''.b
     @file.close
@@ -95,15 +119,32 @@ class PcapWriter
     "#{@path[0...-ext.length]}-#{ts}#{ext}"
   end
 
+  # Delete rotated files beyond the retention bounds: older than `keep`
+  # hours, and — when max_size is set — the OLDEST files until total
+  # rotated size is ≤ max_size.
   def prune_rotated
-    cutoff = Time.now - (@keep_hours * 3600)
-    ext = File.extname(@path)
-    stem = File.basename(@path, ext)
-    Dir.glob(File.join(File.dirname(@path), "#{stem}-*#{ext}")).each do |f|
-      File.delete(f) if File.mtime(f) < cutoff
+    rotated = rotated_files
+    if @keep_hours
+      cutoff = Time.now - (@keep_hours * 3600)
+      rotated.each { |f| File.delete(f) if File.mtime(f) < cutoff }
+      rotated = rotated_files
+    end
+    if @max_size_bytes
+      total = rotated.sum { |f| File.size(f) }
+      rotated.sort_by { |f| File.mtime(f) }.each do |f|
+        break if total <= @max_size_bytes
+        total -= File.size(f)
+        File.delete(f)
+      end
     end
   rescue Errno::ENOENT
     # file vanished between glob and delete
+  end
+
+  def rotated_files
+    ext = File.extname(@path)
+    stem = File.basename(@path, ext)
+    Dir.glob(File.join(File.dirname(@path), "#{stem}-*#{ext}"))
   end
 
   def flush_loop

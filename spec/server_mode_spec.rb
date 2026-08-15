@@ -445,7 +445,6 @@ check(@events.empty?, 'msg 14 from unknown src_ip → no leave event')
 # ── Test 10: split chat messages reassembled across packets ──────────
 puts "\nTest 10: split chat reassembly"
 FactorioProtocol.select_version('2.0.77')  # segment 104 = write_to_console
-
 # Segment metadata: total_segs/seg_no mark messages split across packets.
 # Each packet carries ONE segment; the agent must receive the merged text.
 messages = []
@@ -471,6 +470,33 @@ _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
 end
 check(messages == ['we dont need it to be 2 lanes'],
       "split chat reassembled (got #{messages.inspect})")
+
+# ── Test 11: auto-named captures (--save-capture flag) ───────────────
+puts "\nTest 11: auto-named captures"
+
+Dir.mktmpdir do |dir|
+  Dir.chdir(dir) do
+    # server mode: named at init (server-<port>-<ts>.pcap in captures/)
+    _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil, save_capture: true) do |s|
+      w = s.instance_variable_get(:@pcap_writer)
+      ok = w && w.path =~ %r{captures/server-34197-\d{8}-\d{6}\.pcap}
+      check(!!ok, "server auto-name (got #{w && w.path})")
+      w&.close
+    end
+
+    # client mode: deferred until the first packet reveals the server
+    _, sn = run_sniffer(local_ip: '10.0.0.50', player_db: nil, save_capture: true) do |s|
+      check(s.instance_variable_get(:@pending_capture) == File.join(dir, 'captures'),
+            'client capture pending until first packet')
+      pkt = "\x06\x02".b + ([0] * 10).pack('C*')
+      s.send(:process_packet, 1, 1_700_000_000.0, '10.0.0.50', '10.0.0.1', 50000, 34197, pkt)
+      w = s.instance_variable_get(:@pcap_writer)
+      ok = w && w.path =~ %r{captures/client-10\.0\.0\.1-\d{8}-\d{6}\.pcap}
+      check(!!ok, "client auto-name from first packet (got #{w && w.path})")
+      w&.close
+    end
+  end
+end
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

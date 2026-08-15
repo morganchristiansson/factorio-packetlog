@@ -128,6 +128,9 @@ To add a fixture from a live capture:
   metadata suppression, verified echo data lengths.
 - [`player-mapping.md`](player-mapping.md) — peer IDs vs game player
   indexes, where player names live in the save, red herrings.
+- [`grief-analysis.md`](grief-analysis.md) — investigating "who did X at
+  position Y" from captures: which actions carry positions, mining's
+  blind spot, the correlation workflow, and hard limits.
 - [`server-mode.md`](server-mode.md) — running the sniffer on the game
   server host: server mode semantics, auto-detection, RCON roster, hot
   reload.

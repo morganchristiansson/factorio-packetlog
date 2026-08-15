@@ -382,6 +382,10 @@ class HiveMindAgent
       flags = []
       flags << 'admin' if p[:admin]
       flags << 'offline' unless p[:connected]
+      # afk_time (ticks since their last action) — only meaningful while
+      # connected; shown as "afk 5m" when idle.
+      afk = p[:afk_time_ticks] || p[:afk_time]
+      flags << "afk #{format_ticks(afk)}" if p[:connected] && afk && afk.to_i > 60
       suffix = flags.empty? ? '' : " (#{flags.join(', ')})"
       "#{p[:name]}: #{time}#{suffix}"
     end

@@ -691,6 +691,15 @@ class FactorioSniffer
       end
     when "rotate_entity"
       return " dir=#{d.getbyte(0)}"
+    when "flush_opened_entity_specific_fluid"
+      # 1-byte selector (0x00/0x01 observed). Whether it is a fluid
+      # prototype ID (prototypes.fluid order: 1=water, 4=petroleum-gas,
+      # 5=light-oil …) is unverified — the fluid may be resolved by the
+      # simulation (on_player_flushed_fluid event, Lua-only). Test: flush
+      # a KNOWN fluid and compare the byte.
+      return " selector=0x#{d.getbyte(0).to_s(16)}" if d.bytesize >= 1
+    when "flush_opened_entity_fluid"
+      return " flush" if d.bytesize >= 1
     when "fast_entity_split"
       return " slot=#{d.getbyte(0)}"
     when "fast_entity_transfer"
@@ -849,6 +858,10 @@ class FactorioSniffer
 
     # Dump raw type info for reverse engineering
     pname = @player_db.lookup(pid)
+
+    # Any real input action (not server-internal padding) resets the
+    # player's afk_time — mirrors LuaPlayer.afk_time, fed by C→S actions.
+    @attrs.register_action(pname, @game_tick) if pname && act[:type] != 0 && act[:name] != 'server_tick_info'
 
     # Chat messages: ALWAYS printed (exempt from all filters) and fed to
     # the agent — chat is the important signal, filters are for action
@@ -1057,7 +1070,8 @@ class FactorioSniffer
     return if attrs.nil? || attrs.empty?
     attrs.each do |a|
       @attrs.seed(a[:name], index: a[:index], connected: a[:connected],
-                   admin: a[:admin], online_time: a[:online_time])
+                   admin: a[:admin], online_time: a[:online_time],
+                   afk_time: a[:afk_time])
       # Players already online per RCON are authoritative for @online too
       @online[a[:name]] ||= a[:index] if a[:connected]
     end

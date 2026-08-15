@@ -26,7 +26,7 @@ class RconClient
   # rcon.print cap: very large rosters may be truncated (players dropped
   # from the tail — acceptable, attrs are enrichment).
   PLAYER_ATTRS_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time} end rcon.print(serpent.line(t))'
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(serpent.line(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -61,20 +61,30 @@ class RconClient
   end
 
   # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
-  # [{index:, name:, connected:, admin:, online_time:}]. Returns nil when
-  # the payload isn't one. A truncated payload (rcon.print cap) parses as a
-  # partial list.
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:}]. Returns
+  # nil when the payload isn't one. A truncated payload (rcon.print cap)
+  # parses as a partial list.
+  #
+  # Order-agnostic: serpent.line sorts record keys alphabetically
+  # (a, c, i, k, n, o), NOT in insertion order — an order-sensitive regex
+  # silently matched nothing (the attrs seed never populated).
   def self.parse_player_attrs(body)
     return nil unless body
-    body = body.strip
-    records = body.scan(/\{i = (\d+), n = "((?:[^"\\]|\\.)*)", c = (\w+), a = (\w+), o = (\d+)\}/)
+    records = body.scan(/\{([^{}]*)\}/)
     return nil if records.empty? && !body.include?('{}')
-    records.map do |i, n, c, a, o|
-      { index: i.to_i,
-        name: n.gsub(/\\(.)/, '\1'),
-        connected: c == 'true',
-        admin: a == 'true',
-        online_time: o.to_i }
+    records.filter_map do |(inner)|
+      h = {}
+      inner.scan(/(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|true|false|-?\d+)/) do |k, v|
+        v = v[1..-2] if v.start_with?('"')  # unquote string values
+        h[k] = v
+      end
+      next unless h['i'] && h['n']
+      { index: h['i'].to_i,
+        name: h['n'].gsub(/\\(.)/, '\1'),
+        connected: h['c'] == 'true',
+        admin: h['a'] == 'true',
+        online_time: h['o'].to_i,
+        afk_time: h['k'].to_i }
     end
   end
 

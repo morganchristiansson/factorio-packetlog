@@ -13,29 +13,41 @@
 #                 LAZILY on read — never auto-incremented:
 #                 base_ticks (frozen, previous sessions) + live session
 #                 duration (current_game_tick − session_start_tick).
+#   afk_time    — ticks since the player's last action. Seeded from RCON,
+#                 then maintained from the packet stream: any real input
+#                 action (heartbeat tick-closure action, incl. chat) resets
+#                 it. Lazily computed:
+#                   action seen → current_tick − last_action_tick
+#                   otherwise   → seeded_afk + (current_tick − anchor_tick)
 #
 # For a player who is connected when seeded, the RCON online_time already
 # includes the live session whose start we did not observe. That value is
 # frozen into base_ticks and the live session is anchored at the first
 # observed game tick (#anchor_sessions), so the computed total is exact at
 # the anchor and grows correctly afterwards. Players whose join we observe
-# (NewPeerInfo) get a real session_start_tick.
+# (NewPeerInfo) get a real session_start_tick. The same anchor tick seeds
+# the afk_time growth (the seeded delta grows with elapsed ticks until the
+# player's first observed action resets it to 0).
 #
 # Keyed by player NAME (unique in Factorio); game indexes are bound from
 # C→S heartbeats / the roster.
 class PlayerAttrs
   def initialize
-    @players = {}  # name -> {index:, connected:, admin:, base_ticks:, session_start:}
+    @players = {}  # name -> {index:, connected:, admin:, base_ticks:,
+                   #         session_start:, afk_seed:, afk_anchor:, last_action:}
   end
 
   # Seed from an RCON player_attributes query result (one hash per player:
-  # {index:, name:, connected:, admin:, online_time:}).
-  def seed(name, index:, connected:, admin:, online_time:)
+  # {index:, name:, connected:, admin:, online_time:, afk_time:}).
+  def seed(name, index:, connected:, admin:, online_time:, afk_time: 0)
     p = (@players[name] ||= {})
     p[:index] ||= index
     p[:connected] = connected
     p[:admin] = admin
     p[:base_ticks] = online_time.to_i
+    p[:afk_seed] = afk_time.to_i
+    p[:afk_anchor] = nil  # anchored at the first observed game tick
+    p[:last_action] = nil # first real action resets afk to 0
     # Connected players are anchored at the first observed game tick;
     # offline players have no live session at all.
     p[:session_start] = nil
@@ -64,6 +76,7 @@ class PlayerAttrs
     end
     p[:connected] = false
     p[:session_start] = nil
+    p[:last_action] = nil
     p
   end
 
@@ -74,11 +87,24 @@ class PlayerAttrs
     p
   end
 
+  # A real input action from the player resets afk_time to 0. Called with
+  # the player name and the current game tick for every decoded action
+  # that isn't server-internal (nothing / server_tick_info).
+  def register_action(name, tick)
+    p = @players[name]
+    return unless p
+    p[:last_action] = tick
+    p[:afk_anchor] = nil  # afk now derives from last_action
+    p
+  end
+
   # Anchor live sessions seeded while connected (no observed session start
-  # yet). Called with the game tick on every heartbeat.
+  # yet), and anchor seeded afk_time growth. Called with the game tick on
+  # every heartbeat.
   def anchor_sessions(current_tick)
     @players.each_value do |p|
       p[:session_start] = current_tick if p[:connected] && p[:session_start].nil?
+      p[:afk_anchor] = current_tick if p[:connected] && p[:afk_seed] && p[:afk_anchor].nil?
     end
   end
 
@@ -95,8 +121,22 @@ class PlayerAttrs
     end
   end
 
+  # Lazily computed ticks since the player's last action (0 while actively
+  # playing). Only meaningful for connected players; nil otherwise.
+  def afk_time_ticks(name, current_tick)
+    p = @players[name]
+    return nil unless p && p[:connected]
+    if p[:last_action]
+      [current_tick - p[:last_action], 0].max
+    elsif p[:afk_anchor]
+      (p[:afk_seed] || 0) + [current_tick - p[:afk_anchor], 0].max
+    else
+      p[:afk_seed] || 0
+    end
+  end
+
   # Snapshot for context / AI queries, sorted by name:
-  # [{name:, index:, connected:, admin:, online_time_ticks:}]
+  # [{name:, index:, connected:, admin:, online_time_ticks:, afk_time_ticks:}]
   def snapshot(current_tick)
     @players.map do |name, p|
       {
@@ -105,6 +145,7 @@ class PlayerAttrs
         connected: !!p[:connected],
         admin: !!p[:admin],
         online_time_ticks: online_time_ticks(name, current_tick),
+        afk_time_ticks: afk_time_ticks(name, current_tick),
       }
     end.sort_by { |p| p[:name] }
   end

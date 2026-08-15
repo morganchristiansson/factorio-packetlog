@@ -275,6 +275,18 @@ check(RconClient.parse_roster("{}\n") == [], 'empty roster parses to []')
 # non-roster payload
 check(RconClient.parse_roster('some random error text').nil?, 'non-roster payload → nil')
 
+# player attrs parse is ORDER-AGNOSTIC (serpent.line sorts keys
+# alphabetically: a, c, i, k, n, o — NOT insertion order). This was a
+# silent no-match bug that starved the agent's player-stats context.
+attrs = RconClient.parse_player_attrs(
+  "{{a = true, c = true, i = 1, k = 722, n = \"morganc\", o = 7142576}, {a = false, c = false, i = 2, k = 0, n = \"bob\", o = 500}}\n"
+)
+check(attrs == [
+  { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722 },
+  { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0 },
+], 'parse_player_attrs order-agnostic + afk_time')
+check(RconClient.parse_player_attrs('garbage').nil?, 'non-attrs payload → nil')
+
 # refresh_roster → load_roster: initial load only (new players come from
 # the packet stream, no periodic refresh)
 sr = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })

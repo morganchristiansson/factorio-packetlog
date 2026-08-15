@@ -21,7 +21,7 @@ end
 
 class TestHiveMindAgent < Minitest::Test
   def setup
-    @agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test')
+    @agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: "sk-test", session_path: false)
     @agent.online_provider = -> { [] }
     @agent.player_stats_provider = -> { [] }
     # Join greetings are LLM calls; stub so tests don't hit the network.
@@ -102,6 +102,19 @@ class TestHiveMindAgent < Minitest::Test
       assert_empty a.instance_variable_get(:@console_queue)
       assert_equal 0, a.instance_variable_get(:@exchanges)
     end
+  end
+
+  # Regression: invalid UTF-8 from the wire crashed strip/regex
+  # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
+  def test_invalid_utf8_chat_does_not_crash
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
+    agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
+    queue = agent.instance_variable_get(:@console_queue)
+    assert queue.all? { |_, m| m.valid_encoding? }, 'queued messages are valid UTF-8'
+    assert_includes queue.first[1], 'hivemind'
   end
 
   # ── Context ───────────────────────────────────────────────────
@@ -236,7 +249,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_uses_llm_and_sends
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -249,7 +262,7 @@ class TestHiveMindAgent < Minitest::Test
   end
 
   def test_join_greeting_recorded_in_history
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test')
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
     agent.define_singleton_method(:complete) do |_prompt|
       clean_reply('Welcome, alice. The factory is watching.')
     end
@@ -261,7 +274,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_respects_greet_interval
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
     agent.define_singleton_method(:complete) { |_p| clean_reply('hi') }
     agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
     agent.on_player_event(:joined, 'alice')
@@ -271,14 +284,14 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_leave_does_not_greet
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
     agent.on_player_event(:left, 'alice')
     assert_empty rcon.sent
   end
 
   def test_greeting_disabled_with_greet_on_join_false
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test')
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
     agent.instance_variable_set(:@greet_on_join, false)
     agent.on_player_event(:joined, 'alice')
     assert_empty rcon.sent

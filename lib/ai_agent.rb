@@ -157,8 +157,10 @@ class HiveMindAgent
     @console_mutex = Mutex.new
     # Session persistence: console history + LLM conversation are saved to
     # disk so a full RESTART (not just Ctrl-C) can resume — packets while
-    # stopped are lost, but the context carries over.
-    @session_path = session_path || ENV['HIVE_SESSION']
+    # stopped are lost, but the context carries over. Default file
+    # hivemind-session.json (HIVE_SESSION overrides); pass session_path:
+    # false to disable.
+    @session_path = session_path == false ? nil : (session_path || ENV['HIVE_SESSION'] || 'hivemind-session.json')
 
     configure_llm(provider)
     load_session if @session_path && !@disabled
@@ -168,6 +170,7 @@ class HiveMindAgent
   # sniffer from log_action for write_to_console actions. Returns true when
   # a response was dispatched (trigger matched, rate limit passed).
   def on_chat(player, message)
+    message = clean_text(message)  # invalid UTF-8 from the wire is safe here
     append_history(player, message)
     handle(player, message)
   end
@@ -364,13 +367,20 @@ class HiveMindAgent
     end
   end
 
+  # scrub('?') guards against invalid UTF-8 from the wire (strip/regex on
+  # malformed bytes raises ArgumentError). Force UTF-8 FIRST so binary-
+  # flagged bytes are also cleaned, not just invalid UTF-8-flagged ones.
+  def clean_text(text)
+    text.to_s.dup.force_encoding('UTF-8').scrub('?').strip
+  end
+
   # Enqueue a chat/console line. player is nil for bare console lines
   # (join/leave events); chat and replies carry the speaker name. When the
   # queue exceeds HISTORY_SIZE (no hivemind trigger in a long while), the
   # OLDEST unread lines are dropped with a warning — the next prompt stays
   # bounded. @recent_console keeps the last RESEED_LINES regardless.
   def append_history(player, message)
-    msg = message.to_s.strip
+    msg = clean_text(message)
     return if msg.empty?
     @console_mutex.synchronize do
       @console_queue << [player, msg]

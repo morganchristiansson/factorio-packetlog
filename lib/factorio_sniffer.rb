@@ -175,7 +175,6 @@ class FactorioSniffer
             provider: options[:ai_provider],
             api_key: options[:ai_api_key],
             api_base: options[:ai_api_base],
-            session_path: options[:ai_session],
           )
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }

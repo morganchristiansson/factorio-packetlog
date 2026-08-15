@@ -546,7 +546,7 @@ ACTIONS = {
 
     # [0x04][text...] — non-segment format, text runs to end of payload
     if d.getbyte(0) == 0x04 && d.bytesize > 1
-      return d[1..-1].force_encoding('UTF-8')
+      return d[1..-1].force_encoding('UTF-8').scrub('?')
     end
 
     # [0x05|0x0b|0x24|0x29][meta(1)][text...] — meta byte is the TOTAL
@@ -557,7 +557,7 @@ ACTIONS = {
     if [0x05, 0x0b, 0x24, 0x29].include?(d.getbyte(0)) && d.bytesize >= 2
       text = d[2..-1]
       return nil if text.empty?   # [type][meta] with no text = empty message
-      return text.force_encoding('UTF-8')
+      return text.force_encoding('UTF-8').scrub('?')
     end
 
     # Live-observed chat tones [0x15|0x1f|0x2d|0x30][len][text] — same
@@ -568,18 +568,18 @@ ACTIONS = {
     if [0x15, 0x1f, 0x2d, 0x30].include?(d.getbyte(0)) && d.bytesize >= 2
       len = d.getbyte(1)
       return nil if len == 0 && d.bytesize == 2   # empty message
-      return d[2..-1].force_encoding('UTF-8') if len > 0 && len <= d.bytesize - 2
+      return d[2..-1].force_encoding('UTF-8').scrub('?') if len > 0 && len <= d.bytesize - 2
     end
 
     # Server echo formats: [0x00|0x3d|0x01][meta(1)][text...]
     if d.getbyte(0) == 0x00 && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8')
+      return d[2..-1].force_encoding('UTF-8').scrub('?')
     end
     if d.getbyte(0) == 0x3d && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8')
+      return d[2..-1].force_encoding('UTF-8').scrub('?')
     end
     if d.getbyte(0) == 0x01 && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8')
+      return d[2..-1].force_encoding('UTF-8').scrub('?')
     end
 
     # Localized string format: [key_uint32v][mode(1)][params_count(1)][params...]
@@ -590,11 +590,11 @@ ACTIONS = {
     # Main action list format: [uint32v len][text]
     off, slen = decode_uint32v(d, 0)
     if slen && slen > 0 && off + slen <= d.bytesize
-      return d[off, slen].force_encoding('UTF-8')
+      return d[off, slen].force_encoding('UTF-8').scrub('?')
     end
 
     # Raw text (no prefix)
-    d.force_encoding('UTF-8')
+    d.force_encoding('UTF-8').scrub('?')
   end
 
   # Recursively decode a localized string (Factorio's protobuf-like format).
@@ -606,7 +606,7 @@ ACTIONS = {
     off, slen = decode_uint32v(data, 0)
     return nil unless slen && slen > 0 && off + slen + 2 <= data.bytesize
 
-    key = data[off, slen].force_encoding('UTF-8')
+    key = data[off, slen].force_encoding('UTF-8').scrub('?')
     mode = data.getbyte(off + slen)
     pcount = data.getbyte(off + slen + 1)
     pos = off + slen + 2

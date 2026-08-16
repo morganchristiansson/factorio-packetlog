@@ -172,7 +172,60 @@ class HiveMindAgent
     @session_path = session_path == false ? nil : (session_path || ENV['HIVE_SESSION'] || 'hivemind-session.json')
 
     configure_llm(provider)
+    hook_chat_observers if @chat
     load_session if @session_path && !@disabled
+  end
+
+  # ── Console logging / LLM-run observation ─────────────────────────
+
+  # Observe the LLM run so the console shows WHAT the model does, not
+  # just the say tool's final reply: reasoning/thinking, tool calls and
+  # their results, any plain assistant text. Registered ONCE at init —
+  # the chat object survives hot reloads and re-registering per ask
+  # would stack duplicate observers. (Closures hit the CURRENT class
+  # definitions after a hot reload via normal dynamic dispatch.)
+  def hook_chat_observers
+    return unless @chat
+    return if @observers_hooked
+    @observers_hooked = true
+    @chat.before_tool_call do |tool_call|
+      args = trunc(JSON.generate(tool_call.arguments || {}), 200)
+      log "tool call: #{tool_call.name}(#{args})"
+    end
+    @chat.after_tool_result do |result|
+      # Halt = the say tool already printed the reply (and callbacks fire
+      # for halted tools too); skip to avoid echoing it a second time.
+      next if defined?(RubyLLM::Tool::Halt) && result.is_a?(RubyLLM::Tool::Halt)
+      content = result.respond_to?(:content) ? result.content : result
+      log "tool result: #{trunc(content, 200)}" unless content.to_s.empty?
+    end
+    @chat.after_message do |message|
+      next unless message.role == :assistant
+      thinking = message.thinking
+      if thinking.is_a?(RubyLLM::Thinking) && !thinking.text.to_s.empty?
+        log "reasoning: #{trunc(thinking.text, 200)}"
+      end
+      content = message.content.to_s
+      log "assistant: #{trunc(content, 200)}" unless content.empty?
+    end
+  end
+
+  def log(msg)
+    puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] #{msg}"
+  end
+
+  # Error line + FULL backtrace: the trace's depth is exactly what an
+  # operator needs when e.g. the provider rejects a request — the top
+  # line alone is never enough.
+  def log_error(context, e)
+    warn "#{Time.now.strftime('%H:%M:%S')}  [hivemind] #{context}: #{e.class}: #{e.message}"
+    Array(e.backtrace).each { |line| warn "    #{line}" }
+  end
+
+  # Clip a value for console display: single line, bounded length.
+  def trunc(obj, max = 240)
+    s = obj.to_s.gsub(/[ \t]+/, ' ').strip
+    s.length > max ? "#{s[0...max]}…" : s
   end
 
   # Feed a decoded chat message (player name, message text). Called by the
@@ -223,7 +276,7 @@ class HiveMindAgent
         reply = complete(prompt)
         send_reply(reply)
       rescue StandardError => e
-        warn "[hivemind] greeting error: #{e.class}: #{e.message}"
+        log_error('greeting error', e)
       end
     end
   end
@@ -267,7 +320,7 @@ class HiveMindAgent
     warn "[hivemind] ruby_llm not installed (bundle install) — agent disabled: #{e.message}"
     @disabled = true
   rescue StandardError => e
-    warn "[hivemind] LLM init failed — agent disabled: #{e.class}: #{e.message}"
+    log_error('LLM init failed — agent disabled', e)
     @disabled = true
   end
 
@@ -422,7 +475,7 @@ class HiveMindAgent
     end
     @rcon&.connected_players&.map { |p| p[:name] } || []
   rescue StandardError => e
-    warn "[hivemind] online-player query failed: #{e.class}: #{e.message}"
+    log_error('online-player query failed', e)
     []
   end
 
@@ -446,7 +499,7 @@ class HiveMindAgent
       "#{p[:name]}: #{time}#{suffix}"
     end
   rescue StandardError => e
-    warn "[hivemind] player-stats query failed: #{e.class}: #{e.message}"
+    log_error('player-stats query failed', e)
     []
   end
 
@@ -502,7 +555,7 @@ class HiveMindAgent
         reply = ask_llm(player, msg)
         send_reply(reply)
       rescue StandardError => e
-        warn "[hivemind] error responding to #{player}: #{e.class}: #{e.message}"
+        log_error("error responding to #{player}", e)
       end
     end
     true
@@ -632,7 +685,7 @@ class HiveMindAgent
     end
     puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, #{messages.size} conversation messages"
   rescue JSON::ParserError, StandardError => e
-    warn "[hivemind] session load failed (#{e.class}: #{e.message}) — starting fresh"
+    log_error('session load failed — starting fresh', e)
     @console_queue = []
     @recent_console = []
     @exchanges = 0
@@ -681,7 +734,7 @@ class HiveMindAgent
     File.write(tmp, JSON.generate(data))
     File.rename(tmp, @session_path)
   rescue StandardError => e
-    warn "[hivemind] session persist failed: #{e.class}: #{e.message}"
+    log_error('session persist failed', e)
   end
 
   # Conversation as role/content pairs plus the data needed to rebuild a

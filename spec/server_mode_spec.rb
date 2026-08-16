@@ -415,8 +415,11 @@ fake_agent_class = Class.new do
 end
 
 # Server mode: joins are detected at the msg4 + first-C→S-heartbeat confirm
-# (the S→C NewPeerInfo broadcast is not analyzed), leaves via C→S msg 14.
+# (the S→C NewPeerInfo broadcast is not analyzed), leaves via the C→S
+# PeerDisconnect sync action in the client's final heartbeat (the observed
+# quit signal; msg 14 is kept as a fallback).
 joined = left = nil
+online_after_quit = nil
 _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   agent = fake_agent_class.new
   s.instance_variable_set(:@agent, agent)
@@ -426,12 +429,30 @@ _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
   # first C→S heartbeat with a real action → confirm → :joined
   s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
-  # msg 14 RequestForHeartbeatWhenDisconnecting — clean quit → :left
-  s.send(:process_packet, 3, ts, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
+  # C→S heartbeat whose ONLY sync action is PeerDisconnect (reason=0, no
+  # peer_id) — the clean-quit signal in server mode → :left
+  quit_hb = fixture_packet('player_quit')
+  s.send(:process_packet, 3, ts, CLIENT_IP, SERVER_IP, 34197, 34197, quit_hb)
   joined, left = agent.events[0], agent.events[1]
+  online_after_quit = s.online_players
 end
 check(joined == [:joined, 'alice'], "join detected on confirm (got #{joined.inspect})")
-check(left == [:left, 'alice'], "leave detected on msg 14 (got #{left.inspect})")
+check(left == [:left, 'alice'], "leave detected on C→S PeerDisconnect (got #{left.inspect})")
+check(!online_after_quit.include?('alice'), 'leaver removed from online list (bot context is accurate)')
+
+# msg 14 RequestForHeartbeatWhenDisconnecting — kept fallback, still works.
+left14 = nil
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+  agent = fake_agent_class.new
+  s.instance_variable_set(:@agent, agent)
+  ts = 1_700_000_000.0
+  msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+  s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
+  s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
+  s.send(:process_packet, 3, ts, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
+  left14 = agent.events[1]
+end
+check(left14 == [:left, 'alice'], "leave detected on msg 14 fallback (got #{left14.inspect})")
 
 # A disconnected-but-never-confirmed src_ip should not produce a leave.
 _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|

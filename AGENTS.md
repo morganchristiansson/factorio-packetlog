@@ -54,17 +54,25 @@ either on a client or on the game server host (server mode, with RCON).
   indexes (see `docs/player-mapping.md`).
 - **Online tracking**: the sniffer keeps a live `name → index` map of
   players currently in-game (`FactorioSniffer#online_players`) — seeded
-  from the RCON roster, updated on NewPeerInfo / PeerDisconnect, indexes
-  bound by C→S heartbeats. Survives hot reloads. Fed to the Hivemind agent
-  as context (`HiveMindAgent#online_provider`).
-- **Join/leave in server mode (C→S only)**: server mode has NO S→C
-  analysis (the server's NewPeerInfo/PeerDisconnect broadcasts are
-  dropped — N duplicates per event; possible future: dedup and analyze
-  them). Joins are instead detected at the msg-4 +
-  first-C→S-heartbeat confirm ("confirmed as game player #N") →
+  from the RCON roster, updated on NewPeerInfo / PeerDisconnect / the C→S
+  PeerDisconnect quit signal, indexes bound by C→S heartbeats. Survives
+  hot reloads. Fed to the Hivemind agent as context
+  (`HiveMindAgent#online_provider`).
+- **Server mode captures and analyzes ONLY C→S packets** (the server's
+  S→C broadcasts are N duplicates per event and the capture filter drops
+  them; there is no S→C analysis at all). Every join/leave signal must
+  come from the client side: joins = msg-4 username + first-C→S-heartbeat
+  index confirm; clean quits = a `PeerDisconnect` synchronizer action in
+  the client's FINAL C→S heartbeat (capture-verified: reason=0, no
+  peer_id — the peer_id form is the S→C broadcast, which we never see).
+  msg 14 (RequestForHeartbeatWhenDisconnecting) is kept as a fallback
+  path but has never been observed in captures. Crashes/timeouts send
+  neither — those linger in @online until reload.
+- **Join/leave in server mode (C→S only)**: joins are detected at the
+  msg-4 + first-C→S-heartbeat confirm ("confirmed as game player #N") →
   `HiveMindAgent#on_player_event(:joined, …)` (fires the greeting); clean
-  leaves via C→S msg 14 (RequestForHeartbeatWhenDisconnecting). Crashes/
-  timeouts don't send msg 14 — those linger in @online until reload.
+  leaves via the C→S `PeerDisconnect` sync action in the client's final
+  heartbeat → `on_player_event(:left, …)` (console queue only, no reply).
 - **PlayerAttrs** (`lib/player_attrs.rb`): mirrored LuaPlayer attributes
   (connected/admin/online_time) seeded once from RCON at startup, then
   maintained by packets (NewPeerInfo/PeerDisconnect/index binding).

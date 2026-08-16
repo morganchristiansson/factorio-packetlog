@@ -38,8 +38,11 @@ player chat ──► write_to_console action (C→S packet)
   RCON `/version` (server mode) and switches the segment map
   (`FactorioProtocol.select_version`); `--protocol-version 2.0` overrides
   for pcap analysis.
-- **Trigger**: any message containing `hivemind` (case-insensitive). The
-  reply is prefixed `Hivemind>` so it's identifiable in chat.
+- **Trigger**: any message containing `hivemind` (case-insensitive), or
+  the bot-appreciation replies `good bot` / `goodbot` (players answering a
+  Hivemind reply) — both go through the same LLM path, so the response is
+  generated in character, never a canned string. The reply is prefixed
+  `Hivemind>` so it's identifiable in chat.
 - **Context — incremental console lines (a queue)**: the RubyLLM chat
   object keeps the whole session (previous Q&A), so follow-ups continue
   the conversation. Console lines are a **QUEUE drained on each prompt**:
@@ -64,7 +67,10 @@ player chat ──► write_to_console action (C→S packet)
   a reply. Disable with `greet_on_join: false` on the agent (default on).
   In server mode the join signal is the msg-4 + first-C→S-heartbeat
   confirm (the server's S→C NewPeerInfo broadcast isn't analyzed); clean
-  leaves are detected via C→S msg 14.
+  leaves arrive as a `PeerDisconnect` synchronizer action in the client's
+  FINAL C→S heartbeat (capture-verified — the only C→S quit signal; msg
+  14 is a kept-but-unobserved fallback). Leaves only enter the console
+  queue — they never trigger a reply.
 - **Context — static system prompt + per-turn snapshot**: the system
   prompt is set ONCE (personality/rules/tools, in `lib/ai_agent.rb`
   SYSTEM_PROMPT) — it is NOT rebuilt per ask, so the conversation prefix
@@ -90,6 +96,12 @@ player chat ──► write_to_console action (C→S packet)
   (follow-ups make sense), reset after 40 exchanges to bound token use.
 - **Truncation**: tool text is sent as-is (the model is told to stay under
   400 chars); the fallback path truncates to 400.
+- **Coordinates are always rich-text GPS**: whenever the model mentions a
+  location it must use Factorio's clickable rich-text tag `[gps=x,y]` —
+  exactly that form: no label, no surface, no extra parameters (enforced
+  by a system-prompt rule). Brackets pass through `RconClient#say`
+  (Lua-quoted) and `clean_reply` untouched, so `game.print` renders them
+  as clickable map pins in chat.
 
 ## Auth (you set this up)
 
@@ -109,6 +121,15 @@ Same for the endpoint/model:
 
 The `/chat/completions` path is appended to the base (RubyLLM OpenAI
 provider). Model list: `curl https://opencode.ai/zen/go/v1/models`.
+
+System prompt role: RubyLLM sends the system prompt as role `developer`
+by default (OpenAI's newer convention). Some endpoints/models (e.g.
+Console Go) only accept `system` and reject the request with an
+`invalid_request_error` about `messages[0].role`. The agent forces
+`openai_use_system_role = true` so the prompt goes out as `system`,
+which every endpoint accepts. This is applied at startup only — a model
+switch needs a full sniffer restart (Ctrl-C reload keeps the old
+RubyLLM config since the agent object persists).
 
 Example:
 

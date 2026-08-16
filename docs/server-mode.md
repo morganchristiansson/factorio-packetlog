@@ -35,8 +35,10 @@ Behavior:
 - **Save downloads excluded**: map-download TransferBlocks (msg 13, ~40 MB
   per joining player) are dropped entirely — no analysis, no capture. The
   server already has the save on disk.
-- **Capture still works** (`--save-capture`) and includes both directions
-  EXCEPT TransferBlocks.
+- **Capture is C→S only by default** (`--save-capture`): the capture
+  filter records only packets destined for the server, so the pcap mirrors
+  the analysis (no S→C broadcast duplicates). `--full-capture` records
+  both directions (still excepting TransferBlocks).
 - **Roster learning**: every client's ConnectionRequestReplyConfirm (msg 4,
   incoming) registers `src_ip → username`; their first C→S heartbeat action
   binds the real game index (like the old client-side "self" learning, but
@@ -47,9 +49,13 @@ Behavior:
   existing players are named immediately. Later joiners are learned from
   the packet stream (msg 4 + heartbeat), so no periodic refresh is needed.
   `--no-rcon` disables.
-- **Join/leave events**: joins are seen via msg 4 ("X connected"). Leaves
-  (PeerDisconnect) are outgoing-only and NOT seen in server mode — poll
-  RCON `/players` for authoritative roster changes.
+- **Join/leave events**: joins are seen via msg 4 ("X connected") + the
+  first-C→S-heartbeat index confirm ("confirmed as game player #N").
+  Clean leaves are seen via the C→S `PeerDisconnect` synchronizer action
+  in the client's final heartbeat (the S→C broadcast form with a peer_id
+  is never seen — no S→C analysis). Crashes/timeouts send nothing and
+  linger in @online until reload; poll RCON `/players` for authoritative
+  roster changes.
 
 ### Auto-enable rule
 

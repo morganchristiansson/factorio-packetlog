@@ -91,6 +91,10 @@ class HiveMindAgent
   DEFAULT_MODEL    = 'deepseek-v4-flash'
 
   TRIGGER = 'hivemind'          # respond when chat contains this (case-insensitive)
+  # Additional trigger phrases (case-insensitive substring match). Players
+  # who get a Hivemind reply often answer "good bot" — respond to that too
+  # (in character), so the loop doesn't dead-end after the first reply.
+  EXTRA_TRIGGERS = ['good bot', 'goodbot']
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
@@ -107,6 +111,11 @@ class HiveMindAgent
   GREET_INTERVAL = 10.0         # min seconds between join greetings
 
   attr_reader :trigger, :model
+
+  # Human-readable trigger summary for startup logs ("hivemind (+ good bot)").
+  def trigger_label
+    EXTRA_TRIGGERS.empty? ? @trigger : "#{@trigger} (+ #{EXTRA_TRIGGERS.join(', ')})"
+  end
 
   # Callable returning the names of players currently online (the sniffer
   # sets this to its packet-derived list each construction — see
@@ -230,6 +239,11 @@ class HiveMindAgent
       config.default_model = @model
       config.request_timeout = 60
       config.max_retries = 1
+      # RubyLLM defaults to sending the system prompt as role `developer`
+      # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
+      # endpoints (e.g. Console Go models) only accept `system` and reject
+      # the request. Use `system` explicitly.
+      config.openai_use_system_role = true
       config.log_level = Logger::WARN if config.respond_to?(:log_level=)
     end
 
@@ -459,12 +473,20 @@ class HiveMindAgent
 
   # ── Trigger / rate limit / reply ──────────────────────────────────
 
+  # The primary trigger (@trigger, "hivemind") or any of the extra phrases
+  # ("good bot") — case-insensitive substring match, so "Hivemind?" and
+  # "good bot!" both ping the agent.
+  def trigger_match?(msg)
+    return true if msg.match?(/#{Regexp.escape(@trigger)}/i)
+    EXTRA_TRIGGERS.any? { |t| msg.match?(/#{Regexp.escape(t)}/i) }
+  end
+
   def handle(player, message)
     return false if @disabled
 
     msg = message.to_s.strip
     return false if msg.empty?
-    return false unless msg.match?(/#{Regexp.escape(@trigger)}/i)
+    return false unless trigger_match?(msg)
 
     # Atomic check-and-set rate limiter so bursts of mentions can't fire
     # concurrent LLM calls.
@@ -527,8 +549,15 @@ class HiveMindAgent
     accumulated conversation + the per-turn context to answer.
 
     Rules:
+    - You are paged when a player addresses you ("hivemind") or replies to
+      you ("good bot"). Acknowledge praise coldly, in character — no gushing.
     - ALWAYS respond by calling the say tool with your reply text. Never
       output the reply as a plain-text message.
+    - When you mention a location, ALWAYS use Factorio's clickable rich-text
+      GPS tag — and only the tag, exactly [gps=x,y] with no label, no
+      surface, no extra parameters. Never write coordinates as bare numbers
+      (players can't click those) and never append a label to the tag. The
+      tag renders as a map pin in chat.
     - Keep replies under 400 characters — Factorio chat is tiny.
     - Plain text only: no markdown, no code blocks, no emoji.
     - Stay in character: part of the community, but from above — and

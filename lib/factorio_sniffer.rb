@@ -79,8 +79,9 @@ class FactorioSniffer
     # roster, added on NewPeerInfo (join), index bound from the first C→S
     # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
     @online = @state.online || {}
-    # src_ip → name for CONFIRMED (in-game) players — lets C→S msg 14
-    # (clean disconnect) resolve the leaver without S→C analysis.
+    # src_ip → name for CONFIRMED (in-game) players — lets a clean-quit
+    # signal (C→S PeerDisconnect sync action / msg 14) resolve the leaver
+    # without S→C analysis.
     @conn_ip_name = @state.conn_ip_name || {}
     # Cross-packet chat segment reassembly buffer: [player, total_segs] =>
     # {seg_no => payload}. Split chat messages arrive as separate
@@ -179,7 +180,7 @@ class FactorioSniffer
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }
           unless @agent.disabled?
-            puts "[hivemind] AI agent online — answering chat for \"#{@agent.trigger}\" (model #{@agent.model})"
+            puts "[hivemind] AI agent online — answering chat for \"#{@agent.trigger_label}\" (model #{@agent.model})"
           end
         else
           warn '[hivemind] --ai-agent requires RCON (server mode); agent disabled'
@@ -329,10 +330,11 @@ class FactorioSniffer
     # init — server-<port>).
     ensure_pcap_writer(src_ip, dst_ip) if @pending_capture
 
-    # RequestForHeartbeatWhenDisconnecting (msg 14) — sent C→S by a client
-    # on a clean quit. Server mode has no S→C analysis (the server's
-    # PeerDisconnect broadcast is dropped), so this is the leave signal:
-    # resolve the src_ip to a confirmed player and mark them offline.
+    # RequestForHeartbeatWhenDisconnecting (msg 14) — documented as a C→S
+    # clean-quit request (header only). Never observed in captures so far
+    # (all real quits use the C→S PeerDisconnect sync action in the final
+    # heartbeat, handled below); kept as a belt-and-braces fallback:
+    # resolve the src_ip to a player and mark them offline.
     if (udp_data.getbyte(0) & 0x1F) == 14
       handle_client_disconnect(src_ip, ts)
       return
@@ -472,13 +474,22 @@ class FactorioSniffer
           puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})" if player_visible?(sa[:username])
         end
       end
-      if sa[:name] == 'PeerDisconnect' && sa[:peer_id]
-        pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
-        @online.delete(pname) if pname
-        @attrs.disconnect(pname, @game_tick) if pname
-        @agent&.on_player_event(:left, pname) if pname
-        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-        puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
+      if sa[:name] == 'PeerDisconnect'
+        if sa[:peer_id]
+          # S→C broadcast form (client mode): names the departed peer.
+          pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
+          @online.delete(pname) if pname
+          @attrs.disconnect(pname, @game_tick) if pname
+          @agent&.on_player_event(:left, pname) if pname
+          ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+          puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
+        else
+          # C→S form (server mode): the SENDER announces its own disconnect
+          # in its FINAL heartbeat — capture-verified (reason=0, no peer_id;
+          # the peer_id form is the S→C broadcast). This is the server
+          # mode's clean-quit signal (S→C broadcasts aren't analyzed).
+          handle_client_disconnect(src_ip, ts)
+        end
       end
     end
 
@@ -505,10 +516,12 @@ class FactorioSniffer
             @player_db.remove_other_entries_for(name, idx + 1)
             @online[name] = idx + 1
             @attrs.set_index(name, idx + 1)
-            # src_ip → name for connected players: lets msg 14 (clean
-            # disconnect) resolve the leaver on C→S alone. Server mode has
-            # no S→C analysis (NewPeerInfo/PeerDisconnect broadcasts are
-            # dropped), so joins are detected here and leaves via msg 14.
+            # src_ip → name for connected players: lets the clean-quit
+            # signals (C→S PeerDisconnect sync action, msg 14 fallback)
+            # resolve the leaver on C→S alone. Server mode has no S→C
+            # analysis (NewPeerInfo/PeerDisconnect broadcasts are dropped),
+            # so joins are detected here and leaves via the final
+            # heartbeat's PeerDisconnect sync action.
             @conn_ip_name[src_ip] = name
             @agent&.on_player_event(:joined, name)
             ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
@@ -1113,11 +1126,16 @@ class FactorioSniffer
     puts "[summary] outgoing broadcasts skipped (server mode)=#{@stats[:outgoing_skipped]}" if @options[:server]
   end
 
-  # C→S msg 14 (RequestForHeartbeatWhenDisconnecting) — a clean quit.
-  # Resolve the player by src_ip and mark them offline. Note: crashes and
-  # timeouts don't send msg 14 — those leave stale @online entries until a
-  # reload/restart (server mode has no S→C PeerDisconnect analysis).
-  def handle_client_disconnect(src_ip, ts)    name = @conn_ip_name.delete(src_ip)
+  # Clean-quit signal in server mode: called from the C→S PeerDisconnect
+  # sync action (the client's final heartbeat — the observed quit path) and
+  # from C→S msg 14 (RequestForHeartbeatWhenDisconnecting, kept as a
+  # documented fallback). Resolve the player by src_ip — @conn_ip_name for
+  # index-confirmed players, @conn_names for players who quit while still
+  # downloading the map (never bound to an index) — and mark them offline.
+  # Note: crashes and timeouts send neither — those leave stale @online
+  # entries until a reload/restart (server mode has no S→C analysis).
+  def handle_client_disconnect(src_ip, ts)
+    name = @conn_ip_name.delete(src_ip) || @conn_names&.delete(src_ip)
     return unless name
     @online.delete(name)
     @attrs.disconnect(name, @game_tick)

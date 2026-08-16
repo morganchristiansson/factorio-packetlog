@@ -127,6 +127,17 @@ class TestHiveMindAgent < Minitest::Test
     refute_includes sp, 'Currently online players:'
   end
 
+  def test_system_prompt_enforces_gps_rich_text
+    # Coordinates must always be Factorio rich-text GPS tags ([gps=x,y]) —
+    # clickable in game — never bare numbers, and never with a label or
+    # extra parameters.
+    sp = HiveMindAgent::SYSTEM_PROMPT.gsub(/\s+/, ' ')  # heredoc line-wrap tolerant
+    assert_includes sp, '[gps=x,y]'
+    assert_includes sp, 'clickable'
+    assert_includes sp, 'Never write coordinates as bare numbers'
+    assert_includes sp, 'no label, no surface, no extra parameters'
+  end
+
   def test_turn_prompt_includes_snapshot_and_console
     @agent.on_player_event(:joined, 'alice')
     @agent.on_player_event(:left, 'bob')
@@ -289,11 +300,35 @@ class TestHiveMindAgent < Minitest::Test
     assert_empty rcon.sent
   end
 
-  def test_greeting_disabled_with_greet_on_join_false
-    rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
-    agent.instance_variable_set(:@greet_on_join, false)
-    agent.on_player_event(:joined, 'alice')
-    assert_empty rcon.sent
+  # ── Extra trigger: "good bot" ───────────────────────────────────
+  # Production replies are LLM-generated in character (same ask_llm path as
+  # "hivemind" mentions) — NEVER a canned/template string. The tests below
+  # stub the model and assert the trigger reaches the LLM with the message.
+
+  def test_good_bot_triggers_reply
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    asked = nil
+    agent.define_singleton_method(:complete) { |p| asked = p; '' }
+    agent.on_chat('alice', 'good bot')
+    sleep 0.2  # LLM call runs off-thread
+    refute_nil asked, 'good bot should reach the LLM'
+    assert_includes asked, 'In-game chat from alice: good bot'
+  end
+
+  def test_good_bot_variants_are_triggers
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    asks = 0
+    agent.define_singleton_method(:complete) { |_p| asks += 1; '' }
+    ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
+    assert_equal 1, asks, 'each variant pings (rate limiter collapses rapid-fire to one)'
+  end
+
+  def test_trigger_label_includes_extras
+    assert_includes @agent.trigger_label, 'hivemind'
+    assert_includes @agent.trigger_label, 'good bot'
   end
 end

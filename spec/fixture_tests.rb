@@ -115,6 +115,32 @@ class FixtureTests < Minitest::Test
     assert_equal 42, npi[:peer_id]
   end
 
+  # ── Player quit (C→S PeerDisconnect) real fixture ──────────
+  # gameReseter's final heartbeat (factorio.pcap pkt 51944, 2026-08-16): a
+  # clean quit arrives as a C→S heartbeat whose ONLY content is a
+  # PeerDisconnect sync action (reason=0, NO peer_id — the peer_id form is
+  # the S→C broadcast) + ClientChangedState state=8. Server mode treats
+  # this as the leave signal. Regression: the old code required peer_id, so
+  # C→S quits were never seen.
+
+  def test_player_quit_from_fixture
+    result = parse_fixture('player_quit')
+    hb = result[:heartbeat]
+    syncs = hb[:sync_actions]
+    refute_nil syncs
+    assert_equal [], hb[:tick_closures], 'quit heartbeat carries no tick closures'
+
+    pd = syncs.find { |s| s[:type] == 0x01 }
+    refute_nil pd, 'Expected PeerDisconnect sync action'
+    assert_equal 'PeerDisconnect', pd[:name]
+    assert_equal 0, pd[:reason]
+    assert_nil pd[:peer_id], 'C→S PeerDisconnect has no peer_id (S→C broadcast form only)'
+
+    st = syncs.find { |s| s[:type] == 0x03 }
+    refute_nil st, 'Expected ClientChangedState sync action'
+    assert_equal 8, st[:state]
+  end
+
   # ── Chat decode unit tests ─────────────────────────────────
   # These test the REAL FactorioProtocol.decode_chat, not a private copy.
 

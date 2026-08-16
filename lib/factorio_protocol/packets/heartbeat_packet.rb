@@ -305,7 +305,9 @@ module FactorioProtocol
       if alen && %w[close_gui zoom_around_point move_on_pan close_remote_view
                     change_picking_state selected_entity_changed_very_close
                     selected_entity_changed_very_close_precise
-                    selected_entity_changed_relative render_mode_changed].include?(name)
+                    selected_entity_changed_relative
+                    selected_entity_changed_based_on_unit_number
+                    render_mode_changed].include?(name)
         alen = if is_server
           alen + 16
         else

@@ -248,7 +248,12 @@ module FactorioProtocol
   251 => ["selected_entity_changed_very_close", 1],
   252 => ["selected_entity_changed_very_close_precise", 2],
   253 => ["selected_entity_changed_relative", 4],
-  254 => ["selected_entity_changed_based_on_unit_number", nil],
+  # 254 carries the hovered entity's unit_number (verified live 2026-08-16:
+  # [unit(4)][pad(4)] + C→S [tick][pad] trailer; hover→begin_mining pairs
+  # prove the hovered entity is the mining target — mining IS locatable on
+  # 2.0. Note: removed from the input-action enum in 2.1 (2.1 ACTIONS has no
+  # entry; do not copy this len back to the 2.1 table).
+  254 => ["selected_entity_changed_based_on_unit_number", 8],
   255 => ["set_combinator_description", 1],
   256 => ["switch_constant_combinator_state", 1],
   257 => ["switch_power_switch_state", 1],

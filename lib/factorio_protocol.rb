@@ -5,7 +5,9 @@
 module FactorioProtocol
   require_relative 'factorio_protocol/packets/heartbeat_packet'
   require_relative 'factorio_protocol/packets/connection_packets'
+  require_relative 'factorio_protocol/position'
   require_relative 'input_actions_20'
+  require_relative 'factorio_types'
 
   # ── Message Types ──────────────────────────────────────────────────
   MESSAGE_TYPES = {

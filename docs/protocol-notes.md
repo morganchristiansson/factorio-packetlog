@@ -272,6 +272,20 @@ heartbeat tick):
 | 267 | selected_entity_changed_very_close_precise | 2 |
 | 268 | selected_entity_changed_relative | 4 |
 
+**2.0 ONLY — type 254 `selected_entity_changed_based_on_unit_number`**
+(verified live on 2.0.77, 2026-08-16): 8-byte C→S payload =
+`[unit_number(4)][pad(4)]` + the usual C→S `[tick(4)][pad(4)]` trailer
+(total 16). Carries the hovered entity's unit number — the cursor-state
+signal that makes hand-mining locatable (see docs/grief-analysis.md:
+64 hover→begin_mining pairs prove the hovered entity is the mining
+target; resolve with RCON `game.get_entity_by_unit_number`). The 1-byte
+`very_close` payload varies when the hovered entity changes (e.g. 0x85→
+0x86 at a mining start) but is not an entity/item prototype id; the
+4-byte `relative` payload is a cursor offset `[dx(2)][dy(2)]` i16 LE in
+1/256 tiles from the player's character (verified against drag-build
+lines: cursor −9,0 while placing a line 9 tiles west of the player's
+path). REMOVED in 2.1 (the 2.1 ACTIONS table has no entry for 254).
+
 C→S: `[payload][tick(4)][pad(4)]`; S→C: `[payload][ref(4)][token(4)][tick-1(4)][pad(4)]`.
 The log tick equals the packet hb tick, and the data tick field = hb tick - 3.
 `selected_entity_changed_based_on_unit_number` does not exist in 2.1.14
@@ -286,6 +300,19 @@ Identified with the same tick-correlation: 128 = zoom_around_point (3 doubles
 pos int32×2 in 1/256 tiles + int + float + byte, semantics unverified), 310 =
 render_mode_changed (1-byte mode). Same `[payload][tick][pad]` C→S /
 `[payload][ref][token][tick-1][pad]` S→C shapes.
+
+**2026-08-16: zoom_around_point's doubles do NOT match player/camera
+positions** (e.g. (−1, −47, −69) and (−1, −137, 90) while the player was
+working around (558, 83); first double flips ±1.0). Possibly
+[double][float][float] or a different space — field order/semantics remain
+unverified; do not use as a position source until decoded.
+
+## drop_item (2.0: 65 / 2.1: 67)
+
+The 8-byte payload is a DIRECTION double (1.0, −1.0, ±√2/2, −0.0 observed
+on the 2026-08-16 capture), not an x,y position. The old "drop_item =
+player position" note (grief-analysis) was wrong; drop_item must be
+excluded from position-bearing action lists.
 
 ## ACTIONS table alignment (2026-08-12)
 

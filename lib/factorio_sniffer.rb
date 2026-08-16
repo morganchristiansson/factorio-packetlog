@@ -662,9 +662,9 @@ class FactorioSniffer
 
     case act[:name]
     when "start_walking"
-      if d.bytesize >= 16
-        x = d.unpack1('E', offset: 0)
-        y = d.unpack1('E', offset: 8)
+      dir = FactorioProtocol::Position.direction(act)
+      if dir && dir.size >= 2
+        x, y = dir
         dirs = [
           [[1.0, 0.0], 'east'], [[-1.0, 0.0], 'west'],
           [[0.0, 1.0], 'south'], [[0.0, -1.0], 'north'],
@@ -678,21 +678,20 @@ class FactorioSniffer
           return " dir=(#{'%.1f' % x}, #{'%.1f' % y})"
         end
       end
-    when "begin_mining_terrain", "drop_item"
-      if d.bytesize >= 8
-        raw_x = d.unpack1('i', offset: 0)
-        raw_y = d.unpack1('i', offset: 4)
-        x = raw_x / 256.0
-        y = raw_y / 256.0
-        return " pos=(#{'%.3f' % x}, #{'%.3f' % y})"
-      end
+    when "begin_mining_terrain"
+      pos = FactorioProtocol::Position.decode(act)
+      return " pos=(#{'%.3f' % pos[0]}, #{'%.3f' % pos[1]})" if pos
+    when "drop_item"
+      # 8-byte payload is a DIRECTION double, not a position (verified
+      # 2026-08-16). Print it as a direction to avoid emitting a bogus
+      # position from the raw i32s.
+      dir = FactorioProtocol::Position.direction(act)
+      return " dir=(#{'%.2f' % dir[0]})" if dir
     when "deconstruct"
-      if d.bytesize >= 16
-        x1 = d.unpack1('i', offset: 0)
-        y1 = d.unpack1('i', offset: 4)
-        x2 = d.unpack1('i', offset: 8)
-        y2 = d.unpack1('i', offset: 12)
-        return " area=(#{'%.3f' % (x1/256.0)}, #{'%.3f' % (y1/256.0)})-(#{'%.3f' % (x2/256.0)}, #{'%.3f' % (y2/256.0)})"
+      area = FactorioProtocol::Position.decode(act)
+      if area
+        x1, y1, x2, y2 = area
+        return " area=(#{'%.3f' % x1}, #{'%.3f' % y1})-(#{'%.3f' % x2}, #{'%.3f' % y2})"
       end
     when "open_item", "use_item", "start_repair"
       if d.bytesize >= 4
@@ -700,20 +699,20 @@ class FactorioSniffer
         return " entity=##{eid}"
       end
     when "change_shooting_state"
-      if d.bytesize >= 9
-        flag = d.getbyte(0)
-        x = d.unpack1('V', offset: 1) / 256.0
-        y = d.unpack1('V', offset: 5) / 256.0
-        return " shooting=#{flag} pos=(#{'%.3f' % x}, #{'%.3f' % y})"
+      pos = FactorioProtocol::Position.decode(act)
+      if pos && d.bytesize >= 9
+        return " shooting=#{d.getbyte(0)} pos=(#{'%.3f' % pos[0]}, #{'%.3f' % pos[1]})"
       end
     when "build"
-      if d.bytesize >= 9
-        x = d.unpack1('i', offset: 0)
-        y = d.unpack1('i', offset: 4)
+      pos = FactorioProtocol::Position.decode(act)
+      if pos && d.bytesize >= 9
         dir = d.getbyte(8)
         dname = DIR_NAMES[dir] || dir
-        return " pos=(#{'%.3f' % (x/256.0)}, #{'%.3f' % (y/256.0)}) dir=#{dname}"
+        return " pos=(#{'%.3f' % pos[0]}, #{'%.3f' % pos[1]}) dir=#{dname}"
       end
+    when "move_on_pan"
+      pos = FactorioProtocol::Position.decode(act)
+      return " pan=(#{'%.3f' % pos[0]}, #{'%.3f' % pos[1]})" if pos
     when "rotate_entity"
       return " dir=#{d.getbyte(0)}"
     when "flush_opened_entity_specific_fluid"

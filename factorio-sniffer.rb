@@ -5,8 +5,8 @@
 # extracts player actions, and logs them with optional grief detection.
 #
 # Thin entry point: parses args, then runs the sniffer (lib/factorio_sniffer.rb)
-# with a hot-reload loop — Ctrl-C reloads the code without losing the
-# capture file, player names, or stats; Ctrl-C again quits.
+# with a hot-reload loop — Ctrl-C or SIGHUP reloads the code without losing the
+# capture file, player names, or stats; a second Ctrl-C/SIGHUP quits.
 #
 # Usage:
 #   Live capture: sudo ruby factorio-sniffer.rb -i eth0 -p 34197
@@ -235,6 +235,14 @@ if __FILE__ == $PROGRAM_NAME
   filter_console.name = 'filter-console'
   puts 'Filter console active — type /help for commands' if $stdin.tty?
 
+  # Reload on SIGHUP too (systemd ExecReload, shells/tmux send HUP when the
+  # controlling terminal closes, `kill -HUP <pid>` for e.g. a running
+  # nohup/screen session). Raising Interrupt reuses the exact Ctrl-C
+  # semantics below: a single SIGHUP reloads code/state; a second SIGHUP (or
+  # Ctrl-C) within QUIT_WINDOW finalizes and quits. Trap is set once here
+  # (the entry point is not hot-reloaded, so it survives every `load`).
+  Signal.trap('HUP') { raise Interrupt }
+
   loop do
     sniffer = FactorioSniffer.new(options, state)
     current_sniffer = sniffer
@@ -251,7 +259,7 @@ if __FILE__ == $PROGRAM_NAME
         break
       else
         puts "\nInterrupt — reloading code; capture file and player state preserved."
-        puts "  Press Ctrl+C again within #{QUIT_WINDOW} seconds to quit."
+        puts "  Press Ctrl+C (or SIGHUP) again within #{QUIT_WINDOW} seconds to quit."
         state = sniffer.snapshot
         state.player_db&.save
         # Reload the library files. `load` re-reads the file (redefining

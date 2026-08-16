@@ -448,6 +448,13 @@ ACTIONS = {
     end
   end
 
+  # Restore the default (2.1+) mappings. Exposed for tests so version-
+  # dependent fixtures don't leak their tables into later cases.
+  def self.reset_version
+    self.actions = ACTIONS
+    self.segment_types = ACTIONS
+  end
+
   # ── Network Header ─────────────────────────────────────────────────
 
   # Message types that always carry a 2-byte message_id after the flags
@@ -584,6 +591,29 @@ ACTIONS = {
       return d[2..-1].force_encoding('UTF-8').scrub('?')
     end
 
+    # General C→S format: [player_index(1)][total_msg_len(1)][text...].
+    # The FIRST byte is the sender's player index (0x00=player 0, 0x40=player
+    # 64, 0x42=player 66, …) — the 'prefixes' above (0x05/0x0b/0x24/0x29,
+    # 0x15/0x1f/0x2d/0x30, 0x00/0x3d/0x01) are all just player slots the code
+    # happened to observe. The SECOND byte is the TOTAL message length across
+    # all input-action segments. Text runs from byte 2 to the end of the
+    # payload (the sniffer merges split segments before decoding, so byte 1
+    # equals bytesize-2 for every complete message). This generic branch
+    # catches any unlisted player slot (e.g. 0x40/0x42/0x36/0x2f) and stops
+    # them falling through to the uint32v-length branch, which read the
+    # player byte as a length and TRUNCATED long messages (e.g. "...feelings
+    # toward" instead of the full "...toward the player morganc, the kind
+    # you would never tell..."). Strictly length-gated so raw text /
+    # localized strings whose 2nd byte merely looks like a length are safe.
+    #
+    # The total length is a Factorio uint32v: a single byte for lengths
+    # < 0xff, or [0xff][uint32 LE] for longer messages (>= 0xff, e.g. a
+    # 298-byte message encodes as ff 2a 01 00 00).
+    len_off, total_len, len_bytes = decode_wc_length(d, 1)
+    if len_off && total_len && total_len > 0 && total_len == d.bytesize - 1 - len_bytes
+      return d[1 + len_bytes..-1].force_encoding('UTF-8').scrub('?')
+    end
+
     # Localized string format: [key_uint32v][mode(1)][params_count(1)][params...]
     # mode: 0=Empty, 1=Translation, 2=Literal, 3=LiteralTranslation
     msg = decode_localized_string(d)
@@ -597,6 +627,18 @@ ACTIONS = {
 
     # Raw text (no prefix)
     d.force_encoding('UTF-8').scrub('?')
+  end
+
+  # Decode a Factorio variable-length integer (the same uint32v the
+  # dissector uses) at +offset+ in +data+: a single byte when < 0xff, or
+  # [0xff][uint32 LE] (5 bytes) for values >= 0xff. Returns
+  # [offset_after, value, byte_count] or [nil, nil, 0] when out of bounds.
+  def self.decode_wc_length(data, offset)
+    b = data.getbyte(offset)
+    return [nil, nil, 0] if b.nil?
+    return [offset + 1, b, 1] unless b == 0xff
+    return [nil, nil, 0] if offset + 5 > data.bytesize
+    [offset + 5, data.unpack1('V', offset: offset + 1), 5]
   end
 
   # Recursively decode a localized string (Factorio's protobuf-like format).

@@ -306,6 +306,38 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal text, msg
   end
 
+  def test_chat_player_index_prefixed_no_truncation
+    # The first byte of a C→S write_to_console payload is the SENDER'S
+    # player index and the second byte is the total message length — NOT a
+    # length prefix. Players >= 64 (0x40/0x42/0x41/…) fell through to the
+    # uint32v-length branch, which read the player byte as a length and
+    # TRUNCATED long messages (0x42=66 → returned only 66 bytes, cutting
+    # "...feelings toward" off mid-word). Regression: the 2-byte header is
+    # stripped and ALL text is returned.
+    text = 'what version of leg is this?'
+    msg = FactorioProtocol.decode_chat(([0x40, text.bytesize] + text.bytes).pack('C*'))
+    assert_equal text, msg
+
+    # Player 66 sending a 66-char message: must return all 66 chars, not 66B-of-{player,len+...}.
+    text2 = 'personal, deep, and hidden feelings toward the player morganc'
+    assert_equal text2.bytesize, text2.bytesize
+    msg2 = FactorioProtocol.decode_chat(([0x42, text2.bytesize] + text2.bytes).pack('C*'))
+    assert_equal text2, msg2
+  end
+
+  def test_chat_reassembled_split_message_full_text
+    # Live capture (2.0), the exact message the sniffer wrongly printed as
+    # "...feelings toward". seg0 = [0x42(player66)][total_len] + first 98B,
+    # seg1 = raw continuation. After the sniffer merges the two segments
+    # (chat_action_data), decode_chat must return the FULL text.
+    seg0 = ([0x42] + [0x77] + 'hivemind what are your personal, deep, and hidden feelings towards the player morganc, the kind yo'.bytes).pack('C*')
+    seg1 = 'u would never tell...'.b
+    msg = FactorioProtocol.decode_chat(seg0 + seg1)
+    assert_equal 'hivemind what are your personal, deep, and hidden feelings towards the player morganc, the kind you would never tell...', msg
+    assert_equal 98, 'hivemind what are your personal, deep, and hidden feelings towards the player morganc, the kind yo'.bytesize, 'seg0 text must be 98B'
+    assert_equal 119, msg.bytesize
+  end
+
   def test_chat_raw_text
     # No prefix at all
     text = 'raw text here'

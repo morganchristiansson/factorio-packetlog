@@ -104,6 +104,48 @@ class TestHiveMindAgent < Minitest::Test
     end
   end
 
+  # Regression: tool messages persisted without their link to the assistant
+  # tool_calls message were restored bare, and the provider rejected the
+  # next request (“missing field tool_call_id”). The round-trip must
+  # preserve tool_calls ids/arguments and tool_call_id.
+  def test_session_roundtrips_tool_calls
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      chat = a1.instance_variable_get(:@chat)
+      chat.add_message(role: :user, content: 'turn: how many players?')
+      # Live assistant messages carry tool_calls as {call_id => ToolCall}.
+      chat.add_message(role: :assistant, content: nil,
+                       tool_calls: { 'call_1' => RubyLLM::ToolCall.new(id: 'call_1', name: 'rcon_query',
+                                                                       arguments: { 'cmd' => '/players' }) })
+      chat.add_message(role: :tool, content: 'morganc, Petricko93', tool_call_id: 'call_1')
+      chat.add_message(role: :assistant, content: 'nine players')
+      a1.send(:persist!)
+      assert File.exist?(sess), 'session file written'
+
+      # Restart: the assistant tool_calls message and the tool result must
+      # come back LINKED (tool_call_id → the tool_calls id).
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      msgs = a2.instance_variable_get(:@chat).messages
+      asst = msgs.find { |m| m.tool_call? }
+      refute_nil asst, 'assistant tool_calls message restored'
+      assert asst.tool_calls.is_a?(Hash), 'tool_calls restored in gem shape (hash keyed by id)'
+      assert_equal 'call_1', asst.tool_calls['call_1'].id
+      assert_equal 'rcon_query', asst.tool_calls['call_1'].name
+      assert_equal({ 'cmd' => '/players' }, asst.tool_calls['call_1'].arguments)
+      tool = msgs.find { |m| m.role == :tool }
+      refute_nil tool, 'tool result restored'
+      assert_equal 'call_1', tool.tool_call_id
+      assert_equal 'morganc, Petricko93', tool.content.to_s
+      assert_includes msgs.map { |m| [m.role, m.content.to_s] }, [:assistant, 'nine players']
+
+      # persist → restore → persist is byte-stable (no drift on reload).
+      file_after = JSON.parse(File.read(sess))
+      assert_equal file_after['messages'], a2.send(:serialize_messages),
+                   'round-trip is stable'
+    end
+  end
+
   # Regression: invalid UTF-8 from the wire crashed strip/regex
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash

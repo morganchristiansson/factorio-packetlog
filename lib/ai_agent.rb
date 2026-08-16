@@ -586,9 +586,12 @@ class HiveMindAgent
 
   # Restore console history + LLM conversation from the session file so a
   # RESTART (not just Ctrl-C) can resume. A corrupt/missing file starts
-  # fresh. Tool-call and tool-result messages are skipped (no text); the
-  # meaningful user prompts (which carry the console lines) and assistant
-  # replies are kept.
+  # fresh. Tool round-trips are restored WITH their links: assistant
+  # tool_calls messages carry their call ids + arguments, tool messages
+  # their tool_call_id — a tool message without its call would be rejected
+  # by the provider ("missing field tool_call_id"). Tool results whose
+  # call was dropped (old/corrupt file) are skipped so the conversation
+  # never dangles.
   def load_session
     return unless @session_path && File.exist?(@session_path)
     data = JSON.parse(File.read(@session_path))
@@ -599,16 +602,50 @@ class HiveMindAgent
     if data['recent_console'].is_a?(Array)
       @recent_console = data['recent_console'].map { |e| [e[0], e[1].to_s] }
     end
-    (data['messages'] || []).each do |m|
-      next unless m['role'] && m['content']
-      @chat.add_message(role: m['role'].to_sym, content: m['content'])
+    messages = data['messages'] || []
+    # Pass 1: tool_call ids declared by assistant messages, so tool results
+    # can be re-linked (a restored tool message whose call is missing would
+    # dangle → provider rejects the whole request).
+    call_ids = messages.select { |m| m['role'] == 'assistant' && m['tool_calls'].is_a?(Array) }
+                       .flat_map { |m| m['tool_calls'].map { |tc| tc['id'] } }.to_set
+    messages.each do |m|
+      case m['role']
+      when 'tool'
+        next unless call_ids.include?(m['tool_call_id']) && m['content']
+        @chat.add_message(role: :tool, content: m['content'], tool_call_id: m['tool_call_id'])
+      when 'assistant'
+        if m['tool_calls'].is_a?(Array) && !m['tool_calls'].empty?
+          calls = m['tool_calls'].filter_map do |tc|
+            next unless tc['id'] && tc['name']
+            [tc['id'], RubyLLM::ToolCall.new(id: tc['id'], name: tc['name'],
+                                             arguments: parse_tool_arguments(tc['arguments']))]
+          end.to_h
+          next if calls.empty?
+          @chat.add_message(role: :assistant, content: m['content'], tool_calls: calls)
+        elsif m['content']
+          @chat.add_message(role: :assistant, content: m['content'])
+        end
+      when 'user'
+        next unless m['content']
+        @chat.add_message(role: :user, content: m['content'])
+      end
     end
-    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, #{data['messages']&.size || 0} conversation messages"
+    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, #{messages.size} conversation messages"
   rescue JSON::ParserError, StandardError => e
     warn "[hivemind] session load failed (#{e.class}: #{e.message}) — starting fresh"
     @console_queue = []
     @recent_console = []
     @exchanges = 0
+  end
+
+  # Tool arguments are stored JSON-encoded (see serialize_messages); parse
+  # leniently — a malformed blob degrades to {} like an empty call.
+  def parse_tool_arguments(arguments)
+    return {} if arguments.nil? || arguments.empty?
+    parsed = JSON.parse(arguments)
+    parsed.is_a?(Hash) ? parsed : {}
+  rescue JSON::ParserError
+    {}
   end
 
   # Full persist: console queue + recent + conversation messages. Called
@@ -647,15 +684,45 @@ class HiveMindAgent
     warn "[hivemind] session persist failed: #{e.class}: #{e.message}"
   end
 
-  # Conversation as role/content pairs (skips the static system prompt and
-  # empty tool-call/tool-result messages).
+  # Conversation as role/content pairs plus the data needed to rebuild a
+  # valid tool round-trip after a restart: assistant tool_calls messages
+  # keep their call ids/names/arguments (JSON-encoded), tool messages keep
+  # their tool_call_id (the provider rejects a bare tool message without
+  # one). The static system prompt is not persisted (re-added on load);
+  # empty tool results carry nothing the model needs and are skipped.
   def serialize_messages
     return [] unless @chat
     @chat.messages.filter_map do |m|
       next if m.role == :system
-      c = m.content
-      next if c.nil? || c.to_s.empty?
-      { 'role' => m.role.to_s, 'content' => c.to_s }
+      case m.role
+      when :tool
+        c = m.content.to_s
+        next if c.empty? || m.tool_call_id.to_s.empty?
+        { 'role' => 'tool', 'content' => c, 'tool_call_id' => m.tool_call_id }
+      when :assistant
+        if m.tool_call?
+          # Live assistant messages carry tool_calls as {call_id => ToolCall}
+          # (RubyLLM::Chat#handle_tool_calls runs tool_calls.each_value);
+          # tolerate plain arrays too.
+          calls = m.tool_calls.is_a?(Hash) ? m.tool_calls.values : m.tool_calls
+          msg = { 'role' => 'assistant',
+                  'tool_calls' => calls.map do |tc|
+                    { 'id' => tc.id, 'name' => tc.name,
+                      'arguments' => JSON.generate(tc.arguments || {}) }
+                  end }
+          c = m.content.to_s
+          msg['content'] = c unless c.empty?
+          msg
+        else
+          c = m.content.to_s
+          next if c.empty?
+          { 'role' => 'assistant', 'content' => c }
+        end
+      else # user
+        c = m.content.to_s
+        next if c.empty?
+        { 'role' => 'user', 'content' => c }
+      end
     end
   end
 end

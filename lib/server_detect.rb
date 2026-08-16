@@ -7,9 +7,15 @@
 # --server-ip / --port / --rcon-* by hand we read the live process:
 #
 #   * pid:  pgrep -x factorio (fallback: /proc/*/cmdline scan)
-#   * game port:    listening UDP sockets owned by the process
+#   * game port:    precedence — --port / --bind ADDRESS[:PORT] on the
+#                   cmdline, then server-settings.json "game_port", then
+#                   listening UDP sockets owned by the process
 #                   (/proc/<pid>/fd socket inodes matched against
-#                   /proc/<pid>/net/udp[6]) — e.g. 0.0.0.0:34197
+#                   /proc/<pid>/net/udp[6]) — e.g. 0.0.0.0:34197. The
+#                   socket scan prefers the dual-stack (v4+v6) wildcard
+#                   bind: newer headless builds also open a v4-only
+#                   LAN-broadcast socket (game port + 15261) that can
+#                   precede the game socket in /proc/net/udp
 #   * rcon port:    listening TCP socket on 127.0.0.1 (e.g. :27015)
 #   * rcon host/password: parsed from the process cmdline
 #                   (--rcon-bind host:port, --rcon-password pw)
@@ -73,14 +79,21 @@ module ServerDetect
     end
   end
 
-  # Decode the LE hex address column of /proc/net/{udp,tcp}[6] to an IP string.
+  # Decode the LE hex address column of /proc/net/{udp,tcp}[6] to an IP
+  # string. The kernel stores the address as little-endian words (4 bytes
+  # per word for v6 — the v6 column is 4 LE words, NOT 8); byte-reverse
+  # each word so 0100007F -> 127.0.0.1 and a zero v6 address decodes to
+  # the canonical 0:0:0:0:0:0:0:0 (wildcard).
   def self.decode_ip(proto, hex)
     if proto.end_with?('6')
-      # 8 groups of 4 hex chars, each little-endian; 128-bit address
-      groups = hex.scan(/.{8}/).map { |g| g.scan(/.{2}/).reverse.join }
-      groups.map { |g| g.to_i(16) }.join(':')
+      hex.scan(/.{8}/)                        # 4 little-endian 32-bit words
+         .map { |w| w.scan(/.{2}/).reverse }  # bytes of each word, host order
+         .flatten                             # 16 bytes
+         .each_slice(2)
+         .map { |pair| pair.join.to_i(16) }   # 8 big-endian 16-bit groups
+         .join(':')
     else
-      hex.scan(/.{2}/).map { |b| b.to_i(16) }.join('.')
+      hex.scan(/.{2}/).reverse.map { |b| b.to_i(16) }.join('.')
     end
   end
 
@@ -187,6 +200,46 @@ module ServerDetect
     nil
   end
 
+  # Wildcard (any-interface) bind? The UDP address columns decode to
+  # '0.0.0.0' / '::' but old kernels/parsers may yield the verbose v6
+  # form; accept all three.
+  def self.wildcard_ip?(ip)
+    ip == '0.0.0.0' || ip == '::' || ip == '0:0:0:0:0:0:0:0'
+  end
+
+  # Game port set explicitly on the cmdline: --port N, or the port part
+  # of --bind ADDRESS[:PORT]. Authoritative when present (overrides the
+  # config file).
+  def self.game_port_from_cmdline(cmdline)
+    return nil unless cmdline
+    if cmdline =~ /--port\s+(\d+)/
+      return Regexp.last_match(1).to_i
+    end
+    if cmdline =~ /--bind\s+(\S+)/ && Regexp.last_match(1) =~ /:(\d+)$/
+      return Regexp.last_match(1).to_i
+    end
+    nil
+  end
+
+  # Game port from server-settings.json ("game_port"): the path given to
+  # --server-settings, relative to the process cwd, else cwd/server-
+  # settings.json — the file the server actually loaded. nil when the
+  # config has no game_port (Factorio defaults to 34197) or is unreadable.
+  def self.game_port_from_settings(pid, cmdline)
+    return nil unless pid && File.directory?("/proc/#{pid}")
+    cwd = File.realpath("/proc/#{pid}/cwd")
+    path = if cmdline =~ /--server-settings\s+(\S+)/
+             File.expand_path(Regexp.last_match(1), cwd)
+           else
+             File.join(cwd, 'server-settings.json')
+           end
+    return nil unless File.file?(path)
+    require 'json'
+    JSON.parse(File.read(path))['game_port']
+  rescue StandardError
+    nil
+  end
+
   # Full detection of the running server.
   # Returns {} when no factorio process is found; otherwise:
   #   { pid:, cmdline:, game_port:, rcon_host:, rcon_port:, rcon_password:,
@@ -200,10 +253,35 @@ module ServerDetect
 
     socks = listen_sockets(pid)
 
-    # Game port: listening UDP (prefer wildcard bind).
+    # Game port precedence: cmdline flag (--port / --bind ADDRESS[:PORT]),
+    # then server-settings.json "game_port" (--server-settings, relative to
+    # the process cwd) — both authoritative. The socket scan is used only
+    # when neither is available AND the answer is unambiguous. Newer
+    # headless builds also open a v4-only LAN-broadcast socket on
+    # (game port + 15261) that can precede the game socket in /proc/net/udp,
+    # so a naive "first wildcard bind" pick is wrong. Ambiguous socket sets
+    # FAIL LOUD (warn + no guess) — the caller falls back to -p/DEFAULT.
     udp = socks[:udp]
-    game = udp.find { |s| s[:ip] == '0.0.0.0' || s[:ip] == '::' } || udp.first
-    info[:game_port] = game[:port] if game
+    game_port = game_port_from_cmdline(info[:cmdline]) ||
+                game_port_from_settings(pid, info[:cmdline])
+    unless game_port
+      wildcards = udp.select { |s| wildcard_ip?(s[:ip]) }
+      # The game socket is dual-stack (0.0.0.0 + :: on the same port); the
+      # LAN-broadcast socket is v4-only. A unique dual-stack port is the
+      # game port; a single wildcard bind is unambiguous too.
+      dual_ports = wildcards.select { |s| s[:ip] != '0.0.0.0' }.map { |s| s[:port] } &
+                   wildcards.select { |s| s[:ip] == '0.0.0.0' }.map { |s| s[:port] }
+      if dual_ports.size == 1
+        game_port = dual_ports.first
+      elsif wildcards.size == 1
+        game_port = wildcards.first[:port]
+      else
+        detail = wildcards.empty? ? 'no wildcard UDP socket' :
+                 "wildcard sockets: #{wildcards.map { |s| "#{s[:ip]}:#{s[:port]}" }.join(', ')}"
+        warn "Warning: cannot determine game port (#{detail}); pass --port explicitly"
+      end
+    end
+    info[:game_port] = game_port if game_port
 
     # RCON port: listening TCP (prefer loopback bind).
     tcp = socks[:tcp]
@@ -230,7 +308,7 @@ module ServerDetect
     # socket also counts (covers games hosted from the in-game client,
     # which has no server flags). A plain client connects to a remote
     # address instead (its socket shows a rem_address / connected state).
-    info[:wildcard_udp] = udp.any? { |s| s[:ip] == '0.0.0.0' || s[:ip] == '::' }
+    info[:wildcard_udp] = udp.any? { |s| wildcard_ip?(s[:ip]) }
     info[:serving] = serving?(info)
 
     info

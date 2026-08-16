@@ -88,7 +88,7 @@ end
 class HiveMindAgent
   # Default OpenAI-compatible endpoint + model (override via HIVE_*/--ai-*).
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
-  DEFAULT_MODEL    = 'gpt-5.6-luna'
+  DEFAULT_MODEL    = 'deepseek-v4-flash'
 
   TRIGGER = 'hivemind'          # respond when chat contains this (case-insensitive)
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)

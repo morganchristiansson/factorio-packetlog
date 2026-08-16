@@ -104,7 +104,7 @@ Same for the endpoint/model:
 | Setting   | Flag              | Env             | Default                            |
 |-----------|-------------------|-----------------|------------------------------------|
 | endpoint  | `--ai-api-base`   | `HIVE_API_BASE` | `https://opencode.ai/zen/go/v1`    |
-| model     | `--ai-model`      | `HIVE_MODEL`    | `gpt-5.6-luna`                     |
+| model     | `--ai-model`      | `HIVE_MODEL`    | `deepseek-v4-flash`                |
 | provider  | `--ai-provider`   | `HIVE_PROVIDER` | `openai`                           |
 
 The `/chat/completions` path is appended to the base (RubyLLM OpenAI

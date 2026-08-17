@@ -19,7 +19,14 @@ class PlayerDatabase
     @players[id] || "Player_#{id}"
   end
 
+  # Names are forced to UTF-8 + scrubbed on Entry: packet-derived names can
+  # still carry a binary encoding tag with non-ASCII bytes (hot-reload state
+  # written by an older build, or a decode path that missed the scrub), and a
+  # binary name makes JSON.pretty_generate in #save raise JSON::GeneratorError
+  # — killing Ctrl-C shutdown/reload. Sanitizing here keeps the DB self-
+  # healing regardless of caller.
   def add(id, name)
+    name = clean(name)
     return if name.nil? || name.empty?
     @players[id.to_i] = name
     @id_by_name[name] = id.to_i
@@ -32,6 +39,8 @@ class PlayerDatabase
   # Remove all entries for a name except the given id (used when the
   # true game index is learned and may override peer-id-based guesses).
   def remove_other_entries_for(name, keep_id)
+    name = clean(name)
+    return if name.nil?
     @players.each do |id, n|
       if n == name && id != keep_id.to_i
         @players.delete(id)
@@ -42,10 +51,21 @@ class PlayerDatabase
 
   def save
     return unless @path
-    File.write(@path, JSON.pretty_generate(@players))
+    # Defensive sanitize: never let a legacy binary-flagged name (from
+    # reloaded state) poison the write.
+    safe = @players.transform_values { |n| clean(n) }
+    File.write(@path, JSON.pretty_generate(safe))
   end
 
   private
+
+  # scrub('?') guards against invalid UTF-8 (strip/regex on malformed bytes
+  # raises ArgumentError). Force UTF-8 FIRST so binary-flagged strings are
+  # cleaned too (a "valid" byte sequence under BINARY is garbage under UTF-8).
+  def clean(name)
+    return nil if name.nil?
+    name.to_s.dup.force_encoding('UTF-8').scrub('?').strip
+  end
 
   def rebuild_index
     @id_by_name = {}

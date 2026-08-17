@@ -519,5 +519,32 @@ Dir.mktmpdir do |dir|
   end
 end
 
+# ── Player DB encoding: legacy binary-flagged names must not kill save ──
+puts "\nPlayer DB encoding hardening"
+require_relative '../lib/player_db'
+
+# A name that arrived binary-flagged (pre-fix decode path / reloaded state)
+# must be sanitized on add — the stored value stays usable and JSON-safe.
+db = PlayerDatabase.new(nil)
+db.add(1, "sévérin".b)
+pn = db.lookup(1)
+check(pn == 'sévérin', 'binary-flagged name sanitized on add')
+check(pn.encoding == Encoding::UTF_8 && pn.valid_encoding?, 'stored name is valid UTF-8')
+check(db.name_to_id('sévérin') == 1, 'name index works with the sanitized name')
+
+# Simulate what an old reload could leave behind: a binary entry injected
+# straight into @players (bypassing add). save() must still write valid JSON.
+Dir.mktmpdir do |dir|
+  path = File.join(dir, 'players.json')
+  db2 = PlayerDatabase.new(path)
+  db2.add(1, 'alice')
+  db2.instance_variable_get(:@players)[2] = "sévérin".b   # legacy poison
+  db2.save
+  raw = File.read(path)
+  parsed = JSON.parse(raw)
+  check(parsed['2'] == 'sévérin', 'legacy binary entry sanitized at save (no GeneratorError)')
+  check(parsed['1'] == 'alice', 'clean entry survives')
+end
+
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

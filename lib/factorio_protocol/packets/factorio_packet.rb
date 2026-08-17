@@ -29,10 +29,14 @@ module FactorioProtocol
     end
 
     # [uint32v len][bytes] — returns [next_offset, string] or [nil, nil].
+    # Strings are forced to UTF-8 + scrubbed so non-ASCII (Unicode player
+    # names, game names) never leak through as binary-flagged strings — a
+    # binary string with high bytes taints prompt/JSON/console assembly
+    # downstream (Encoding::CompatibilityError, JSON::GeneratorError).
     def decode_string(data, offset)
       noff, len = decode_uint32v(data, offset)
       return [nil, nil] if len.nil? || noff + len > data.bytesize
-      [noff + len, data[noff, len]]
+      [noff + len, data[noff, len].force_encoding('UTF-8').scrub('?')]
     end
   end
 

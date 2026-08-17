@@ -38,7 +38,7 @@ module FactorioProtocol
       offset += 12  # clientID(4) + serverID(4) + instanceID(4)
       off, len = decode_uint32v(data, offset)
       return nil if len.nil? || off + len > data.bytesize
-      username = data[off, len]
+      username = data[off, len].force_encoding('UTF-8').scrub('?')
       return nil if username.nil? || username.empty?
       # Sanity: usernames are printable ASCII
       return nil unless username.bytes.all? { |b| b >= 0x20 && b <= 0x7E }

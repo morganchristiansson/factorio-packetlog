@@ -376,7 +376,9 @@ module FactorioProtocol
       when 0x02 # NewPeerInfo — username string (uint32v-prefixed)
         s_off, s_len = decode_uint32v(data, offset)
         if s_len && s_off + s_len <= data.bytesize
-          sa[:username] = data[s_off, s_len]
+          # Force UTF-8: a Unicode name must not stay binary-flagged (that
+          # taints the hivemind prompt / players.json / console output).
+          sa[:username] = data[s_off, s_len].force_encoding('UTF-8').scrub('?')
           offset = s_off + s_len
         else
           sa[:hit_unknown] = true

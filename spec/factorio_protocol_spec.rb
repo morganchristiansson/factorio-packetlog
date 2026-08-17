@@ -445,6 +445,37 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal 0x12345678, val
   end
 
+  # ── String encoding (Unicode names must not stay binary-flagged) ──
+
+  def test_decode_string_returns_utf8
+    name = "héllo"
+    data = [name.bytesize].pack('C') + name.b
+    off, str = FactorioProtocol.decode_string(data, 0)
+    assert_equal name, str
+    assert_equal Encoding::UTF_8, str.encoding
+    assert str.valid_encoding?
+  end
+
+  def test_new_peer_info_username_is_utf8
+    # C2S heartbeat with one synchronizer action: NewPeerInfo (0x02)
+    # carrying a Unicode name — must decode as clean UTF-8, not binary.
+    name = "sévérin"
+    raw = [0x06].pack('C') +            # msg_type 6 (C2S)
+          [0x10].pack('C') +            # flags: has_synchronizer_action
+          [1, 0, 0, 0].pack('V') +      # seq
+          [0, 0, 0, 0, 0, 0, 0, 0].pack('Q<') +  # next_receive (client-only)
+          [1].pack('C') +               # sync count (uint32v)
+          [0x02].pack('C') +            # NewPeerInfo
+          [name.bytesize].pack('C') + name.b
+
+    result = FactorioProtocol::HeartbeatPacket.parse(raw)
+    sa = result.heartbeat[:sync_actions].first
+    refute_nil sa, 'NewPeerInfo sync action should parse'
+    assert_equal name, sa[:username]
+    assert_equal Encoding::UTF_8, sa[:username].encoding
+    assert sa[:username].valid_encoding?
+  end
+
   private
 
   # Build a complete server-to-client heartbeat UDP packet with the given actions.

@@ -231,7 +231,11 @@ class HiveMindAgent
   # Feed a decoded chat message (player name, message text). Called by the
   # sniffer from log_action for write_to_console actions. Returns true when
   # a response was dispatched (trigger matched, rate limit passed).
+  # Player name AND message are cleaned: a Unicode name must not stay
+  # binary-flagged — interpolating it into the UTF-8 prompt raises
+  # Encoding::CompatibilityError inside turn_prompt.
   def on_chat(player, message)
+    player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
     append_history(player, message)
     handle(player, message)
@@ -241,7 +245,7 @@ class HiveMindAgent
   # to the rolling console history so the agent knows who was around.
   # Joins get an LLM-generated personal greeting (see greet_join).
   def on_player_event(kind, player)
-    name = player.to_s.strip
+    name = clean_text(player)
     return if name.empty?
     case kind
     when :joined
@@ -393,13 +397,20 @@ class HiveMindAgent
   # players + stats), new console lines since the last prompt, then the
   # instruction. Keeps the system prompt static (see complete) so the
   # conversation prefix is cacheable.
+  #
+  # Every fragment is run through clean_text BEFORE it hits the `<<`
+  # concatenations: prompt is UTF-8, and appending a binary-flagged string
+  # with non-ASCII bytes raises Encoding::CompatibilityError. All inputs
+  # are scrubbed at their boundaries too (on_chat/on_player_event/online
+  # providers), so this is belt-and-braces for anything that slips through
+  # (e.g. queued lines persisted across a hot reload by an older build).
   def turn_prompt(instruction, exclude: nil)
     prompt = +''
     snapshot = context_snapshot
-    prompt << "Current context:\n#{snapshot}\n\n" unless snapshot.empty?
+    prompt << "Current context:\n#{clean_text(snapshot)}\n\n" unless snapshot.empty?
     new_console = unread_console(exclude: exclude)
     prompt << "New console lines since the last prompt:\n#{new_console}\n\n" unless new_console.empty?
-    prompt << instruction
+    prompt << clean_text(instruction)
     prompt
   end
 
@@ -420,7 +431,9 @@ class HiveMindAgent
   # line is sent EXACTLY once). `exclude:` skips one line that the caller
   # states explicitly (the trigger message, or the join event being
   # greeted). Agent replies (player == 'hivemind') are excluded too — they
-  # are already in the conversation as assistant messages.
+  # are already in the conversation as assistant messages. Player names
+  # are re-cleaned here: queued entries may predate the boundary cleaning
+  # (persisted across hot reloads).
   def unread_console(exclude: nil)
     @console_mutex.synchronize do
       unread = @console_queue.dup
@@ -429,7 +442,7 @@ class HiveMindAgent
       unread.reject! { |p, _| p == 'hivemind' }  # replies live in the conversation
       unread.map do |player, msg|
         clipped = msg.each_char.first(HISTORY_LINE_LEN).join
-        player ? "#{player}: #{clipped}" : clipped
+        player ? "#{clean_text(player)}: #{clipped}" : clipped
       end
     end
   end
@@ -465,15 +478,17 @@ class HiveMindAgent
 
   # Names of players currently in-game. Primary source: the sniffer's
   # packet-derived online tracking (FactorioSniffer#online_players); if no
-  # provider is wired (agent used standalone), query RCON directly.
+  # provider is wired (agent used standalone), query RCON directly. Names
+  # are force-cleaned: packet-derived names are binary-flagged and must not
+  # taint the UTF-8 context snapshot.
   def online_player_list
     if @online_provider
       list = @online_provider.call
       return [] if list.nil?
-      return list.map { |p| p[:name] } if list.first.is_a?(Hash)
-      return list.map(&:to_s)
+      return list.map { |p| clean_text(p[:name]) } if list.first.is_a?(Hash)
+      return list.map { |n| clean_text(n) }
     end
-    @rcon&.connected_players&.map { |p| p[:name] } || []
+    @rcon&.connected_players&.map { |p| clean_text(p[:name]) } || []
   rescue StandardError => e
     log_error('online-player query failed', e)
     []
@@ -482,7 +497,8 @@ class HiveMindAgent
   # Player attribute lines for the system context. Primary source: the
   # sniffer's mirrored PlayerAttrs (packet-maintained, seeded from RCON);
   # if the provider yields nothing (attrs not seeded yet / query failed),
-  # fall back to a direct RCON query.
+  # fall back to a direct RCON query. Names are force-cleaned (see
+  # online_player_list).
   def player_stat_lines
     list = @player_stats_provider ? (@player_stats_provider.call || []) : []
     list = @rcon&.player_attributes || [] if list.empty? && @rcon
@@ -496,7 +512,7 @@ class HiveMindAgent
       afk = p[:afk_time_ticks] || p[:afk_time]
       flags << "afk #{format_ticks(afk)}" if p[:connected] && afk && afk.to_i > 60
       suffix = flags.empty? ? '' : " (#{flags.join(', ')})"
-      "#{p[:name]}: #{time}#{suffix}"
+      "#{clean_text(p[:name])}: #{time}#{suffix}"
     end
   rescue StandardError => e
     log_error('player-stats query failed', e)

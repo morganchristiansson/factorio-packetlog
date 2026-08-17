@@ -56,6 +56,41 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal ['hivemind', 'bus is at 1k spm'], @agent.instance_variable_get(:@console_queue).last
   end
 
+  # ── Encoding hardening (binary-flagged Unicode names) ──────────
+
+  # Regression: a player name decoded from the wire as ASCII-8BIT with
+  # high bytes used to taint the context snapshot, then collide with the
+  # UTF-8 instruction at prompt assembly (`prompt << instruction`) →
+  # Encoding::CompatibilityError, agent aborts mid-ask.
+  def test_turn_prompt_survives_binary_flagged_unicode_names
+    @agent.online_provider = -> { [{ name: "sévérin".b }] }
+    @agent.player_stats_provider = -> { [{ name: "émoji".b, online_time_ticks: 3600, connected: false }] }
+    @agent.send(:append_history, "sévérin".b, "talking to the other machine".b)
+    @agent.send(:append_history, 'alice', 'another line')
+
+    prompt = @agent.send(:turn_prompt, "In-game chat from morganc: hi\n\nAnswer. Plain text only — no markdown.")
+    assert prompt.valid_encoding?, 'assembled prompt must be valid UTF-8'
+    assert_equal Encoding::UTF_8, prompt.encoding
+    assert_includes prompt, 'sévérin'
+    assert_includes prompt, 'émoji'
+  end
+
+  def test_on_chat_cleans_binary_flagged_player_name
+    @agent.on_chat("sévérin".b, 'hey hivemind')
+    player, _msg = @agent.instance_variable_get(:@console_queue).last
+    assert_equal Encoding::UTF_8, player.encoding
+    assert_equal 'sévérin', player
+  end
+
+  def test_unread_console_cleans_persisted_binary_names
+    # Entries written by an OLD build (before boundary cleaning) survive
+    # hot reloads — unread_console must still produce UTF-8 lines.
+    @agent.send(:append_history, "sévérin".b, "legacy binary entry".b)
+    lines = @agent.send(:unread_console)
+    assert_equal Encoding::UTF_8, lines.first.encoding
+    assert_includes lines.first, 'sévérin'
+  end
+
   def test_send_reply_fallback_appends_reply
     @agent.send(:send_reply, 'fallback reply')
     assert_equal ['hivemind', 'fallback reply'], @agent.instance_variable_get(:@console_queue).last

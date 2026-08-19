@@ -248,6 +248,44 @@ class TestHiveMindAgent < Minitest::Test
     assert_includes lines, 'bob left the game'
   end
 
+  # Join lines carry the player's total play time from RCON (online_time,
+  # ticks) — formatted as days/hours like the context snapshot.
+  def test_on_player_event_includes_playtime_from_rcon
+    rcon = FakeRcon.new
+    rcon.define_singleton_method(:player_attributes) do
+      [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
+    end
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    agent.define_singleton_method(:complete) { |_p| '' }
+    agent.on_player_event(:joined, 'alice')
+    assert_equal [nil, 'alice joined the game (2d3h played)'],
+                 agent.instance_variable_get(:@console_queue)[0]
+  end
+
+  # No RCON attrs for the player (fresh server / query miss): fall back to
+  # the mirrored provider snapshot.
+  def test_on_player_event_playtime_falls_back_to_provider
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [{ name: 'bob', index: 3, connected: true, admin: false, online_time_ticks: 5_184_000 }] }
+    agent.define_singleton_method(:complete) { |_p| '' }
+    agent.on_player_event(:joined, 'bob')
+    assert_equal [nil, 'bob joined the game (1d0h played)'],
+                 agent.instance_variable_get(:@console_queue)[0]
+  end
+
+  def test_format_ticks_compact_human_durations
+    assert_equal '12m', @agent.send(:format_ticks, 43_200)
+    assert_equal '2m', @agent.send(:format_ticks, 7_200)
+    assert_equal '8h30m', @agent.send(:format_ticks, 1_836_000)
+    assert_equal '10h', @agent.send(:format_ticks, 2_160_000)   # trailing 0m dropped
+    assert_equal '1d0h', @agent.send(:format_ticks, 5_184_000)  # exactly one day
+    assert_equal '2d3h', @agent.send(:format_ticks, 11_016_000) # zero minutes dropped
+    assert_equal '0m', @agent.send(:format_ticks, 0)
+  end
+
   def test_on_player_event_ignores_blank_name
     @agent.on_player_event(:joined, '  ')
     assert_empty @agent.instance_variable_get(:@console_queue)
@@ -347,6 +385,42 @@ class TestHiveMindAgent < Minitest::Test
     sleep 0.2  # greeting runs off-thread
     assert_includes seen_prompt, 'alice just joined'
     assert_includes rcon.sent, 'Hivemind> Welcome, alice. The belts are quiet without you.'
+  end
+
+  # Joins present the RCON playtime to the model twice: in the console
+  # line (excluded from the per-turn feed since the instruction states it)
+  # and explicitly in the greeting instruction.
+  def test_join_greeting_prompt_includes_playtime
+    rcon = FakeRcon.new
+    rcon.define_singleton_method(:player_attributes) do
+      [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
+    end
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    seen_prompt = nil
+    agent.define_singleton_method(:complete) do |prompt|
+      seen_prompt = prompt
+      clean_reply('Welcome, alice.')
+    end
+    agent.on_player_event(:joined, 'alice')
+    sleep 0.2
+    assert_includes seen_prompt, 'alice just joined'
+    assert_includes seen_prompt, 'they have played 2d3h in total'
+    # The console line itself is excluded: the event must reach the model
+    # ONLY through the instruction, never twice.
+    refute_includes seen_prompt, 'alice joined the game (2d3h played)'
+  end
+
+  def test_join_greeting_prompt_omits_playtime_when_unknown
+    rcon = FakeRcon.new
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    seen_prompt = nil
+    agent.define_singleton_method(:complete) do |prompt|
+      seen_prompt = prompt
+      clean_reply('Welcome, alice.')
+    end
+    agent.on_player_event(:joined, 'alice')
+    sleep 0.2
+    refute_includes seen_prompt, ' they have played '
   end
 
   def test_join_greeting_recorded_in_history

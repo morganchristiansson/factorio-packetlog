@@ -243,14 +243,18 @@ class HiveMindAgent
 
   # Feed a join/leave event (player came online / went offline). Appended
   # to the rolling console history so the agent knows who was around.
-  # Joins get an LLM-generated personal greeting (see greet_join).
+  # Joins include the player's total play time from RCON (online_time,
+  # ticks — formatted as days/hours like the context snapshot) and get an
+  # LLM-generated personal greeting (see greet_join).
   def on_player_event(kind, player)
     name = clean_text(player)
     return if name.empty?
     case kind
     when :joined
-      append_history(nil, "#{name} joined the game")
-      greet_join(name)
+      played = playtime_for(name)
+      line = join_line(name, played)
+      append_history(nil, line)
+      greet_join(name, line, played)
     when :left
       append_history(nil, "#{name} left the game")
     end
@@ -260,7 +264,10 @@ class HiveMindAgent
   # console context (recent chat, who's online, their play history). Runs
   # off the packet loop (seconds of latency); has its OWN rate limit so a
   # join burst can't block chat questions. Records the sent greeting.
-  def greet_join(name)
+  # `line` is the exact join console line (greet_join's exclude must match
+  # it so the event reaches the model only via the instruction), `played`
+  # the formatted total play time (nil when unknown).
+  def greet_join(name, line, played = nil)
     return if @disabled || @greet_on_join == false
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @mutex.synchronize do
@@ -273,9 +280,10 @@ class HiveMindAgent
           "#{name} just joined the game. Greet them personally and briefly " \
           "(one or two short sentences, under 150 characters), informed by " \
           "what is happening right now: the recent console lines, who else " \
-          "is online, and their play history. Call the say tool with your " \
-          'greeting.',
-          exclude: [nil, "#{name} joined the game"]
+          "is online, and their play history" \
+          "#{played ? " — they have played #{played} in total" : ''}. " \
+          'Call the say tool with your greeting.',
+          exclude: [nil, line]
         )
         reply = complete(prompt)
         send_reply(reply)
@@ -494,6 +502,43 @@ class HiveMindAgent
     []
   end
 
+  # Total play time for a specific player as a formatted string (e.g.
+  # "2d3h", "45m"), or nil when unknown. Primary source: RCON
+  # (LuaPlayer.online_time, ticks — includes the live session); falls back
+  # to the mirrored provider snapshot when RCON is unavailable or the
+  # player isn't in its attrs yet.
+  def playtime_for(name)
+    ticks = playtime_ticks_for(name)
+    ticks.nil? ? nil : format_ticks(ticks)
+  end
+
+  def playtime_ticks_for(name)
+    if @rcon
+      attrs = @rcon.player_attributes
+      if attrs
+        hit = attrs.find { |p| p[:name] == name }
+        return hit[:online_time].to_i if hit
+      end
+    end
+    if @player_stats_provider
+      list = @player_stats_provider.call || []
+      hit = list.find { |p| p[:name] == name }
+      return (hit[:online_time_ticks] || hit[:online_time]).to_i if hit
+    end
+    nil
+  rescue StandardError => e
+    log_error("playtime query failed for #{name}", e)
+    nil
+  end
+
+  # Console line for a join event; the formatted play time (days/hours,
+  # e.g. "2d3h") is appended when known: "alice joined the game (2d3h
+  # played)". on_player_event enqueues this EXACT line, so greet_join's
+  # exclude can match it and the event reaches the model only once.
+  def join_line(name, played)
+    played ? "#{name} joined the game (#{played} played)" : "#{name} joined the game"
+  end
+
   # Player attribute lines for the system context. Primary source: the
   # sniffer's mirrored PlayerAttrs (packet-maintained, seeded from RCON);
   # if the provider yields nothing (attrs not seeded yet / query failed),
@@ -520,7 +565,9 @@ class HiveMindAgent
   end
 
   # 60 ticks per second → compact human duration, e.g. 43_200 → "12m",
-  # 1_836_000 → "8h30m", 5_184_000 → "1d0h".
+  # 1_836_000 → "8h30m", 5_184_000 → "1d0h", 11_016_000 → "2d3h".
+  # A trailing "0m" is dropped once days/hours are shown ("2d3h0m" is
+  # noise; minutes only appear when non-zero or as the largest unit).
   def format_ticks(ticks)
     s = ticks.to_i / 60
     days = s / 86_400
@@ -529,7 +576,7 @@ class HiveMindAgent
     parts = []
     parts << "#{days}d" if days > 0
     parts << "#{hours}h" if days > 0 || hours > 0
-    parts << "#{mins}m"
+    parts << "#{mins}m" if mins > 0 || (days == 0 && hours == 0)
     parts.join
   end
 
@@ -639,7 +686,8 @@ class HiveMindAgent
       / "who is an admin" questions.
     - "New console lines since the last prompt": only the lines seen
       since your last reply ("player: message", or "alice joined the
-      game" for events). Your previous replies are visible in the
+      game (2d3h played)" for events — the parenthesized figure is the
+      player's total play time). Your previous replies are visible in the
       conversation itself.
 
     Tools:

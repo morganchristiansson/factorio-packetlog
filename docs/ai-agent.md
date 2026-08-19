@@ -61,7 +61,12 @@ player chat ──► write_to_console action (C→S packet)
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or
-  two short sentences, sent through the say tool. Runs off the packet
+  two short sentences, sent through the say tool. The join event line
+  includes the player's current total play time from RCON
+  (`online_time`, ticks — the server's `player_attributes` query;
+  falls back to the mirrored attrs), formatted the same way as the
+  context snapshot's stats (`2d3h`, `45m`):
+  `alice joined the game (2d3h played)`. Runs off the packet
   loop with its own rate limit (`GREET_INTERVAL`, so a join burst can't
   block chat questions or spam the channel). Recorded in the history like
   a reply. Disable with `greet_on_join: false` on the agent (default on).

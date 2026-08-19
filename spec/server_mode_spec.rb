@@ -46,17 +46,62 @@ def build_segment_packet(payload, total:, no:, green:)
   hdr + seq + tick + count_flagged + seg_count + seg
 end
 
+# In-memory PcapWriter double: the real writer formats + flushes records to
+# disk (and spawns a background flusher thread); tests only care about WHICH
+# frames/packets the capture pipeline decides to write, so they record into a
+# buffer instead. `records` holds the exact bytes the real writer would have
+# framed (the raw Ethernet frame from write_frame, or the rebuilt IP/UDP
+# packet from write_packet). This keeps every capture assertion meaningful
+# while writing nothing — not even to /tmp.
+class FakePcapWriter
+  attr_reader :path, :records
+
+  # path is assertion-only (recorded verbatim); no file is ever created.
+  def initialize(path = 'fake-capture.pcap')
+    @path = path
+    @records = []
+    @closed = false
+  end
+
+  def write_frame(frame, _ts = Time.now)
+    @records << frame.b
+  end
+
+  def write_packet(ip_payload)
+    @records << ip_payload.b
+  end
+
+  def close
+    @closed = true
+  end
+end
+
 def run_sniffer(opts)
   out = StringIO.new
   old = $stdout
   $stdout = out
-  sniffer = FactorioSniffer.new(opts)
+  # Tests must not write capture artifacts into the repo's captures/ — the
+  # sniffer's always-on auto-named capture is stubbed with an in-memory
+  # FakePcapWriter via the state's pcap_writer (the exact hot-reload reuse
+  # path). The one exception is Test 11 (opts[:autoname]), which asserts the
+  # auto-naming itself and runs inside its own tmpdir chdir.
+  state = opts[:autoname] ? SnifferState.new : spec_state_with_capture
+  sniffer = FactorioSniffer.new(opts, state)
   begin
     yield sniffer
   ensure
     $stdout = old
   end
   [out.string, sniffer]
+end
+
+# SnifferState whose pcap_writer is a FakePcapWriter — constructing a
+# FactorioSniffer with it reuses the writer (skips auto-naming entirely), so
+# no test ever touches the repo's captures/ or spawns a real flusher thread.
+def spec_state_with_capture
+  st = SnifferState.new
+  st.pcap_writer = FakePcapWriter.new
+  st
 end
 
 $pass = 0
@@ -94,28 +139,18 @@ check(out.include?('outgoing broadcasts skipped (server mode)=1'),
       "outgoing counter == 1 (got: #{out[/outgoing broadcasts skipped[^\n]*/].inspect})")
 check(!out.include?('[summary] packets=4'), 'no packet 4 expected (all 3 accounted for)')
 
-# capture file: only the incoming client packet is captured — outgoing
+# capture: only the incoming client packet is captured — outgoing
 # server broadcasts and msg13 TransferBlocks are excluded from capture in
 # server mode (analysis never reads them; --full-capture keeps everything).
-# Close the writer to flush the background thread's buffer.
+# The FakePcapWriter records exactly what the real writer would have framed.
 writer = sniffer.instance_variable_get(:@pcap_writer)
 writer.close
-pcap_bytes = File.binread(writer.path)
-recs = 0
-bad = 0
-off = 24
-while off + 16 <= pcap_bytes.bytesize
-  _, _, incl, _ = pcap_bytes.unpack('VVVV', offset: off)
-  off += 16
-  break if off + incl > pcap_bytes.bytesize
-  payload = pcap_bytes[off + 14 + 20 + 8, incl - 14 - 20 - 8] # eth+ip+udp
-  bad += 1 if payload && payload.bytesize >= 500
-  recs += 1
-  off += incl
-end
-puts "  INFO: captured #{recs} records, #{bad} large (>=500B) payloads"
-check(recs == 1, "capture has 1 record (client only), echo + msg13 excluded (got #{recs})")
-check(bad.zero?, 'no 503-byte TransferBlock payloads in capture')
+recs = writer.records
+# synthetic frames: [eth(14)][udp payload] — strip eth to inspect the payload
+payloads = recs.map { |r| r[14, r.bytesize - 14] }
+puts "  INFO: captured #{recs.size} records, #{payloads.count { |p| p.bytesize >= 500 }} large (>=500B) payloads"
+check(recs.size == 1, "capture has 1 record (client only), echo + msg13 excluded (got #{recs.size})")
+check(payloads.none? { |p| p.bytesize >= 500 }, 'no 503-byte TransferBlock payloads in capture')
 
 # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
 out, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, debug: true) do |s|
@@ -154,7 +189,7 @@ puts "\nTest 5: server mode banner via run()"
 run_pcap = File.join(Dir.tmpdir, 'srv_banner.pcap')
 File.delete(run_pcap) if File.exist?(run_pcap)
 w = PcapWriter.new(run_pcap)
-builder = FactorioSniffer.new(player_db: nil)
+builder = FactorioSniffer.new({ player_db: nil }, spec_state_with_capture)
 frame = builder.send(:build_fake_ip_udp, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
 w.write_frame(frame)
 w.close
@@ -306,7 +341,7 @@ end
 
 # refresh_roster → load_roster: initial load only (new players come from
 # the packet stream, no periodic refresh)
-sr = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })
+sr = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
 fake = Object.new
 fake.define_singleton_method(:connected_players) do
   [{ index: 1, name: 'morganc' }, { index: 2, name: 'bob' }]
@@ -324,7 +359,7 @@ check(sr.instance_variable_get(:@player_db).lookup(1) == 'morganc' &&
 # empty server / failed query: no crash, no output
 fake2 = Object.new
 fake2.define_singleton_method(:connected_players) { nil }
-sr2 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })
+sr2 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
 sr2.instance_variable_set(:@rcon, fake2)
 out = StringIO.new
 old = $stdout; $stdout = out
@@ -340,7 +375,7 @@ fake3.define_singleton_method(:connected_players) do
   queries += 1
   [{ index: 1, name: 'morganc' }]
 end
-sr3 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil })
+sr3 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
 sr3.instance_variable_set(:@rcon, fake3)
 sr3.send(:load_roster)              # startup query
 st = sr3.snapshot                   # Ctrl-C reload: state carried over
@@ -354,18 +389,8 @@ puts "\nTest 7: capture filters"
 def capture_records(sniffer)
   w = sniffer.instance_variable_get(:@pcap_writer)
   w.close
-  recs = []
-  off = 24
-  data = File.binread(w.instance_variable_get(:@path))
-  while off + 16 <= data.bytesize
-    _, _, incl, _ = data.unpack('VVVV', offset: off)
-    off += 16
-    break if off + incl > data.bytesize
-    payload = data[off + 14, incl - 14] # strip Ethernet header only
-    recs << payload if payload && payload.bytesize >= 1
-    off += incl
-  end
-  recs
+  # fake records are the synthetic frames as written ([eth(14)][payload])
+  w.records.map { |r| r[14, r.bytesize - 14] }
 end
 
 # keepalive-only C→S heartbeat (flags 0x0e: single all-empty closure)
@@ -493,7 +518,7 @@ puts "\nTest 11: always-on auto-named captures"
 Dir.mktmpdir do |dir|
   Dir.chdir(dir) do
     # server mode: named at init (captures/server-34197.pcap, stable base)
-    _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil) do |s|
+    _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil, autoname: true) do |s|
       w = s.instance_variable_get(:@pcap_writer)
       ok = w && w.path =~ %r{captures/server-34197\.pcap\z}
       check(!!ok, "server auto-name, no run timestamp (got #{w && w.path})")
@@ -501,7 +526,7 @@ Dir.mktmpdir do |dir|
     end
 
     # client mode: deferred until the first packet reveals the server
-    _, sn = run_sniffer(local_ip: '10.0.0.50', player_db: nil) do |s|
+    _, sn = run_sniffer(local_ip: '10.0.0.50', player_db: nil, autoname: true) do |s|
       check(s.instance_variable_get(:@pending_capture) == File.join(dir, 'captures'),
             'client capture pending until first packet')
       pkt = "\x06\x02".b + ([0] * 10).pack('C*')

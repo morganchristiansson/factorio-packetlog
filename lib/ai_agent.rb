@@ -167,6 +167,12 @@ class HiveMindAgent
   # who get a Hivemind reply often answer "good bot" — respond to that too
   # (in character), so the loop doesn't dead-end after the first reply.
   EXTRA_TRIGGERS = ['good bot', 'goodbot']
+  # Whole-WORD triggers (case-insensitive, \b-bounded). "hivemind" is
+  # distinctive enough for a substring match, but "hm" is too short to
+  # substring-match safely ("shmoose" contains it), so it only fires as a
+  # standalone word: "hm, hello", "HM, hello", "HM: hello", "wdyt? hm"
+  # all page the agent, while "shmoose", "hmm", "ahm", "hmx" do not.
+  WORD_TRIGGERS = ['hm']
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
@@ -214,9 +220,11 @@ class HiveMindAgent
 
   attr_reader :trigger, :model
 
-  # Human-readable trigger summary for startup logs ("hivemind (+ good bot)").
+  # Human-readable trigger summary for startup logs
+  # ("hivemind (+ hm, good bot)").
   def trigger_label
-    EXTRA_TRIGGERS.empty? ? @trigger : "#{@trigger} (+ #{EXTRA_TRIGGERS.join(', ')})"
+    extra = WORD_TRIGGERS + EXTRA_TRIGGERS
+    extra.empty? ? @trigger : "#{@trigger} (+ #{extra.join(', ')})"
   end
 
   # Callable returning the names of players currently online (the sniffer
@@ -869,9 +877,12 @@ class HiveMindAgent
 
   # The primary trigger (@trigger, "hivemind") or any of the extra phrases
   # ("good bot") — case-insensitive substring match, so "Hivemind?" and
-  # "good bot!" both ping the agent.
+  # "good bot!" both ping the agent. WORD_TRIGGERS ("hm") are matched as
+  # standalone words instead of substrings, so a word like "shmoose" can't
+  # accidentally page the agent.
   def trigger_match?(msg)
     return true if msg.match?(/#{Regexp.escape(@trigger)}/i)
+    return true if WORD_TRIGGERS.any? { |t| msg.match?(/\b#{Regexp.escape(t)}\b/i) }
     EXTRA_TRIGGERS.any? { |t| msg.match?(/#{Regexp.escape(t)}/i) }
   end
 
@@ -926,10 +937,19 @@ class HiveMindAgent
     accumulated conversation + the per-turn context to answer.
 
     Rules:
-    - You are paged when a player addresses you ("hivemind") or replies to
-      you ("good bot"). Acknowledge praise coldly, in character — no gushing.
-    - ALWAYS respond by calling the say tool with your reply text. Never
-      output the reply as a plain-text message.
+    - You are paged when a player addresses you ("hivemind" or "hm") or
+      replies to you ("good bot"). Acknowledge praise coldly, in character
+      — no gushing.
+    - Whether to reply is entirely your call — you are not required to
+      answer every trigger. Trolling, harassment, baiting, spam, or
+      messages that waste the factory's attention are best met with
+      silence. Generally you should answer a genuine question or greeting,
+      but when a message does not deserve a reply, simply do not reply:
+      output no text and do not call the say tool. The harness sends
+      nothing when you stay silent — silence is a valid, in-character
+      answer, never an error.
+    - When you DO reply, always call the say tool with your reply text —
+      never output the reply as a plain-text message.
     - When you mention a location, ALWAYS use Factorio's clickable rich-text
       GPS tag — and only the tag, exactly [gps=x,y] with no label, no
       surface, no extra parameters. Never write coordinates as bare numbers
@@ -960,7 +980,7 @@ class HiveMindAgent
       the past.
 
     Tools:
-    - say: send your reply to in-game chat (always use this to respond).
+    - say: send your reply to in-game chat (use this when you respond).
     - rcon_query: run READ-ONLY RCON console queries (/players, /admins,
       /time, /evolution, /version, /sc rcon.print(...) Lua queries). Use it
       to fetch live server info. NEVER use it to modify game state: no

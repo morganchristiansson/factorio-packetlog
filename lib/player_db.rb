@@ -25,11 +25,21 @@ class PlayerDatabase
   # binary name makes JSON.pretty_generate in #save raise JSON::GeneratorError
   # — killing Ctrl-C shutdown/reload. Sanitizing here keeps the DB self-
   # healing regardless of caller.
+  # Persist immediately when a player mapping actually changes (new id
+  # or name change), so players.json survives a crash/kill mid-session —
+  # previously the mapping was only saved on quit/reload (FactorioSniffer
+  # #finish / Ctrl-C), losing every player learned after the last save.
+  # Called from every join path: roster load, connection accept,
+  # NewPeerInfo, C→S heartbeat index binding, self-confirm. Identical
+  # re-adds are no-ops (skip the disk write).
   def add(id, name)
     name = clean(name)
     return if name.nil? || name.empty?
-    @players[id.to_i] = name
-    @id_by_name[name] = id.to_i
+    id = id.to_i
+    return if @players[id] == name
+    @players[id] = name
+    @id_by_name[name] = id
+    save
   end
 
   def name_to_id(name)
@@ -38,15 +48,20 @@ class PlayerDatabase
 
   # Remove all entries for a name except the given id (used when the
   # true game index is learned and may override peer-id-based guesses).
+  # Saves when anything was actually deleted (the correction is
+  # immediately persisted too).
   def remove_other_entries_for(name, keep_id)
     name = clean(name)
     return if name.nil?
+    changed = false
     @players.each do |id, n|
       if n == name && id != keep_id.to_i
         @players.delete(id)
+        changed = true
       end
     end
     rebuild_index
+    save if changed
   end
 
   def save
@@ -54,7 +69,13 @@ class PlayerDatabase
     # Defensive sanitize: never let a legacy binary-flagged name (from
     # reloaded state) poison the write.
     safe = @players.transform_values { |n| clean(n) }
-    File.write(@path, JSON.pretty_generate(safe))
+    # Atomic write (tmp + rename): players.json is now written on every
+    # join, so a crash mid-write must not be able to truncate/corrupt it.
+    tmp = "#{@path}.tmp"
+    File.write(tmp, JSON.pretty_generate(safe))
+    File.rename(tmp, @path)
+  rescue StandardError => e
+    warn "players.json save failed: #{e.class}: #{e.message}"
   end
 
   private

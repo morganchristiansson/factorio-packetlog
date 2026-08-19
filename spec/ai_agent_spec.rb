@@ -493,6 +493,48 @@ class TestHiveMindAgent < Minitest::Test
   def test_trigger_label_includes_extras
     assert_includes @agent.trigger_label, 'hivemind'
     assert_includes @agent.trigger_label, 'good bot'
+    assert_includes @agent.trigger_label, 'hm'
+  end
+
+  # ── Word-boundary trigger: "hm" ────────────────────────────────
+  # "hm" is too short for the substring match used for "hivemind"/"good
+  # bot" (it would page on "shmoose"), so it fires only as a standalone
+  # word, case-insensitively: "hm, hello", "HM: hello", "wdyt? hm".
+  def test_hm_word_trigger_matches_standalone_word
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    ['hm', 'hm, hello', 'HM, hello', 'HM: hello', 'wdyt? hm', 'hi hm here',
+     'hello-hm', 'hm!', 'say hm.', "[hm]"].each do |m|
+      assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
+    end
+  end
+
+  def test_hm_does_not_trigger_on_substrings
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    ['shmoose', 'shmoo', 'hmm', 'hmm, hello', 'ahm', 'hmx', 's-h-m-oose'].each do |m|
+      refute agent.send(:trigger_match?, m), "expected #{m.inspect} NOT to trigger"
+    end
+  end
+
+  def test_hm_trigger_reaches_llm
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    asked = nil
+    agent.define_singleton_method(:complete) { |p| asked = p; '' }
+    agent.on_chat('alice', 'wdyt? hm')
+    sleep 0.2
+    refute_nil asked, 'standalone "hm" should reach the LLM'
+  end
+
+  def test_shmoose_does_not_trigger
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    called = false
+    agent.define_singleton_method(:complete) { |_p| called = true; '' }
+    agent.on_chat('alice', 'shmoose is back')
+    sleep 0.2
+    refute called, '"shmoose" must not page the agent'
   end
 
   # ── Long-term memory (keyed blobs, compaction) ─────────────────

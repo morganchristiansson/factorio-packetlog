@@ -123,7 +123,11 @@ player chat ──► write_to_console action (C→S packet)
   `unread_console` removes everything queued since the last prompt and
   carries it (`New console lines since the last prompt:` — chat,
   join/leave events, and the trigger message), so every line reaches the
-  model EXACTLY once, in order. (The old ring buffer + sent-pointer
+  model EXACTLY once, in order. Slash-prefixed lines (`/shout`, `/admin`,
+  command outputs) are COMMANDS, not chat — in-game chat can never begin
+  with `/` (Factorio routes such input to the command system) — so they're
+  excluded entirely: never queued and never trigger the agent.
+  (The old ring buffer + sent-pointer
   desynchronized on eviction and silently lost the newest lines — goals
   written in console never reached Hivemind.) Hivemind's own replies are
   excluded (already in the conversation). Long lines are clipped to 120

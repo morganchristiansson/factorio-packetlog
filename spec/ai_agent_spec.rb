@@ -37,6 +37,18 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal [['alice', 'hey hivemind'], ['bob', 'nice base']], history
   end
 
+  # Slash-prefixed lines are commands, not chat: they must not reach the
+  # console queue (context) and must not trigger the agent either.
+  def test_on_chat_excludes_slash_commands
+    @agent.on_chat('alice', '/shout build the mall')
+    @agent.on_chat('bob', '/admin')
+    @agent.on_chat('carol', ' /give iron-plate')
+    assert_empty @agent.instance_variable_get(:@console_queue)
+
+    triggered = @agent.on_chat('dave', '/hivemind what do you see?')
+    refute triggered, 'slash commands must not trigger the agent'
+  end
+
   def test_history_ignores_blank_messages
     @agent.send(:append_history, 'alice', '   ')
     assert_empty @agent.instance_variable_get(:@console_queue)

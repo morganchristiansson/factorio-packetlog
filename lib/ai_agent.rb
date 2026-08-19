@@ -431,9 +431,16 @@ class HiveMindAgent
   # Player name AND message are cleaned: a Unicode name must not stay
   # binary-flagged — interpolating it into the UTF-8 prompt raises
   # Encoding::CompatibilityError inside turn_prompt.
+  #
+  # Slash-prefixed lines are COMMANDS, not chat — Factorio routes anything
+  # starting with `/` to the command system (admin/teleport/permission
+  # outputs, /shout echoes, etc.), and in-game chat can never begin with
+  # `/`. They're excluded entirely: never queued into the console context
+  # and never trigger the agent.
   def on_chat(player, message)
     player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
+    return if message.start_with?('/')
     append_history(player, message)
     handle(player, message)
   end

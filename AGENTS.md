@@ -89,10 +89,12 @@ either on a client or on the game server host (server mode, with RCON).
   in SnifferState).
 - **Server mode** (default when run on the server host): analyzes only
   incoming C→S packets (no broadcast duplicates), drops save-download
-  TransferBlocks. `--local-ip` forces client mode. `--save-capture`
-  (bare flag) auto-names captures to `captures/` (server-<port> /
-  client-<server_ip>, unique per run; `--keep HOURS` / `--max-size MB`
-  rotate + prune; restarts preserve the previous capture). Captured
+  TransferBlocks. `--local-ip` forces client mode. Capture is ALWAYS on for live
+  capture (pcap-read `-r` doesn't re-capture): auto-named to `captures/`
+  with a stable base (`server-<port>.pcap` / `client-<ip>.pcap`), so
+  rotation hangs exactly ONE timestamp off it (`server-<port>-<ts>.pcap`)
+  and `--keep HOURS` / `--max-size MB` prune across ALL runs of that
+  identity; restarts preserve the previous run. Captured
   pcaps are filtered by default: TransferBlocks (msg 13),
   keepalive-only heartbeats, and (server mode) outgoing S→C broadcasts are
   excluded — a 5h server capture went from ~460MB to ~20MB. `--full-capture`
@@ -109,7 +111,8 @@ either on a client or on the game server host (server mode, with RCON).
   `select_protocol_version` re-applies from state/options. Verified: agent
   object identity, history, pointer, mutexes survive two reloads.
 - **Interactive filter console**: type `/show NAME`, `/hide NAME`, `/actions`,
-  `/noise`, `/chat`, `/quiet`, `/stats`, `/compact` (run Hivemind memory
+  `/noise`, `/chat`, `/debug` (toggle decoded per-action lines), `/stats`,
+  `/compact` (run Hivemind memory
   compaction now), `/forget`/`/clear` (wipe Hivemind's session, keep
   memories) at the sniffer's stdin to filter console output live (survives
   hot reloads). Chat is always printed. See `docs/server-mode.md`.
@@ -163,8 +166,9 @@ sudo ruby factorio-sniffer.rb
 
 # With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
 # agent auto-enables in server mode (no flag, no extra args):
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --save-capture
-# (No key = no AI. Endpoint/model/provider are hardcoded — no configurables.)
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
+# (Capture is always on; --keep HOURS bounds disk. No key = no AI;
+# endpoint/model/provider are hardcoded — no configurables.)
 
 # Pcap from a 2.0 server (action tables differ from 2.1):
 ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0

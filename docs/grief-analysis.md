@@ -9,10 +9,10 @@ case before it).
 
 Without a capture covering the event, most questions are unprovable.
 
-- **Always capture**: `--save-capture` (bare flag) writes auto-named
-  files to `captures/` — `server-<port>-<ts>.pcap` in server mode,
-  `client-<server_ip>-<ts>.pcap` in client mode. Unique per run, so a
-  restart never overwrites history.
+- **Always capture**: capture is on automatically in live mode —
+  auto-named files in `captures/` with a stable base
+  (`server-<port>.pcap` / `client-<ip>.pcap`); rotation appends one
+  timestamp (`server-<port>-<ts>.pcap`) and restart preserves prior runs.
 - **Retain**: `--keep HOURS` rotates hourly and prunes older files;
   `--max-size MB` rotates per-file size and bounds total rotated size.
   A restart also preserves the previous capture (renamed with a

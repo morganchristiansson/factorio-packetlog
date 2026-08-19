@@ -80,7 +80,7 @@ actions in ~86 MB of heartbeat payload across 4.9M tiny packets.
 
 ## Capture filtering / compression / retention (since 2025)
 
-The sniffer's `--save-capture` now filters and can compress/rotate:
+The sniffer's always-on capture filters and can compress/rotate:
 
 - **TransferBlocks (msg 13)** are excluded by default (no player actions,
   ~12% of file size); `--save-transfer-blocks` keeps them for save

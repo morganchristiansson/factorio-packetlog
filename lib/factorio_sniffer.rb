@@ -20,7 +20,7 @@ class SnifferState
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :hide_players, :show_actions, :hide_actions,
-                :chat_only, :quiet
+                :chat_only, :debug
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -33,25 +33,23 @@ class FactorioSniffer
     @player_db = @state.player_db || PlayerDatabase.new(options[:player_db])
     @grief = nil
     @stats = @state.stats || { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
-    # --save-capture [PATH]: bare flag = ALWAYS auto-name the capture
-    # (default captures/ dir; server-<port> in server mode, client-<ip>
-    # in client mode — deferred until the first packet reveals the
-    # server). An explicit PATH still works for tests/tools. The state's
-    # writer (hot reload) is always reused.
+    # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
+    # analysis (-r) doesn't re-capture. Auto-naming uses a STABLE base
+    # (captures/server-<port>.pcap) — the writer hangs exactly one rotation
+    # timestamp off it, and a restart preserves the previous run via
+    # PcapWriter#rotate_on_restart. Client mode defers until the first packet
+    # reveals the server identity. The state's writer (hot reload) is reused.
     @pcap_writer = @state.pcap_writer
     @pending_capture = nil
-    if options[:save_capture] && !@pcap_writer
-      cap = options[:save_capture]
-      if cap == true
-        dir = default_capture_dir
-        if options[:server]
-          @pcap_writer = new_pcap_writer(auto_capture_path(dir, "server-#{options[:port]}"))
-          puts "capturing to #{@pcap_writer.path}"
-        else
-          @pending_capture = dir  # resolved on the first packet (client mode)
-        end
+    if !options[:pcap] && !@pcap_writer
+      dir = default_capture_dir
+      if options[:server]
+        port = @options[:port]
+        id = "server#{port ? "-#{port}" : ''}"
+        @pcap_writer = new_pcap_writer(capture_path(dir, id))
+        puts "capturing to #{@pcap_writer.path}#{retention_hint}"
       else
-        @pcap_writer = new_pcap_writer(cap)
+        @pending_capture = dir  # client: resolve the server identity on the first packet
       end
     end
     @unknown_writer = @state.unknown_writer || (options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil)
@@ -94,15 +92,16 @@ class FactorioSniffer
     # Latest game tick observed in heartbeat tick closures — the clock for
     # lazy online_time computation (60 ticks/s, tick is in every closure).
     @game_tick = @state.game_tick || 0
-    # Interactive output filters (stdin console, /show /hide /chat /quiet).
+    # Interactive output filters (stdin console, /show /hide /chat /debug).
     # Survive hot reloads via state. Empty list = no restriction.
     @show_players = @state.show_players || []
     @hide_players = @state.hide_players || []
     @show_actions = @state.show_actions || []
     @hide_actions = @state.hide_actions || []
     @chat_only = @state.chat_only || false
-    # Runtime toggle overrides the --quiet startup flag (state wins).
-    @quiet = @state.quiet.nil? ? !!@options[:quiet] : @state.quiet
+    # Whether decoded per-action lines print. The runtime /debug toggle wins
+    # over the --debug startup flag (state survives hot reloads).
+    @debug = @state.debug.nil? ? !!@options[:debug] : @state.debug
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -227,6 +226,7 @@ class FactorioSniffer
       )
       puts "Listening on #{@options[:interface]} port #{@options[:port]}..."
       puts 'Press Ctrl+C to reload code; Ctrl+C again to quit.'
+      puts 'Decoded per-action lines hidden — use /debug (or --debug) to show them (chat + events + warnings always print).' unless @debug
       if @options[:local_ip]
         puts "Filtering: showing only packets involving #{@options[:local_ip]}"
       end
@@ -276,7 +276,7 @@ class FactorioSniffer
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
       st.chat_only = @chat_only
-      st.quiet = @quiet
+      st.debug = @debug
     end
   end
 
@@ -920,8 +920,6 @@ class FactorioSniffer
 
     return unless visible?(pname, act)
 
-    # Skip noise only in quiet mode
-    return if @quiet && FactorioProtocol::NOISE_ACTIONS.include?(act[:name])
     return if act[:name].start_with?('Unknown')
     # Skip server-internal actions (no real player)
     return if act[:player] == 0xFFFF
@@ -937,6 +935,11 @@ class FactorioSniffer
       hex = act[:data] ? act[:data].unpack1('H*') : ''
       data_str += " [#{hex}]"
     end
+    # The decoded per-action line is the volume culprit with many players —
+    # gated behind --debug. Everything important (chat, join/leave events,
+    # and invalid/missing-decode warnings) prints regardless; this is only
+    # the per-action dump, shown when inspecting decodes.
+    return unless @debug
     puts "#{ts_str}  #{arrow} #{pname.ljust(16)} #{act[:name].ljust(28)}#{data_str}#{suffix}"
   end
 
@@ -1043,7 +1046,7 @@ class FactorioSniffer
           /actions NAME...             only show these action types
           /noise NAME...               hide these action types
           /chat                        toggle chat-only mode (hide all non-chat)
-          /quiet                       toggle quiet mode (noise actions)
+          /debug                       toggle decoded per-action lines
           /filter                      show current filter state
           /stats                       print session stats
           /compact                     run Hivemind memory compaction now (manual)
@@ -1054,7 +1057,7 @@ class FactorioSniffer
     when '/filter'
       puts "show_players=#{@show_players.inspect} hide_players=#{@hide_players.inspect}"
       puts "show_actions=#{@show_actions.inspect} hide_actions=#{@hide_actions.inspect}"
-      puts "chat_only=#{@chat_only} quiet=#{@quiet}"
+      puts "chat_only=#{@chat_only} debug=#{@debug}"
     when '/show'  then modify_filter(:@show_players, parts[1..])
     when '/hide'  then modify_filter(:@hide_players, parts[1..])
     when '/actions' then modify_filter(:@show_actions, parts[1..])
@@ -1062,9 +1065,9 @@ class FactorioSniffer
     when '/chat'
       @chat_only = !@chat_only
       puts "chat-only mode: #{@chat_only ? 'ON' : 'OFF'}"
-    when '/quiet'
-      @quiet = !@quiet
-      puts "quiet mode: #{@quiet ? 'ON' : 'OFF'}"
+    when '/debug'
+      @debug = !@debug
+      puts "decoded per-action lines: #{@debug ? 'SHOWN' : 'hidden'}"
     when '/stats'
       print_summary
     when '/compact'
@@ -1192,7 +1195,7 @@ class FactorioSniffer
     merged
   end
 
-  # ── Auto-named capture (--save-capture flag) ─────────────────────
+  # ── Always-on auto-named capture ────────────────────────────────
 
   def new_pcap_writer(path)
     PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: @options[:keep], max_size: @options[:max_size])
@@ -1205,11 +1208,25 @@ class FactorioSniffer
     dir
   end
 
-  # <identity>-<timestamp>.pcap[.gz] — unique per run, never overwrites.
-  def auto_capture_path(dir, id)
-    ts = Time.now.strftime('%Y%m%d-%H%M%S')
+  # STABLE capture base path (no run timestamp): the writer appends exactly
+  # one rotation timestamp when it rolls a file (server-<port>-<ts>.pcap),
+  # and a restart appends one via rotate_on_restart. This keeps every
+  # rotated file under the same stem, so pruning (--keep/--max-size) covers
+  # ALL runs of this identity, not just the current one.
+  def capture_path(dir, id)
     ext = @options[:save_capture_gz] ? '.pcap.gz' : '.pcap'
-    File.join(dir, "#{id}-#{ts}#{ext}")
+    File.join(dir, "#{id}#{ext}")
+  end
+
+  # Human hint about rotation for the capture startup line.
+  def retention_hint
+    if @options[:keep]
+      " (rotating hourly, keep #{@options[:keep]}h)"
+    elsif @options[:max_size]
+      " (rotating at #{@options[:max_size]}MB)"
+    else
+      ' (rotating off — pass --keep HOURS / --max-size MB to bound disk)'
+    end
   end
 
   # Client mode: the server IP is unknown at startup — resolve it from the
@@ -1224,9 +1241,9 @@ class FactorioSniffer
       src_ip
     end
     id = server_ip ? "client-#{server_ip}" : 'client'
-    path = auto_capture_path(@pending_capture, id)
+    path = capture_path(@pending_capture, id)
     @pcap_writer = new_pcap_writer(path)
     @pending_capture = nil
-    puts "capturing to #{path}"
+    puts "capturing to #{path}#{retention_hint}"
   end
 end

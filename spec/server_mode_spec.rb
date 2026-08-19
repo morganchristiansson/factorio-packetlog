@@ -72,11 +72,9 @@ def check(cond, label)
 end
 
 # ── Test 1: server mode, live capture (raw_frame present) ─────────────
-capture_path = File.join(Dir.tmpdir, 'srv_test.pcap')
-File.delete(capture_path) if File.exist?(capture_path)
 
 out, sniffer = run_sniffer(
-  server: true, server_ip: SERVER_IP, player_db: nil, save_capture: capture_path
+  server: true, server_ip: SERVER_IP, player_db: nil
 ) do |s|
   ts = 1_700_000_000.0
   # incoming client chat (msg 6) — should be analyzed
@@ -100,8 +98,9 @@ check(!out.include?('[summary] packets=4'), 'no packet 4 expected (all 3 account
 # server broadcasts and msg13 TransferBlocks are excluded from capture in
 # server mode (analysis never reads them; --full-capture keeps everything).
 # Close the writer to flush the background thread's buffer.
-sniffer.instance_variable_get(:@pcap_writer).close
-pcap_bytes = File.binread(capture_path)
+writer = sniffer.instance_variable_get(:@pcap_writer)
+writer.close
+pcap_bytes = File.binread(writer.path)
 recs = 0
 bad = 0
 off = 24
@@ -119,7 +118,7 @@ check(recs == 1, "capture has 1 record (client only), echo + msg13 excluded (got
 check(bad.zero?, 'no 503-byte TransferBlock payloads in capture')
 
 # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
-out, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+out, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, debug: true) do |s|
   ts = 1_700_000_000.0
   s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_selected_entity_cleared'))
   s.send(:process_packet, 2, ts, SERVER_IP, CLIENT_IP, 34197, 34197, fixture_packet('server_open_gui_echo_14b'))
@@ -144,7 +143,7 @@ puts "\nTest 4: server mode auto-detect"
 require 'socket'
 local_ips = Socket.getifaddrs.select { |a| a.addr&.ipv4? }.map { |a| a.addr.ip_address }
 non_loopback = local_ips.reject { |ip| ip.start_with?('127.') }.first
-out, = run_sniffer(server: true, server_ip: nil, player_db: nil) do |s|
+out, = run_sniffer(server: true, server_ip: nil, player_db: nil, debug: true) do |s|
   s.send(:process_packet, 1, 1.0, CLIENT_IP, non_loopback, 34197, 34197, fixture_packet('client_pipette'))
 end
 puts "  INFO: detected local IPs: #{local_ips.inspect}"
@@ -377,9 +376,7 @@ acting = "\x06\x02\x00\x00\x00\x00".b
 s2c = "\x07\x02\x00\x00\x00\x00".b
 
 f1 = File.join(Dir.tmpdir, 'filt.pcap')
-File.delete(f1) if File.exist?(f1)
-cap_path = f1
-_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, save_capture: cap_path) do |s|
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   ts = 1_700_000_000.0
   s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
   s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
@@ -391,9 +388,7 @@ check(recs[0] && recs[0].bytesize == acting.bytesize && recs[0].start_with?("\x0
 
 # full-capture keeps everything (keepalives + outgoing echo + msg13)
 f2 = File.join(Dir.tmpdir, 'full.pcap')
-File.delete(f2) if File.exist?(f2)
-cap_path = f2
-_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, save_capture: cap_path, full_capture: true) do |s|
+_, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, full_capture: true) do |s|
   ts = 1_700_000_000.0
   s.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
   s.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
@@ -492,28 +487,28 @@ end
 check(messages == ['we dont need it to be 2 lanes'],
       "split chat reassembled (got #{messages.inspect})")
 
-# ── Test 11: auto-named captures (--save-capture flag) ───────────────
-puts "\nTest 11: auto-named captures"
+# ── Test 11: always-on auto-named captures ────────────────────────────
+puts "\nTest 11: always-on auto-named captures"
 
 Dir.mktmpdir do |dir|
   Dir.chdir(dir) do
-    # server mode: named at init (server-<port>-<ts>.pcap in captures/)
-    _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil, save_capture: true) do |s|
+    # server mode: named at init (captures/server-34197.pcap, stable base)
+    _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil) do |s|
       w = s.instance_variable_get(:@pcap_writer)
-      ok = w && w.path =~ %r{captures/server-34197-\d{8}-\d{6}\.pcap}
-      check(!!ok, "server auto-name (got #{w && w.path})")
+      ok = w && w.path =~ %r{captures/server-34197\.pcap\z}
+      check(!!ok, "server auto-name, no run timestamp (got #{w && w.path})")
       w&.close
     end
 
     # client mode: deferred until the first packet reveals the server
-    _, sn = run_sniffer(local_ip: '10.0.0.50', player_db: nil, save_capture: true) do |s|
+    _, sn = run_sniffer(local_ip: '10.0.0.50', player_db: nil) do |s|
       check(s.instance_variable_get(:@pending_capture) == File.join(dir, 'captures'),
             'client capture pending until first packet')
       pkt = "\x06\x02".b + ([0] * 10).pack('C*')
       s.send(:process_packet, 1, 1_700_000_000.0, '10.0.0.50', '10.0.0.1', 50000, 34197, pkt)
       w = s.instance_variable_get(:@pcap_writer)
-      ok = w && w.path =~ %r{captures/client-10\.0\.0\.1-\d{8}-\d{6}\.pcap}
-      check(!!ok, "client auto-name from first packet (got #{w && w.path})")
+      ok = w && w.path =~ %r{captures/client-10\.0\.0\.1\.pcap\z}
+      check(!!ok, "client auto-name from first packet, no run timestamp (got #{w && w.path})")
       w&.close
     end
   end

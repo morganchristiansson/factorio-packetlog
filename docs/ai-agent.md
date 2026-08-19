@@ -216,7 +216,7 @@ RubyLLM config since the agent object persists).
 Example:
 
 ```bash
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --save-capture
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
 ```
 
 In server mode with a key set, the agent is on (watch for the

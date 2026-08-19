@@ -381,7 +381,6 @@ ACTIONS = {
   355=>["set_control_behavior_input_networks",0],
 }.freeze
 
-  NOISE_ACTIONS = %w[wire_dragging nothing].freeze
   GRIEF_ACTIONS = %w[
     Cheat SetAllowCommands DestroyItem PlayerAdminChange
     ServerCommand MapEditorAction PutSpecialItemInMap

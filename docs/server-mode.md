@@ -35,10 +35,11 @@ Behavior:
 - **Save downloads excluded**: map-download TransferBlocks (msg 13, ~40 MB
   per joining player) are dropped entirely — no analysis, no capture. The
   server already has the save on disk.
-- **Capture is C→S only by default** (`--save-capture`): the capture
-  filter records only packets destined for the server, so the pcap mirrors
-  the analysis (no S→C broadcast duplicates). `--full-capture` records
-  both directions (still excepting TransferBlocks).
+- **Capture is C→S only by default** (capture is always on in live
+  mode): the capture filter records only packets destined for the server,
+  so the pcap mirrors the analysis (no S→C broadcast duplicates).
+  `--full-capture` records both directions (still excepting
+  TransferBlocks).
 - **Roster learning**: every client's ConnectionRequestReplyConfirm (msg 4,
   incoming) registers `src_ip → username`; their first C→S heartbeat action
   binds the real game index (like the old client-side "self" learning, but
@@ -136,7 +137,7 @@ Ctrl-C needed) to filter the console output:
 /actions build             only show these action types
 /noise change_multiplayer_config   hide these action types
 /chat                      toggle chat-only mode (hide all non-chat actions)
-/quiet                     toggle quiet mode (noise actions: wire_dragging/nothing)
+/debug                     toggle decoded per-action lines (default hidden)
 /filter                    show current filter state
 /players                   list online players
 /stats                     session summary

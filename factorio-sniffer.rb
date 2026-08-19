@@ -14,7 +14,9 @@
 #   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
 #   With grief detection: ... --detect-grief
 #   Save player db: ... --player-db players.json
-#   Save pcap: ... --save-capture output.pcap
+#   Capture: always on for live capture — auto-named captures/server-<port>.pcap
+#     (server) with rotation (--keep HOURS / --max-size MB), one timestamp per
+#     rotated file; --save-capture-gz to compress.
 #   Filter by local IP: ... --local-ip 192.168.1.100
 
 require_relative 'lib/server_detect'
@@ -54,10 +56,9 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--server', 'Server mode: run on the game server host (auto-enabled when a factorio server is detected on this host). Analyzes only incoming (client→server) packets — no broadcast duplicates — and excludes map-download save packets (msg 13) from analysis and capture.') { |v| options[:server] = true }
     opts.on('--server-ip IP', 'Server IP for --server mode (default: auto-detected from local interfaces)') { |v| options[:server_ip] = v }
     opts.on('--no-rcon', 'Disable the RCON roster sync (server mode)') { |v| options[:no_rcon] = true }
-    opts.on('--save-capture [PATH]', 'Save captured packets to a pcap file. Bare flag = auto-named (captures/server-<port>-<ts>.pcap in server mode, client-<ip>-<ts>.pcap in client mode); an explicit PATH is used as-is.') { |v| options[:save_capture] = v.nil? ? true : v }
-    opts.on('--save-capture-gz', 'Compress the (auto-named or explicit) capture stream with gzip (~3-4x smaller)') { |v| options[:save_capture_gz] = true }
+    opts.on('--save-capture-gz', 'Compress the (always-on, auto-named) capture stream with gzip (~3-4x smaller)') { |v| options[:save_capture_gz] = true }
     opts.on('--save-transfer-blocks', 'Also record map-download TransferBlock packets (msg 13, raw save data) in the capture. Off by default: they contain no player actions and add ~12% to the file size. Required if you later want tools/extract_save_from_pcap.rb to reconstruct the save.') { |v| options[:save_transfer_blocks] = true }
-    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth (deletes older rotated files). Bounds disk usage on long-running captures.') { |v| options[:keep] = v }
+    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth across ALL runs (deletes older rotated files). Capture is always on, so this bounds disk.') { |v| options[:keep] = v }
     opts.on('--max-size MB', Integer, 'Rolling capture: rotate the capture file when it exceeds this size (MB) and prune rotated files to keep total rotated size bounded. Restarts always preserve the previous capture (renamed with a timestamp).') { |v| options[:max_size] = v }
     opts.on('--full-capture', 'Record every packet as-is: no TransferBlock exclusion, no keepalive-heartbeat filtering, no server-mode direction filter (implies --save-transfer-blocks)') { |v| options[:full_capture] = true }
     opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
@@ -66,7 +67,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--dump-raw-types', 'Dump raw action type IDs with hex data (for reverse engineering)') { |v| options[:dump_raw_types] = v }
     opts.on('--validate', 'Show warnings about unknown action types and potential length mismatches') { |v| options[:validate] = v }
     opts.on('--protocol-version VERSION', 'Factorio server version for segment-type mapping ("2.0" or "2.1"; default: auto-detect via RCON in server mode, else 2.1). Main action types are version-stable — only input-action segment types differ between 2.0 and 2.1.') { |v| options[:protocol_version] = v }
-    opts.on('-q', '--quiet', 'Quiet mode: hide noise actions (wire_dragging, nothing)') { |v| options[:quiet] = v }
+    opts.on('--debug', 'Show the decoded per-action packet lines. Off by default — with many players those dominate the console; without this the output is chat + events + warnings only. Useful for inspecting invalid/missing decodes.') { |v| options[:debug] = true }
 
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
     opts.on('--map-player ID:NAME', 'Map player ID to name (e.g. 1:dlbattle)') do |v|
@@ -216,7 +217,7 @@ if __FILE__ == $PROGRAM_NAME
   # Interactive filter console: reads commands from stdin in a background
   # thread and dispatches them to the CURRENT sniffer (the loop re-points
   # it after every hot reload). Commands: /show /hide /actions /noise
-  # /chat /quiet /filter /players /stats — see /help. Exits silently when
+  # /chat /filter /players /stats — see /help. Exits silently when
   # stdin is closed/not a tty (nohup, systemd, pcap mode).
   current_sniffer = nil
   filter_console = Thread.new do

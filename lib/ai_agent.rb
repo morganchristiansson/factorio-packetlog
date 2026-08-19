@@ -320,7 +320,7 @@ class HiveMindAgent
   # api_base override the defaults and HIVE_* env vars. Chat completions
   # need an API key (HIVE_API_KEY / --ai-api-key / OPENAI_API_KEY).
   # session_path: false disables the session file; memory_dir: false
-  # disables long-term memory (default memories/, HIVE_MEMORIES overrides).
+  # disables long-term memory (default memories/).
   def initialize(rcon:, model: nil, provider: nil, api_key: nil,
                  api_base: nil, trigger: TRIGGER, session_path: nil, memory_dir: nil)
     @rcon = rcon
@@ -358,8 +358,8 @@ class HiveMindAgent
 
     # Long-term memory (keyed blobs: soul / knowledge / <player>) — the
     # compaction layer that lets a NEW session carry over what Hivemind
-    # learned. Default memories/ (HIVE_MEMORIES overrides); memory_dir:
-    # false disables. The default SOUL is seeded on first run.
+    # learned. Default memories/; memory_dir: false disables. The default
+    # SOUL is seeded on first run.
     @memory_store = MemoryStore.new(memory_dir)
     @memory_store.seed(MemoryStore::SOUL_KEY, DEFAULT_SOUL) if @memory_store.enabled?
     # Player memories already delivered to the model THIS session (join

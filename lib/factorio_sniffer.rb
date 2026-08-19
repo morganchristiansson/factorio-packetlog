@@ -176,7 +176,6 @@ class FactorioSniffer
             provider: options[:ai_provider],
             api_key: options[:ai_api_key],
             api_base: options[:ai_api_base],
-            memory_dir: options[:ai_memory_dir],
           )
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }

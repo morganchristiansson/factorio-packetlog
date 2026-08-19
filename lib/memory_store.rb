@@ -24,10 +24,13 @@ class MemoryStore
 
   attr_reader :dir
 
-  # dir: the memories directory. nil → ENV['HIVE_MEMORIES'] or the
-  # default 'memories'; false disables the store entirely.
+  # dir: the memories directory. nil → the hardcoded default 'memories'
+  # (consistent with hivemind-session.json / players.json, all cwd-relative);
+  # false disables the store entirely. The constructor param exists so the
+  # specs can isolate (tmpdir) or disable (false) the store — there is no
+  # CLI/env override, the default is fine in production.
   def initialize(dir = nil)
-    @dir = dir == false ? nil : (dir || ENV['HIVE_MEMORIES'] || DEFAULT_DIR)
+    @dir = dir == false ? nil : (dir || DEFAULT_DIR)
   end
 
   def enabled?

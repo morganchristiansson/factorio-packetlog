@@ -60,8 +60,9 @@ Triggers:
   SIGHUP / natural pcap end): synchronous, so the memories land before
   the process exits. No-op when there is nothing to compact (empty
   session) or the agent/memory is disabled.
-- `HIVE_MEMORIES` env (or `--ai-memory-dir DIR`) moves the memory
-  directory; `memory_dir: false` disables memory entirely.
+- The memory directory is the hardcoded `memories/` in the sniffer's working
+  directory (no flag/env); `memory_dir: false` on the agent disables memory
+  entirely (used by the specs).
 
 Compaction is deliberately **separate from clearing the session**: run
 `/compact` to distill the session into memory, then `/forget` (alias

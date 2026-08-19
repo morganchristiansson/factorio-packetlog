@@ -775,6 +775,23 @@ class TestHiveMindAgent < Minitest::Test
     end
   end
 
+  # ── Token usage logging ──────────────────────────────────────
+
+  def test_usage_line_formats_cache_metrics
+    msg = RubyLLM::Message.new(role: :assistant, content: 'ok',
+                               tokens: RubyLLM::Tokens.build(input: 2400, cached: 1800,
+                                                              cache_creation: 200, output: 400,
+                                                              thinking: 30))
+    assert_equal ' (2400 in, 1800 cached, 200 written, 400 out, 30 think)', @agent.send(:usage_line, msg)
+  end
+
+  def test_usage_line_omits_absent_and_zero_metrics
+    msg = RubyLLM::Message.new(role: :assistant, content: 'hi',
+                               tokens: RubyLLM::Tokens.build(input: 100, output: 20, cached: 0))
+    assert_equal ' (100 in, 20 out)', @agent.send(:usage_line, msg)
+    assert_equal '', @agent.send(:usage_line, RubyLLM::Message.new(role: :assistant, content: 'no tokens'))
+  end
+
   def test_clear_session_forgets_but_keeps_memories
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')

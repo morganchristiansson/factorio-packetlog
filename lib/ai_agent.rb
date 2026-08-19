@@ -407,8 +407,37 @@ class HiveMindAgent
         log "reasoning: #{trunc(thinking.text, 200)}"
       end
       content = message.content.to_s
-      log "assistant: #{trunc(content, 200)}" unless content.empty?
+      unless content.empty?
+        log "assistant: #{trunc(content, 200)}#{usage_line(message)}"
+      else
+        # Pure tool-call assistant message (no spoken text) — the reply
+        # arrives via the say tool, but its request still has usage worth
+        # showing (how many input tokens the provider cache absorbed).
+        log "assistant (tool call)#{usage_line(message)}" if message.tool_call?
+      end
     end
+  end
+
+  # Token usage for an assistant message, as a short suffix on the console
+  # line, e.g. " (2.4k in, 1.8k cached, 400 out)". Reflects ONE request's
+  # usage as reported by the provider (ruby_llm's Message#tokens): input
+  # is the UNCACHED input (prompt_tokens minus cache hits/writes), cached
+  # the cache-read hits, written the cache-write tokens). Omitted when the
+  # provider reports none.
+  def usage_line(message)
+    return '' unless message
+    parts = []
+    inp = message.input_tokens
+    parts << "#{inp} in" if inp
+    cached = message.cached_tokens.to_i
+    parts << "#{cached} cached" if cached > 0
+    written = message.cache_creation_tokens.to_i
+    parts << "#{written} written" if written > 0
+    out = message.output_tokens.to_i
+    parts << "#{out} out" if out > 0
+    think = message.thinking_tokens.to_i
+    parts << "#{think} think" if think > 0
+    parts.empty? ? '' : " (#{parts.join(', ')})"
   end
 
   def log(msg)

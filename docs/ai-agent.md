@@ -132,6 +132,21 @@ player chat ──► write_to_console action (C→S packet)
   warning when no trigger happens for a long while); after a
   conversation reset the last ~10 lines are re-seeded as fresh context.
   The queue survives hot reloads (agent persists in state).
+- **Console debugging — what the model does**: every LLM turn is logged to
+  the sniffer console (`after_message` observer): `reasoning:` for thinking
+  tokens, `assistant:` for the reply, `tool call:` / `tool result:` for the
+  tool round-trips, and a per-request **token-usage suffix** — e.g.
+  `assistant: ... (2.4k in, 1.8k cached, 400 out)` — where `in` is the
+  UNCACHED input (prompt_tokens minus cache hits/writes), `cached` the
+  cache-READ hits (`prompt_tokens_details.cached_tokens`), `written` the
+  cache-WRITE tokens, `out` output, `think` thinking. Each assistant
+  message (including pure tool-call ones) carries the usage of the request
+  that produced it, so a multi-tool-call turn shows one suffix per call.
+  Caveat: the cache TTL is provider-side and NOT in the usage payload — the
+  wire only says how many tokens hit vs. missed this request, never how
+  long an entry lives. You can only infer the window indirectly: a long
+  gap between triggers where `cached` drops to 0 means the prior prefix
+  expired.
 - **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `HIVE_SESSION` env overrides; `session_path: false` disables.
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console

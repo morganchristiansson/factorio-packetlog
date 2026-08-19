@@ -125,7 +125,6 @@ class TestHiveMindAgent < Minitest::Test
       a1.on_player_event(:joined, 'bob')
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
       a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
-      a1.instance_variable_set(:@exchanges, 3)
       a1.send(:persist!)
       assert File.exist?(sess), 'session file written'
 
@@ -133,7 +132,6 @@ class TestHiveMindAgent < Minitest::Test
       a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       assert_equal [['alice', 'goals: build the bus first'], [nil, 'bob joined the game']],
                    a2.instance_variable_get(:@console_queue)
-      assert_equal 3, a2.instance_variable_get(:@exchanges)
       texts = a2.instance_variable_get(:@chat).messages.map { |m| [m.role, m.content.to_s] }
       assert_includes texts, [:user, 'turn: what is the bus?']
       assert_includes texts, [:assistant, 'the bus is at 1k spm']
@@ -147,7 +145,6 @@ class TestHiveMindAgent < Minitest::Test
       File.write(sess, '{broken json')
       a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       assert_empty a.instance_variable_get(:@console_queue)
-      assert_equal 0, a.instance_variable_get(:@exchanges)
     end
   end
 
@@ -788,12 +785,10 @@ class TestHiveMindAgent < Minitest::Test
       store.write_player('alice', 'alice loves belts')
       agent.send(:append_history, 'alice', 'hello hivemind')
       agent.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: one')
-      agent.instance_variable_set(:@exchanges, 5)
 
       assert agent.clear_session!
       chat = agent.instance_variable_get(:@chat)
       assert_empty chat.messages.reject { |m| m.role == :system }, 'conversation wiped'
-      assert_equal 0, agent.instance_variable_get(:@exchanges)
       assert_empty agent.instance_variable_get(:@console_queue)
       assert_empty agent.instance_variable_get(:@recent_console)
       assert_equal 'alice loves belts', store.player('alice'), 'memories kept'

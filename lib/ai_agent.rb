@@ -151,7 +151,7 @@ end
 # LLM response. The response is sent back to in-game chat through the
 # HivemindSay tool (RCON game.print) so everyone sees it. A rolling
 # conversation context is kept in the LLM chat object so follow-ups make
-# sense; context is reset after MAX_CONVERSATION exchanges.
+# sense; it is only cleared by /clear (a new session).
 #
 # LLM: ruby_llm against a configurable OpenAI-compatible endpoint (default
 # https://opencode.ai/zen/go/v1). More tools (RCON queries, packet-decoder
@@ -175,7 +175,6 @@ class HiveMindAgent
   WORD_TRIGGERS = ['hm']
   MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
-  MAX_CONVERSATION = 40         # reset LLM context after this many exchanges
   # Max UNREAD console lines kept between prompts. NOT a limit on what the
   # model sees (that's the conversation) — the queue drains on every
   # prompt, so this only bounds the case of a LONG silence with no
@@ -184,7 +183,7 @@ class HiveMindAgent
   # gap; older lines are dropped with a warning if ever exceeded.
   HISTORY_SIZE = 1000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
-  RESEED_LINES = 10             # console lines re-seeded after a context reset
+  RESEED_LINES = 10             # console lines kept in @recent_console (for memory compaction)
   GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
 
@@ -263,9 +262,8 @@ class HiveMindAgent
   # The compaction visibility exposes ONLY the write_memories tool — never
   # say/rcon_query — and the prompt demands all updates in a single
   # batched call. Runs under the mutex so it can't interleave with a live
-  # ask. Triggered manually (/compact) and automatically on quit
-  # (FactorioSniffer#finish), synchronous so the memories land before the
-  # process exits. Explicitly does NOT clear the session — /forget does
+  # ask. Manual only: triggered by /compact — never on quit (no auto
+  # compaction). Explicitly does NOT clear the session — /forget does
   # that separately (run both to start a new session with memory).
   def compact_memory!(reason = nil)
     return false if @disabled || !memory_enabled?
@@ -312,7 +310,6 @@ class HiveMindAgent
   def clear_session!
     @mutex.synchronize do
       @chat&.reset_messages!
-      @exchanges = 0
       @memories_sent.clear
       @console_mutex.synchronize do
         @console_queue.clear
@@ -339,7 +336,6 @@ class HiveMindAgent
     @api_base = DEFAULT_API_BASE
     @last_ask = 0.0
     @last_greet = 0.0
-    @exchanges = 0
     @mutex = Mutex.new
     @chat = nil
     @greet_on_join = GREET_ON_JOIN
@@ -350,7 +346,7 @@ class HiveMindAgent
     # sent-pointer was buggy: evicting from the front desynchronized the
     # pointer and silently lost the newest lines (goals written in console
     # never reached Hivemind). @recent_console keeps the last RESEED_LINES
-    # for re-seeding a fresh conversation after MAX_CONVERSATION reset.
+    # for memory compaction (compaction_material).
     # Guarded by @console_mutex (separate from @mutex so the packet thread
     # never blocks on a slow LLM call). Survives hot reloads (the agent
     # persists in state).
@@ -590,24 +586,6 @@ class HiveMindAgent
   # it via RCON (send_reply).
   def complete(prompt)
     @mutex.synchronize do
-      @exchanges += 1
-      if @exchanges >= MAX_CONVERSATION
-        @chat.reset_messages!
-        @exchanges = 0
-        # Fresh session: re-add the static system prompt and re-seed the
-        # console queue with the last few lines so the fresh conversation
-        # (which lost all memory) regains context. Skip lines already
-        # queued/unread to avoid duplication. Player memories are forgotten
-        # too — they were in the wiped conversation, so the next turn
-        # re-injects them.
-        @memories_sent.clear
-        @chat.with_instructions(system_prompt_with_memories)
-        @console_mutex.synchronize do
-          in_queue = @console_queue.to_set
-          reseed = @recent_console.reject { |l| in_queue.include?(l) }
-          @console_queue.unshift(*reseed) unless reseed.empty?
-        end
-      end
       # register_tools keeps tool code hot-reloadable (see above).
       # NOTE: the system prompt is NOT re-applied per ask — it is STATIC
       # (personality/rules/tools) so the conversation prefix is identical
@@ -1112,8 +1090,7 @@ class HiveMindAgent
   def load_session
     return unless @session_path && File.exist?(@session_path)
     data = JSON.parse(File.read(@session_path))
-    @exchanges = data['exchanges'].to_i
-    # Fresh session: the restored conversation may or may not contain past
+    # The restored conversation may or may not contain past
     # memory injections — either way the players' memories re-seed (the
     # dedup set is empty at process start; a duplicate injection is
     # harmless).
@@ -1157,7 +1134,6 @@ class HiveMindAgent
     log_error('session load failed — starting fresh', e)
     @console_queue = []
     @recent_console = []
-    @exchanges = 0
   end
 
   # Tool arguments are stored JSON-encoded (see serialize_messages); parse
@@ -1176,7 +1152,6 @@ class HiveMindAgent
     @console_mutex.synchronize do
       data = {
         'version' => 1,
-        'exchanges' => @exchanges,
         'console_queue' => @console_queue,
         'recent_console' => @recent_console,
         'messages' => serialize_messages,
@@ -1191,7 +1166,6 @@ class HiveMindAgent
     @console_mutex.synchronize do
       write_session({
         'version' => 1,
-        'exchanges' => @exchanges,
         'console_queue' => @console_queue,
         'recent_console' => @recent_console,
       })

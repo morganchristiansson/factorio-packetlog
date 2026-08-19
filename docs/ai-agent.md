@@ -56,11 +56,8 @@ and the toolset restored, so a session that continues is unchanged.
 Triggers:
 
 - **`/compact`** on the filter console (manual; runs in a background
-  thread, queues behind any live ask).
-- **Automatically on quit** (`FactorioSniffer#finish` — Ctrl-C twice /
-  SIGHUP / natural pcap end): synchronous, so the memories land before
-  the process exits. No-op when there is nothing to compact (empty
-  session) or the agent/memory is disabled.
+  thread, queues behind any live ask). This is the ONLY trigger —
+  compaction never runs automatically (not on quit).
 - The memory directory is the hardcoded `memories/` in the sniffer's working
   directory (no flag/env); `memory_dir: false` on the agent disables memory
   entirely (used by the specs).

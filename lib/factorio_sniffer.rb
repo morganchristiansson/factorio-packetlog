@@ -234,17 +234,12 @@ class FactorioSniffer
   end
 
   # Finalize the session: summary, persist player names, close writers.
-  # Long-term memory: distill the session into the keyed memory blobs
-  # (soul/knowledge/<player>) so a NEW session can resume what Hivemind
-  # learned. Runs synchronously — the process is exiting, so wait for the
-  # memories to land. No-op when the agent is disabled or memory is off
-  # (also: pcap analysis without RCON, where the agent never enabled).
+  # Memory is NOT distilled here — compaction is manual only (`/compact`).
   def finish
     print_summary
     @player_db.save
     @pcap_writer&.close
     @unknown_writer&.close
-    @agent&.compact_memory!('quit')
   end
 
   # Capture the stateful objects so a hot-reloaded instance can pick up

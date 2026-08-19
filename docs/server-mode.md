@@ -136,7 +136,6 @@ Ctrl-C needed) to filter the console output:
 /hide NAME...              hide a player's actions (same + / - / * modifiers)
 /actions build             only show these action types
 /noise change_multiplayer_config   hide these action types
-/chat                      toggle chat-only mode (hide all non-chat actions)
 /debug                     toggle decoded per-action lines (default hidden)
 /filter                    show current filter state
 /players                   list online players

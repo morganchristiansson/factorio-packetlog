@@ -111,7 +111,7 @@ either on a client or on the game server host (server mode, with RCON).
   `select_protocol_version` re-applies from state/options. Verified: agent
   object identity, history, pointer, mutexes survive two reloads.
 - **Interactive filter console**: type `/show NAME`, `/hide NAME`, `/actions`,
-  `/noise`, `/chat`, `/debug` (toggle decoded per-action lines), `/stats`,
+  `/noise`, `/debug` (toggle decoded per-action lines), `/stats`,
   `/compact` (run Hivemind memory
   compaction now), `/forget`/`/clear` (wipe Hivemind's session, keep
   memories) at the sniffer's stdin to filter console output live (survives

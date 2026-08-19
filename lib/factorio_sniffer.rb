@@ -20,7 +20,7 @@ class SnifferState
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :hide_players, :show_actions, :hide_actions,
-                :chat_only, :debug
+                :debug
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -92,15 +92,15 @@ class FactorioSniffer
     # Latest game tick observed in heartbeat tick closures — the clock for
     # lazy online_time computation (60 ticks/s, tick is in every closure).
     @game_tick = @state.game_tick || 0
-    # Interactive output filters (stdin console, /show /hide /chat /debug).
+    # Interactive output filters (stdin console, /show /hide /actions /noise /debug).
     # Survive hot reloads via state. Empty list = no restriction.
     @show_players = @state.show_players || []
     @hide_players = @state.hide_players || []
     @show_actions = @state.show_actions || []
     @hide_actions = @state.hide_actions || []
-    @chat_only = @state.chat_only || false
     # Whether decoded per-action lines print. The runtime /debug toggle wins
-    # over the --debug startup flag (state survives hot reloads).
+    # over the --debug startup flag (state survives hot reloads). Default is
+    # OFF — the normal operator output is chat + join/leave events + warnings.
     @debug = @state.debug.nil? ? !!@options[:debug] : @state.debug
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
@@ -275,7 +275,6 @@ class FactorioSniffer
       st.hide_players = @hide_players
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
-      st.chat_only = @chat_only
       st.debug = @debug
     end
   end
@@ -903,9 +902,8 @@ class FactorioSniffer
 
     # Chat messages: ALWAYS printed (exempt from all filters) and fed to
     # the agent — chat is the important signal, filters are for action
-    # spam. /chat chat-only mode still hides non-chat actions. Split
-    # messages are reassembled across packets (chat_action_data) before
-    # decoding.
+    # spam. Split messages are reassembled across packets
+    # (chat_action_data) before decoding.
     if act[:name] == 'write_to_console'
       data = chat_action_data(act, pname, ts)
       if data
@@ -945,14 +943,13 @@ class FactorioSniffer
 
   # ── Interactive filter console (stdin) ──────────────────────────
 
-  # Visibility of an action line: player filters (AND) + chat-only + action
-  # filters. Filters are stored downcased; names are matched case-
-  # insensitively.
+  # Visibility of an action line: player + action-type filters. Chat is
+  # always exempt; join/leave events and decode warnings print outside this
+  # path, so no filter ever hides them.
   def visible?(pname, act)
     name = pname.to_s.downcase
     return false if @hide_players.include?(name)
     return false if @show_players.any? && !@show_players.include?(name)
-    return false if @chat_only && act[:name] != 'write_to_console'
     return false if @hide_actions.include?(act[:name])
     return false if @show_actions.any? && !@show_actions.include?(act[:name])
     true
@@ -1045,7 +1042,6 @@ class FactorioSniffer
           /hide +NAME  /hide -NAME
           /actions NAME...             only show these action types
           /noise NAME...               hide these action types
-          /chat                        toggle chat-only mode (hide all non-chat)
           /debug                       toggle decoded per-action lines
           /filter                      show current filter state
           /stats                       print session stats
@@ -1057,14 +1053,11 @@ class FactorioSniffer
     when '/filter'
       puts "show_players=#{@show_players.inspect} hide_players=#{@hide_players.inspect}"
       puts "show_actions=#{@show_actions.inspect} hide_actions=#{@hide_actions.inspect}"
-      puts "chat_only=#{@chat_only} debug=#{@debug}"
+      puts "debug=#{@debug}"
     when '/show'  then modify_filter(:@show_players, parts[1..])
     when '/hide'  then modify_filter(:@hide_players, parts[1..])
     when '/actions' then modify_filter(:@show_actions, parts[1..])
     when '/noise' then modify_filter(:@hide_actions, parts[1..])
-    when '/chat'
-      @chat_only = !@chat_only
-      puts "chat-only mode: #{@chat_only ? 'ON' : 'OFF'}"
     when '/debug'
       @debug = !@debug
       puts "decoded per-action lines: #{@debug ? 'SHOWN' : 'hidden'}"

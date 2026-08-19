@@ -217,7 +217,7 @@ if __FILE__ == $PROGRAM_NAME
   # Interactive filter console: reads commands from stdin in a background
   # thread and dispatches them to the CURRENT sniffer (the loop re-points
   # it after every hot reload). Commands: /show /hide /actions /noise
-  # /chat /filter /players /stats — see /help. Exits silently when
+  # /debug /filter /players /stats — see /help. Exits silently when
   # stdin is closed/not a tty (nohup, systemd, pcap mode).
   current_sniffer = nil
   filter_console = Thread.new do

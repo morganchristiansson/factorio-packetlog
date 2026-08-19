@@ -19,7 +19,7 @@ class SnifferState
                 :self_ip, :self_name, :self_index, :peer_names, :conn_names,
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
-                :show_players, :hide_players, :show_actions, :hide_actions,
+                :show_players, :show_actions, :hide_actions,
                 :debug
 end
 
@@ -92,10 +92,9 @@ class FactorioSniffer
     # Latest game tick observed in heartbeat tick closures — the clock for
     # lazy online_time computation (60 ticks/s, tick is in every closure).
     @game_tick = @state.game_tick || 0
-    # Interactive output filters (stdin console, /show /hide /actions /noise /debug).
+    # Interactive output filters (stdin console, /show /actions /noise /debug).
     # Survive hot reloads via state. Empty list = no restriction.
     @show_players = @state.show_players || []
-    @hide_players = @state.hide_players || []
     @show_actions = @state.show_actions || []
     @hide_actions = @state.hide_actions || []
     # Whether decoded per-action lines print. The runtime /debug toggle wins
@@ -272,7 +271,6 @@ class FactorioSniffer
       st.attrs_loaded = @state.attrs_loaded
       st.protocol_version = @state.protocol_version
       st.show_players = @show_players
-      st.hide_players = @hide_players
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
       st.debug = @debug
@@ -948,7 +946,6 @@ class FactorioSniffer
   # path, so no filter ever hides them.
   def visible?(pname, act)
     name = pname.to_s.downcase
-    return false if @hide_players.include?(name)
     return false if @show_players.any? && !@show_players.include?(name)
     return false if @hide_actions.include?(act[:name])
     return false if @show_actions.any? && !@show_actions.include?(act[:name])
@@ -958,7 +955,6 @@ class FactorioSniffer
   # Same player filtering for join/leave lines (no action criteria).
   def player_visible?(name)
     n = name.to_s.downcase
-    return false if @hide_players.include?(n)
     return false if @show_players.any? && !@show_players.include?(n)
     true
   end
@@ -1038,8 +1034,6 @@ class FactorioSniffer
           /players                     list online players
           /show NAME...                only show these players (* = clear)
           /show +NAME  /show -NAME     add / remove one player
-          /hide NAME...                hide these players
-          /hide +NAME  /hide -NAME
           /actions NAME...             only show these action types
           /noise NAME...               hide these action types
           /debug                       toggle decoded per-action lines
@@ -1051,11 +1045,10 @@ class FactorioSniffer
     when '/players'
       puts "online (#{online_players.size}): #{online_players.join(', ')}"
     when '/filter'
-      puts "show_players=#{@show_players.inspect} hide_players=#{@hide_players.inspect}"
+      puts "show_players=#{@show_players.inspect}"
       puts "show_actions=#{@show_actions.inspect} hide_actions=#{@hide_actions.inspect}"
       puts "debug=#{@debug}"
     when '/show'  then modify_filter(:@show_players, parts[1..])
-    when '/hide'  then modify_filter(:@hide_players, parts[1..])
     when '/actions' then modify_filter(:@show_actions, parts[1..])
     when '/noise' then modify_filter(:@hide_actions, parts[1..])
     when '/debug'
@@ -1089,8 +1082,8 @@ class FactorioSniffer
     warn "filter console error: #{e.class}: #{e.message}"
   end
 
-  # /show|/hide|/actions|/noise argument handling: replace mode (bare
-  # names), +add / -remove modifiers, or * to clear. Filters are downcased.
+  # /show|/actions|/noise argument handling: replace mode (bare names),
+  # +add / -remove modifiers, or * to clear. Filters are downcased.
   def modify_filter(iv, args)
     list = instance_variable_get(iv)
     if args.nil? || args.empty?

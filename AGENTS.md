@@ -110,7 +110,7 @@ either on a client or on the game server host (server mode, with RCON).
   tools re-register per ask, providers re-point at the new sniffer, and
   `select_protocol_version` re-applies from state/options. Verified: agent
   object identity, history, pointer, mutexes survive two reloads.
-- **Interactive filter console**: type `/show NAME`, `/hide NAME`, `/actions`,
+- **Interactive filter console**: type `/show NAME`, `/actions`,
   `/noise`, `/debug` (toggle decoded per-action lines), `/stats`,
   `/compact` (run Hivemind memory
   compaction now), `/forget`/`/clear` (wipe Hivemind's session, keep

@@ -133,7 +133,6 @@ Ctrl-C needed) to filter the console output:
 /show +alice               add a player to the whitelist
 /show -alice               remove a player
 /show *                    clear the whitelist (show everyone)
-/hide NAME...              hide a player's actions (same + / - / * modifiers)
 /actions build             only show these action types
 /noise change_multiplayer_config   hide these action types
 /debug                     toggle decoded per-action lines (default hidden)

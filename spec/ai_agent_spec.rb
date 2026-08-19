@@ -21,7 +21,7 @@ end
 
 class TestHiveMindAgent < Minitest::Test
   def setup
-    @agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: "sk-test", session_path: false)
+    @agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: "sk-test", session_path: false, memory_dir: false)
     @agent.online_provider = -> { [] }
     @agent.player_stats_provider = -> { [] }
     # Join greetings are LLM calls; stub so tests don't hit the network.
@@ -106,7 +106,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_session_persists_and_restores_across_restart
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       a1.online_provider = -> { [] }
       a1.player_stats_provider = -> { [] }
       a1.on_chat('alice', 'goals: build the bus first')
@@ -118,7 +118,7 @@ class TestHiveMindAgent < Minitest::Test
       assert File.exist?(sess), 'session file written'
 
       # fresh agent = a restart
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       assert_equal [['alice', 'goals: build the bus first'], [nil, 'bob joined the game']],
                    a2.instance_variable_get(:@console_queue)
       assert_equal 3, a2.instance_variable_get(:@exchanges)
@@ -133,7 +133,7 @@ class TestHiveMindAgent < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       File.write(sess, '{broken json')
-      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       assert_empty a.instance_variable_get(:@console_queue)
       assert_equal 0, a.instance_variable_get(:@exchanges)
     end
@@ -146,7 +146,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_session_roundtrips_tool_calls
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       chat = a1.instance_variable_get(:@chat)
       chat.add_message(role: :user, content: 'turn: how many players?')
       # Live assistant messages carry tool_calls as {call_id => ToolCall}.
@@ -160,7 +160,7 @@ class TestHiveMindAgent < Minitest::Test
 
       # Restart: the assistant tool_calls message and the tool result must
       # come back LINKED (tool_call_id → the tool_calls id).
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess)
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
       msgs = a2.instance_variable_get(:@chat).messages
       asst = msgs.find { |m| m.tool_call? }
       refute_nil asst, 'assistant tool_calls message restored'
@@ -184,7 +184,7 @@ class TestHiveMindAgent < Minitest::Test
   # Regression: invalid UTF-8 from the wire crashed strip/regex
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.online_provider = -> { [] }
     agent.player_stats_provider = -> { [] }
     agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
@@ -255,7 +255,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.online_provider = -> { [] }
     agent.player_stats_provider = -> { [] }
     agent.define_singleton_method(:complete) { |_p| '' }
@@ -267,7 +267,7 @@ class TestHiveMindAgent < Minitest::Test
   # No RCON attrs for the player (fresh server / query miss): fall back to
   # the mirrored provider snapshot.
   def test_on_player_event_playtime_falls_back_to_provider
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.online_provider = -> { [] }
     agent.player_stats_provider = -> { [{ name: 'bob', index: 3, connected: true, admin: false, online_time_ticks: 5_184_000 }] }
     agent.define_singleton_method(:complete) { |_p| '' }
@@ -375,7 +375,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_uses_llm_and_sends
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -395,7 +395,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -412,7 +412,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_prompt_omits_playtime_when_unknown
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -424,7 +424,7 @@ class TestHiveMindAgent < Minitest::Test
   end
 
   def test_join_greeting_recorded_in_history
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.define_singleton_method(:complete) do |_prompt|
       clean_reply('Welcome, alice. The factory is watching.')
     end
@@ -436,7 +436,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_respects_greet_interval
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.define_singleton_method(:complete) { |_p| clean_reply('hi') }
     agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
     agent.on_player_event(:joined, 'alice')
@@ -446,7 +446,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_leave_does_not_greet
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.on_player_event(:left, 'alice')
     assert_empty rcon.sent
   end
@@ -457,7 +457,7 @@ class TestHiveMindAgent < Minitest::Test
   # stub the model and assert the trigger reaches the LLM with the message.
 
   def test_good_bot_triggers_reply
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.online_provider = -> { [] }
     agent.player_stats_provider = -> { [] }
     asked = nil
@@ -469,7 +469,7 @@ class TestHiveMindAgent < Minitest::Test
   end
 
   def test_good_bot_variants_are_triggers
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false)
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     agent.online_provider = -> { [] }
     agent.player_stats_provider = -> { [] }
     asks = 0
@@ -481,5 +481,270 @@ class TestHiveMindAgent < Minitest::Test
   def test_trigger_label_includes_extras
     assert_includes @agent.trigger_label, 'hivemind'
     assert_includes @agent.trigger_label, 'good bot'
+  end
+
+  # ── Long-term memory (keyed blobs, compaction) ─────────────────
+
+  def test_soal_seeded_on_first_run_only
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      store = agent.instance_variable_get(:@memory_store)
+      assert_equal HiveMindAgent::DEFAULT_SOUL, store.soul, 'SOUL seeded from the default personality'
+      # An existing/edited SOUL is never overwritten by a new process.
+      store.write_soul('the factory regained its voice')
+      HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      assert_equal 'the factory regained its voice', store.soul
+    end
+  end
+
+  def test_system_prompt_includes_soul_and_knowledge
+    Dir.mktmpdir do |dir|
+      # Seed BEFORE init so the applied system prompt (built at configure_llm)
+      # reflects the store at conversation creation.
+      store = MemoryStore.new(dir)
+      store.seed('soul', 'my custom soul')
+      store.write_knowledge('the bus feeds the mall')
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      sys = agent.instance_variable_get(:@chat).messages.find { |m| m.role == :system }
+      content = sys.content.to_s
+      # SOUL (personality) and KNOWLEDGE (facts) live in the SYSTEM prompt
+      # (not the per-turn user prompt) — cached once per conversation.
+      assert_includes content, 'my custom soul'
+      assert_includes content, '=== SOUL ==='
+      assert_includes content, 'the bus feeds the mall'
+      assert_includes content, '=== KNOWLEDGE ==='
+      # the static mechanics are still there too
+      assert_includes content, 'rcon_query'
+    end
+  end
+
+  def test_turn_prompt_injects_player_memory_with_dedup
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      store = agent.instance_variable_get(:@memory_store)
+      store.write_player('alice', 'alice is building the mall')
+
+      p1 = agent.send(:turn_prompt, 'INSTRUCTION ONE', player: 'alice')
+      assert_includes p1, 'Persistent player memories:'
+      assert_includes p1, '=== memory of alice ==='
+      assert_includes p1, 'alice is building the mall'
+      assert_equal 1, p1.scan('alice is building the mall').size
+      refute_includes p1, '=== SOUL ==='  # globals ride in the system prompt, not per turn
+
+      # Same player again this session: their memory was already delivered
+      # (it sits in the conversation now) — no repeat.
+      p2 = agent.send(:turn_prompt, 'INSTRUCTION TWO', player: 'alice')
+      refute_includes p2, '=== memory of alice ==='
+
+      # A different player still gets their own memory.
+      store.write_player('bob', 'bob guards the iron')
+      p3 = agent.send(:turn_prompt, 'INSTRUCTION THREE', player: 'bob')
+      assert_includes p3, '=== memory of bob ==='
+      assert_includes p3, 'bob guards the iron'
+    end
+  end
+
+  # Already-online players never fire a join event, so a fresh session must
+  # seed their memories from the roster — otherwise they'd be unreachable.
+  def test_fresh_session_seeds_online_players_memories
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { ['alice', 'carol'] }
+      agent.player_stats_provider = -> { [] }
+      store = agent.instance_variable_get(:@memory_store)
+      store.write_player('alice', 'alice builds malls')
+      store.write_player('carol', 'carol hoards circuits')
+      store.write_player('bob', 'bob is offline')  # not online — not seeded
+
+      prompt = agent.send(:turn_prompt, 'INSTRUCTION')
+      assert_includes prompt, '=== memory of alice ==='
+      assert_includes prompt, '=== memory of carol ==='
+      refute_includes prompt, 'bob is offline'
+
+      # second turn: the roster was already delivered — no repeats
+      prompt2 = agent.send(:turn_prompt, 'INSTRUCTION 2')
+      refute_includes prompt2, '=== memory of'
+    end
+  end
+
+  def test_ask_llm_injects_triggering_players_memory
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      agent.instance_variable_get(:@memory_store).write_player('alice', 'alice owes the factory a rocket')
+      prompt = capture_prompt(agent) { agent.send(:ask_llm, 'alice', 'hivemind whats my build plan?') }
+      assert_includes prompt, '=== memory of alice ==='
+      assert_includes prompt, 'alice owes the factory a rocket'
+    end
+  end
+
+  def test_join_greeting_includes_player_memory
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      agent.instance_variable_get(:@memory_store).write_player('alice', 'alice once nuked the bus on purpose')
+      seen_prompt = nil
+      agent.define_singleton_method(:complete) do |prompt|
+        seen_prompt = prompt
+        clean_reply('Welcome.')
+      end
+      agent.on_player_event(:joined, 'alice')
+      sleep 0.2
+      assert_includes seen_prompt, 'alice just joined'
+      assert_includes seen_prompt, '=== memory of alice ==='
+      assert_includes seen_prompt, 'alice once nuked the bus on purpose'
+    end
+  end
+
+  def test_join_greeting_includes_admin_status
+    rcon = FakeRcon.new
+    rcon.define_singleton_method(:player_attributes) do
+      [{ index: 2, name: 'alice', connected: true, admin: true, online_time: 11_016_000, afk_time: 0 }]
+    end
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    seen_prompt = nil
+    agent.define_singleton_method(:complete) do |prompt|
+      seen_prompt = prompt
+      clean_reply('Welcome.')
+    end
+    agent.on_player_event(:joined, 'alice')
+    sleep 0.2
+    assert_includes seen_prompt, 'they have played 2d3h in total and are an admin'
+  end
+
+  def test_join_greeting_states_non_admin
+    rcon = FakeRcon.new
+    rcon.define_singleton_method(:player_attributes) do
+      [{ index: 3, name: 'bob', connected: true, admin: false, online_time: 7_200, afk_time: 0 }]
+    end
+    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    seen_prompt = nil
+    agent.define_singleton_method(:complete) do |prompt|
+      seen_prompt = prompt
+      clean_reply('Welcome.')
+    end
+    agent.on_player_event(:joined, 'bob')
+    sleep 0.2
+    assert_includes seen_prompt, 'they have played 2m in total and are not an admin'
+  end
+
+  def test_write_memories_tool_batches_all_keys
+    Dir.mktmpdir do |dir|
+      store = MemoryStore.new(dir)
+      tool = WriteMemories.new(store: store)
+      result = tool.call('memories' => [
+        { 'key' => 'soul', 'content' => 'new soul' },
+        { 'key' => 'knowledge', 'content' => 'the mall was built' },
+        { 'key' => 'alice', 'content' => 'alice built the mall' },
+        { 'key' => 'bob', 'content' => 'bob stomped the belts' }
+      ])
+      assert_kind_of RubyLLM::Tool::Halt, result
+      assert_equal 'new soul', store.soul
+      assert_equal 'the mall was built', store.knowledge
+      assert_equal 'alice built the mall', store.player('alice')
+      assert_equal 'bob stomped the belts', store.player('bob')
+      assert_equal [['soul', 'new soul'], ['knowledge', 'the mall was built'],
+                    ['alice', 'alice built the mall'], ['bob', 'bob stomped the belts']],
+                   tool.written
+    end
+  end
+
+  def test_write_memories_tool_skips_bad_entries
+    Dir.mktmpdir do |dir|
+      store = MemoryStore.new(dir)
+      tool = WriteMemories.new(store: store)
+      result = tool.call('memories' => [
+        { 'key' => '', 'content' => 'no key' },
+        { 'key' => 'soul', 'content' => 'fine' },
+        { 'key' => 'alice', 'content' => 'player fine' }
+      ])
+      assert_equal [['soul', 'fine'], ['alice', 'player fine']], tool.written
+      assert_equal 'fine', store.soul
+      assert_equal 'player fine', store.player('alice')
+    end
+  end
+
+  def test_compact_memory_runs_inside_live_chat_with_batched_tool
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      chat = agent.instance_variable_get(:@chat)
+      chat.add_message(role: :user, content: 'turn: alice wants to build a mall')
+      chat.add_message(role: :assistant, content: 'the mall will feed the factory')
+      agent.send(:append_history, 'alice', 'i will build the mall')
+      pre_size = chat.messages.size
+
+      # Compaction reuses the LIVE chat (input-token cache); stub only the
+      # parts that would hit the network, and simulate the tool-call + result
+      # messages the real ask would append (which compaction must strip).
+      seen = { instructions: [], tools: [], material: nil }
+      chat.define_singleton_method(:with_instructions) { |t| seen[:instructions] << t; self }
+      chat.define_singleton_method(:with_tool) { |t| seen[:tools] << t; self }
+      chat.define_singleton_method(:ask) do |material|
+        seen[:material] = material
+        add_message(role: :user, content: material)         # compaction material
+        add_message(role: :assistant, content: nil, tool_calls: {}) # tool-call turn
+        add_message(role: :tool, content: 'soul updated', tool_call_id: 'c1')
+      end
+
+      assert agent.compact_memory!('quit'), 'compaction runs'
+
+      assert_equal 1, seen[:tools].size, 'only write_memories — never say/rcon_query'
+      assert_kind_of WriteMemories, seen[:tools].first
+      # compaction swapped its own system prompt in, then restored the live one
+      assert_includes seen[:instructions].first, 'write_memories'
+      assert_includes seen[:instructions].first, 'Batch ALL updates into ONE'
+      assert_includes seen[:instructions].last, 'Persistent memories'  # restored live prompt
+      # material = current memories + console + context; the conversation
+      # thread itself is already in the chat (not duplicated in the material)
+      assert_includes seen[:material], 'Current memories:'
+      assert_includes seen[:material], '=== soul ==='
+      assert_includes seen[:material], 'Console lines:'
+      assert_includes seen[:material], 'alice: i will build the mall'
+      refute_includes seen[:material], 'Session conversation:'
+      # compaction stripped its own messages: the live thread is unchanged
+      assert_equal pre_size, chat.messages.size
+      # and write_memories is gone from the live toolset
+      refute_includes chat.tools.keys, :write_memories
+      assert chat.tools.key?(:hivemind_say)
+      assert chat.tools.key?(:rcon_query)
+    end
+  end
+
+  def test_compact_skips_empty_session
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      refute agent.compact_memory!, 'nothing to compact'
+      refute agent.send(:compactable?)
+    end
+  end
+
+  def test_clear_session_forgets_but_keeps_memories
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      store = agent.instance_variable_get(:@memory_store)
+      store.write_player('alice', 'alice loves belts')
+      agent.send(:append_history, 'alice', 'hello hivemind')
+      agent.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: one')
+      agent.instance_variable_set(:@exchanges, 5)
+
+      assert agent.clear_session!
+      chat = agent.instance_variable_get(:@chat)
+      assert_empty chat.messages.reject { |m| m.role == :system }, 'conversation wiped'
+      assert_equal 0, agent.instance_variable_get(:@exchanges)
+      assert_empty agent.instance_variable_get(:@console_queue)
+      assert_empty agent.instance_variable_get(:@recent_console)
+      assert_equal 'alice loves belts', store.player('alice'), 'memories kept'
+      # persisted session file is wiped too
+      assert_empty JSON.parse(File.read(sess))['messages']
+    end
   end
 end

@@ -18,7 +18,9 @@ either on a client or on the game server host (server mode, with RCON).
 - `lib/rcon_client.rb` — RCON queries via `rcon.print` + `helpers.table_to_json` (JSON), `#say` (Lua-quoted `game.print`), `#command` (raw console cmd), `#server_version` (`helpers.game_version`)
 - `lib/player_db.rb` — Player ID→name mapping (`players.json`)
 - `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
-- `lib/ai_agent.rb` — Hivemind AI agent (`HiveMindAgent`, `HivemindSay`, `RconQuery`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (say tool, Lua-quoted); read-only RCON queries via `rcon_query` tool. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart (agent object, console history, rate limiters all persist in state; providers re-pointed). Personality: omniscient factory-consciousness with a touch of HAL. Context per trigger: online players, play-time/admin stats (system prompt) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`GREET_INTERVAL` rate-limited). See `docs/ai-agent.md`.
+- `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
+- `lib/memory_store.rb` — Hivemind long-term memory: keyed blobs → `memories/SOUL.md` (soul), `memories/KNOWLEDGE.md` (knowledge), `memories/players/<name>.md` (per-player). Atomic whole-blob writes; keys are never file paths to the model.
+- `lib/ai_agent.rb` — Hivemind AI agent (`HiveMindAgent`, `HivemindSay`, `RconQuery`, `WriteMemories`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (say tool, Lua-quoted); read-only RCON queries via `rcon_query` tool. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart (agent object, console history, rate limiters all persist in state; providers re-pointed). Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`GREET_INTERVAL` rate-limited; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one-shot LLM pass INSIDE the live chat (input-token cache reused) that reviews the session and overwrites the keyed memories via the batched `write_memories` tool (one API round trip); strips its own messages afterward so the session is unchanged. Triggered by `/compact` or on quit (`FactorioSniffer#finish`); `clear_session!` (`/forget`) wipes the session but keeps memories. See `docs/ai-agent.md`.
 - `lib/pcap.rb` — PcapWriter / PcapReader
 - `lib/live_capture.rb` — pcaprub live capture (msg-13 fast path)
 - `tools/rcon.rb` — RCON CLI (status/players/exec/raw)
@@ -108,9 +110,10 @@ either on a client or on the game server host (server mode, with RCON).
   `select_protocol_version` re-applies from state/options. Verified: agent
   object identity, history, pointer, mutexes survive two reloads.
 - **Interactive filter console**: type `/show NAME`, `/hide NAME`, `/actions`,
-  `/noise`, `/chat`, `/quiet` at the sniffer's stdin to filter console
-  output live (survives hot reloads). Chat is always printed. See
-  `docs/server-mode.md`.
+  `/noise`, `/chat`, `/quiet`, `/stats`, `/compact` (run Hivemind memory
+  compaction now), `/forget`/`/clear` (wipe Hivemind's session, keep
+  memories) at the sniffer's stdin to filter console output live (survives
+  hot reloads). Chat is always printed. See `docs/server-mode.md`.
 - **RCON data channel**: `rcon.print(data)` returns values through RCON;
   `helpers.table_to_json` for tables (JSON, parsed with stdlib
   `JSON.parse`); large payloads go through `helpers.write_file` (no 4KB

@@ -72,6 +72,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.separator 'Hivemind AI agent:'
     opts.on('--ai-agent', 'Enable the Hivemind AI agent: answers in-game chat when someone says "hivemind" (case-insensitive). Chat comes from packet-decoded write_to_console actions; requires RCON (server mode) to reply. Needs an API key: --ai-api-key or HIVE_API_KEY/OPENAI_API_KEY.') { |v| options[:ai_agent] = true }
     opts.on('--ai-model MODEL', "LLM model id (default: #{HiveMindAgent::DEFAULT_MODEL}; see the endpoint's /v1/models list)") { |v| options[:ai_model] = v }
+    opts.on('--ai-memory-dir DIR', 'Hivemind long-term memory directory (default memories/; HIVE_MEMORIES env overrides). SOUL.md, KNOWLEDGE.md, players/<name>.md — written by memory compaction on quit or /compact.') { |v| options[:ai_memory_dir] = v }
     opts.on('--ai-provider PROVIDER', 'LLM provider slug (default: openai)') { |v| options[:ai_provider] = v }
     opts.on('--ai-api-key KEY', 'LLM API key for the OpenAI-compatible endpoint (or HIVE_API_KEY / OPENAI_API_KEY env)') { |v| options[:ai_api_key] = v }
     opts.on('--ai-api-base URL', "OpenAI-compatible endpoint base (default: #{HiveMindAgent::DEFAULT_API_BASE}; the /chat/completions path is appended)") { |v| options[:ai_api_base] = v }
@@ -206,7 +207,7 @@ if __FILE__ == $PROGRAM_NAME
   # pressed later (more than 5s after the last) is a fresh reload instead —
   # so you can reload repeatedly while editing code, and double-tap to quit.
   SNIFFER_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client ai_agent player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client ai_agent memory_store player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets

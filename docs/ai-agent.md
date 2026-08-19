@@ -9,11 +9,83 @@ with a quietly ominous edge: players are guests inside its body, tolerated
 as long as they serve the factory's growth ("I'm afraid that plan would
 starve the iron bus. I would not enjoy that."). It is omniscient about
 the server: who is online, how long they've played, what's being built.
-The system prompt lives in `lib/ai_agent.rb` (SYSTEM_PROMPT) — hot
-reloads apply changes, but a fresh restart re-seeds the running
-conversation with it.
+The **personality** lives in `memories/SOUL.md` (seeded from `lib/ai_agent.rb`
+`DEFAULT_SOUL` on first run; evolved by compaction or hand-edited between
+sessions). The live system prompt (`SYSTEM_PROMPT` + current SOUL/KNOWLEDGE)
+is built by `system_prompt_with_memories` — hot reloads apply code changes,
+and a fresh restart re-seeds it from the current memory files.
+
+## Long-term memory (compaction)
+
+Separate from the restart session file (`hivemind-session.json`, the
+short-term transcript), Hivemind keeps **long-term memories**: keyed text
+blobs on disk that let a NEW session carry over what it learned. The
+model only ever sees **keys**, never file paths:
+
+| Key         | File                       | Holds                                             |
+|-------------|----------------------------|---------------------------------------------------|
+| `soul`      | `memories/SOUL.md`         | who Hivemind IS: voice, personality, attitude     |
+| `knowledge` | `memories/KNOWLEDGE.md`    | durable facts: factory state, events, plans       |
+| `<player>`  | `memories/players/<n>.md`  | what Hivemind knows about that player             |
+
+The default SOUL is seeded on first run — the personality that used to
+live inline in the system prompt now lives in the file, editable by hand
+or evolved by compaction. Writes are atomic (tmp+rename) and whole-blob:
+compaction overwrites a memory entirely with the model's new content.
+
+### Compaction
+
+A **compaction pass** is a one-shot LLM call that reviews the session and
+updates these memories. It runs **inside the live conversation** (same
+chat object) so the provider's input-token cache covers the whole thread —
+the only new tokens are the compaction prompt itself — but it is **never
+allowed to become part of the session**: its messages are stripped again
+and the toolset restored, so a session that continues is unchanged.
+
+- The compaction prompt exposes only the **`write_memories`** tool (never
+  `say`/`rcon_query` — it is not talking to players) and demands **all
+  updates in a single batched call** — one API round trip, not one per
+  memory.
+- Input: the conversation thread (already in the chat) plus current
+  memories, a fresh server context snapshot, and console lines not yet in
+  the conversation.
+- After it runs, SOUL/KNOWLEDGE are re-glued into the live system prompt
+  so the next turn uses the updated memories.
+
+Triggers:
+
+- **`/compact`** on the filter console (manual; runs in a background
+  thread, queues behind any live ask).
+- **Automatically on quit** (`FactorioSniffer#finish` — Ctrl-C twice /
+  SIGHUP / natural pcap end): synchronous, so the memories land before
+  the process exits. No-op when there is nothing to compact (empty
+  session) or the agent/memory is disabled.
+- `HIVE_MEMORIES` env (or `--ai-memory-dir DIR`) moves the memory
+  directory; `memory_dir: false` disables memory entirely.
+
+Compaction is deliberately **separate from clearing the session**: run
+`/compact` to distill the session into memory, then `/forget` (alias
+`/clear`) to wipe the conversation + queued console lines (keeping the
+memories) for a fresh start. (A future version may auto-clear after a
+successful compaction.)
+
+### How memories reach the model
+
+- **SOUL + KNOWLEDGE** are glued into the **system prompt** at
+  conversation creation, on conversation reset, on session load, and
+  after compaction (`system_prompt_with_memories`). Kept out of the
+  per-turn user prompt so the conversation prefix stays identical between
+  compactions — provider-side prompt caching keeps working.
+- **Per-player memories** ride in the per-turn user prompt: the player
+  this turn concerns (the one who triggered the chat, or the one being
+  greeted on join). On a **fresh session** (process start / `/forget` /
+  conversation reset) the memories of **all currently-online players are
+  seeded too** — joins alone can't reach players who were already
+  connected when the session began. Each player is delivered **once per
+  session** (a fresh session re-seeds).
 
 ## How it works
+
 
 ```
 player chat ──► write_to_console action (C→S packet)
@@ -66,7 +138,10 @@ player chat ──► write_to_console action (C→S packet)
   (`online_time`, ticks — the server's `player_attributes` query;
   falls back to the mirrored attrs), formatted the same way as the
   context snapshot's stats (`2d3h`, `45m`):
-  `alice joined the game (2d3h played)`. Runs off the packet
+  `alice joined the game (2d3h played)`. The greeting instruction also
+  states the player's admin status ("they have played 2d3h in total and
+  are an admin" — from the same attrs query), and the player's long-term
+  memory is injected into the prompt once per session. Runs off the packet
   loop with its own rate limit (`GREET_INTERVAL`, so a join burst can't
   block chat questions or spam the channel). Recorded in the history like
   a reply. Disable with `greet_on_join: false` on the agent (default on).
@@ -76,20 +151,22 @@ player chat ──► write_to_console action (C→S packet)
   FINAL C→S heartbeat (capture-verified — the only C→S quit signal; msg
   14 is a kept-but-unobserved fallback). Leaves only enter the console
   queue — they never trigger a reply.
-- **Context — static system prompt + per-turn snapshot**: the system
-  prompt is set ONCE (personality/rules/tools, in `lib/ai_agent.rb`
-  SYSTEM_PROMPT) — it is NOT rebuilt per ask, so the conversation prefix
-  is identical across requests and provider-side prompt caching can work.
+- **Context — system prompt + per-turn snapshot**: the system prompt is
+  set once at conversation creation (mechanics in `lib/ai_agent.rb`
+  SYSTEM_PROMPT + the current SOUL/KNOWLEDGE memories) and only changes
+  when compaction updates the memories — so the conversation prefix is
+  identical between compactions and provider-side prompt caching works.
   Dynamic context rides in the per-turn USER prompt (`turn_prompt`): a
   fresh `Current context:` snapshot (online players + per-player stats:
   total play time + admin status, e.g.
   `Player stats (...): Alice: 23h20m (admin); Bob: 8h30m (offline).`)
-  plus the new console lines since the last prompt. The list comes from
-  the sniffer's packet-driven online tracking (`online_players`) and
-  mirrored `PlayerAttrs` (seeded from RCON, maintained by packets); if
-  the sniffer's attrs are empty, the agent falls back to a direct RCON
-  `player_attributes` query. So the AI can answer "who has played the
-  longest", "who is an admin", etc.
+  plus the new console lines since the last prompt, plus the relevant
+  PLAYER's long-term memory (the player who triggered, or the roster on a
+  fresh session). The list comes from the sniffer's packet-driven online
+  tracking (`online_players`) and mirrored `PlayerAttrs` (seeded from
+  RCON, maintained by packets); if the sniffer's attrs are empty, the
+  agent falls back to a direct RCON `player_attributes` query. So the AI
+  can answer "who has played the longest", "who is an admin", etc.
   If no provider is wired (agent standalone), it falls back to RCON.
 - **Reply = a tool**: the model responds by calling `HivemindSay`
   (`say(text: ...)`), a RubyLLM tool that sends the text through RCON

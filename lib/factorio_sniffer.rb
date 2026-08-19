@@ -176,6 +176,7 @@ class FactorioSniffer
             provider: options[:ai_provider],
             api_key: options[:ai_api_key],
             api_base: options[:ai_api_base],
+            memory_dir: options[:ai_memory_dir],
           )
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }
@@ -240,11 +241,17 @@ class FactorioSniffer
   end
 
   # Finalize the session: summary, persist player names, close writers.
+  # Long-term memory: distill the session into the keyed memory blobs
+  # (soul/knowledge/<player>) so a NEW session can resume what Hivemind
+  # learned. Runs synchronously — the process is exiting, so wait for the
+  # memories to land. No-op when the agent is disabled or memory is off
+  # (also: pcap analysis without RCON, where the agent never enabled).
   def finish
     print_summary
     @player_db.save
     @pcap_writer&.close
     @unknown_writer&.close
+    @agent&.compact_memory!('quit')
   end
 
   # Capture the stateful objects so a hot-reloaded instance can pick up
@@ -1045,6 +1052,8 @@ class FactorioSniffer
           /quiet                       toggle quiet mode (noise actions)
           /filter                      show current filter state
           /stats                       print session stats
+          /compact                     run Hivemind memory compaction now (manual)
+          /forget | /clear             clear Hivemind's session (keeps long-term memories)
       HELP
     when '/players'
       puts "online (#{online_players.size}): #{online_players.join(', ')}"
@@ -1064,6 +1073,25 @@ class FactorioSniffer
       puts "quiet mode: #{@quiet ? 'ON' : 'OFF'}"
     when '/stats'
       print_summary
+    when '/compact'
+      if @agent && @agent.memory_enabled?
+        # Runs in a background thread so the console stays responsive (the
+        # compaction LLM call takes seconds; it queues behind any live ask).
+        Thread.new { @agent.compact_memory!('manual') }
+        puts 'memory compaction started — see [hivemind] logs'
+      else
+        puts 'memory compaction unavailable (AI agent disabled or memory store off)'
+      end
+    when '/forget', '/clear'
+      if @agent
+        # Forgetting is explicit and fast — separate from compaction: the
+        # session is wiped but SOUL/KNOWLEDGE/player memories are kept
+        # (run /compact first to distill the session before you wipe it).
+        @agent.clear_session!
+        puts 'session cleared — Hivemind starts fresh (long-term memories preserved)'
+      else
+        puts 'no Hivemind agent (AI agent disabled) — nothing to clear'
+      end
     else
       puts "unknown command #{parts[0]} — try /help"
     end

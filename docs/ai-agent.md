@@ -1,7 +1,8 @@
 # Hivemind AI Agent
 
 An LLM persona that lives inside the sniffer and answers players who address
-it in in-game chat. Enabled with `--ai-agent` (server mode; requires RCON).
+it in in-game chat. Auto-enables in server mode when `HIVE_API_KEY` is set
+(no `--ai-agent` flag; requires RCON/game.print).
 
 Personality: Hivemind is the **collective consciousness of the factory** —
 not a player, but the machines themselves. It speaks coldly, patiently,
@@ -186,24 +187,22 @@ player chat ──► write_to_console action (C→S packet)
   (Lua-quoted) and `clean_reply` untouched, so `game.print` renders them
   as clickable map pins in chat.
 
-## Auth (you set this up)
+## Auth and enabling (you set this up)
 
-The agent never stores a key — it reads one at startup from:
+The agent is **fully implicit** — there is no `--ai-agent` flag. It auto-
+enables in **server mode** whenever an API key is set; no key = no AI.
 
-1. `--ai-api-key KEY` (CLI flag)
-2. `HIVE_API_KEY` env var
-3. `OPENAI_API_KEY` env var
+Set the key (the agent's only config):
 
-Same for the endpoint/model:
+```bash
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-on
+```
 
-| Setting   | Flag              | Env             | Default                            |
-|-----------|-------------------|-----------------|------------------------------------|
-| endpoint  | `--ai-api-base`   | `HIVE_API_BASE` | `https://opencode.ai/zen/go/v1`    |
-| model     | `--ai-model`      | `HIVE_MODEL`    | `deepseek-v4-flash`                |
-| provider  | `--ai-provider`   | `HIVE_PROVIDER` | `openai`                           |
-
-The `/chat/completions` path is appended to the base (RubyLLM OpenAI
-provider). Model list: `curl https://opencode.ai/zen/go/v1/models`.
+The key is read from the `HIVE_API_KEY` environment variable **only** —
+deliberately no CLI flag and no `OPENAI_API_KEY` fallback, so an ambient
+key elsewhere on the box can't silently turn the agent on (or off). The
+endpoint, model, and provider are hardcoded (`openai` provider, the
+`https://opencode.ai/zen/go/v1` base, `deepseek-v4-flash`).
 
 System prompt role: RubyLLM sends the system prompt as role `developer`
 by default (OpenAI's newer convention). Some endpoints/models (e.g.
@@ -217,14 +216,13 @@ RubyLLM config since the agent object persists).
 Example:
 
 ```bash
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --ai-agent
-# or
-sudo ruby factorio-sniffer.rb --ai-agent --ai-api-key "$HIVE_API_KEY" --ai-model glm-5.3
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --save-capture
 ```
 
-Without an API key the agent starts disabled with a warning and chat is
-ignored (no LLM calls are made). `HIVE_AGENT=1` enables the agent via env
-alone (equivalent to `--ai-agent`).
+In server mode with a key set, the agent is on (watch for the
+`[hivemind] AI agent online` startup line). No key → agent disabled with a
+warning; chat is ignored (no LLM calls are made). This only applies in
+server mode — client/pcap runs never auto-enable (the agent needs RCON).
 
 ## Guards
 

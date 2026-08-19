@@ -68,14 +68,6 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--protocol-version VERSION', 'Factorio server version for segment-type mapping ("2.0" or "2.1"; default: auto-detect via RCON in server mode, else 2.1). Main action types are version-stable — only input-action segment types differ between 2.0 and 2.1.') { |v| options[:protocol_version] = v }
     opts.on('-q', '--quiet', 'Quiet mode: hide noise actions (wire_dragging, nothing)') { |v| options[:quiet] = v }
 
-    opts.separator ''
-    opts.separator 'Hivemind AI agent:'
-    opts.on('--ai-agent', 'Enable the Hivemind AI agent: answers in-game chat when someone says "hivemind" (case-insensitive). Chat comes from packet-decoded write_to_console actions; requires RCON (server mode) to reply. Needs an API key: --ai-api-key or HIVE_API_KEY/OPENAI_API_KEY.') { |v| options[:ai_agent] = true }
-    opts.on('--ai-model MODEL', "LLM model id (default: #{HiveMindAgent::DEFAULT_MODEL}; see the endpoint's /v1/models list)") { |v| options[:ai_model] = v }
-    opts.on('--ai-provider PROVIDER', 'LLM provider slug (default: openai)') { |v| options[:ai_provider] = v }
-    opts.on('--ai-api-key KEY', 'LLM API key for the OpenAI-compatible endpoint (or HIVE_API_KEY / OPENAI_API_KEY env)') { |v| options[:ai_api_key] = v }
-    opts.on('--ai-api-base URL', "OpenAI-compatible endpoint base (default: #{HiveMindAgent::DEFAULT_API_BASE}; the /chat/completions path is appended)") { |v| options[:ai_api_base] = v }
-
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
     opts.on('--map-player ID:NAME', 'Map player ID to name (e.g. 1:dlbattle)') do |v|
       (options[:player_maps] ||= []) << v
@@ -85,13 +77,10 @@ if __FILE__ == $PROGRAM_NAME
 
   op.parse!
 
-  # Hivemind agent env-var fallbacks (flags win): HIVE_AGENT=1 enables,
-  # HIVE_MODEL / HIVE_PROVIDER / HIVE_API_KEY / HIVE_API_BASE.
-  options[:ai_agent] = true if options[:ai_agent].nil? && ENV['HIVE_AGENT'] && ENV['HIVE_AGENT'] != '0'
-  options[:ai_model] ||= ENV['HIVE_MODEL']
-  options[:ai_provider] ||= ENV['HIVE_PROVIDER']
-  options[:ai_api_key] ||= ENV['HIVE_API_KEY']
-  options[:ai_api_base] ||= ENV['HIVE_API_BASE']
+  # Hivemind AI agent is fully implicit: in server mode with an API key
+  # set (HIVE_API_KEY), the agent auto-enables — there is no --ai-agent
+  # flag. No key = no AI. Client/pcap mode never auto-enables (the agent
+  # needs RCON/game.print, which only server mode has).
 
   if options[:server_ip] && !options[:server]
     warn 'Warning: --server-ip has no effect without --server'
@@ -111,6 +100,11 @@ if __FILE__ == $PROGRAM_NAME
       auto_server = true
       options[:server] = true
     end
+  end
+
+  # Implicit Hivemind agent (see above): server mode + HIVE_API_KEY.
+  if options[:server] && !options[:pcap] && !(ENV['HIVE_API_KEY'].to_s.empty?)
+    options[:ai_agent] = true
   end
 
   # Server mode: auto-detect the running Factorio server's configuration

@@ -160,7 +160,8 @@ class FactorioSniffer
       # action types are version-stable and need no switch — only segments
       # follow defines.input_action.
       # HiveMind AI agent: reads packet-decoded chat and answers players who
-      # say "hivemind". Survives hot reloads (kept in SnifferState so the
+      # say "hivemind". Auto-enabled by the entry point (server mode +
+      # HIVE_API_KEY); survives hot reloads (kept in SnifferState so the
       # LLM context and rate limiter carry over).
       @agent = @state.ai_agent
       # Re-point the agent's online-player source at THIS sniffer instance —
@@ -170,20 +171,14 @@ class FactorioSniffer
       @agent.player_stats_provider = -> { player_stats } if @agent
       if options[:ai_agent] && !@agent
         if @rcon
-          @agent = HiveMindAgent.new(
-            rcon: @rcon,
-            model: options[:ai_model],
-            provider: options[:ai_provider],
-            api_key: options[:ai_api_key],
-            api_base: options[:ai_api_base],
-          )
+          @agent = HiveMindAgent.new(rcon: @rcon)
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }
           unless @agent.disabled?
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.trigger_label}\" (model #{@agent.model})"
           end
         else
-          warn '[hivemind] --ai-agent requires RCON (server mode); agent disabled'
+          warn '[hivemind] AI agent auto-enabled (server mode + HIVE_API_KEY) but RCON is unavailable (--no-rcon?); agent disabled'
         end
       end
     end

@@ -18,7 +18,6 @@ either on a client or on the game server host (server mode, with RCON).
 - `lib/rcon_client.rb` — RCON queries via `rcon.print` + `helpers.table_to_json` (JSON), `#say` (Lua-quoted `game.print`), `#command` (raw console cmd), `#server_version` (`helpers.game_version`)
 - `lib/player_db.rb` — Player ID→name mapping (`players.json`)
 - `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
-- `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
 - `lib/memory_store.rb` — Hivemind long-term memory: keyed blobs → `memories/SOUL.md` (soul), `memories/KNOWLEDGE.md` (knowledge), `memories/players/<name>.md` (per-player). Atomic whole-blob writes; keys are never file paths to the model.
 - `lib/ai_agent.rb` — Hivemind AI agent (`HiveMindAgent`, `HivemindSay`, `RconQuery`, `WriteMemories`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (say tool, Lua-quoted); read-only RCON queries via `rcon_query` tool. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart (agent object, console history, rate limiters all persist in state; providers re-pointed). Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`GREET_INTERVAL` rate-limited; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one-shot LLM pass INSIDE the live chat (input-token cache reused) that reviews the session and overwrites the keyed memories via the batched `write_memories` tool (one API round trip); strips its own messages afterward so the session is unchanged. Triggered by `/compact` or on quit (`FactorioSniffer#finish`); `clear_session!` (`/forget`) wipes the session but keeps memories. See `docs/ai-agent.md`.
 - `lib/pcap.rb` — PcapWriter / PcapReader
@@ -128,15 +127,44 @@ either on a client or on the game server host (server mode, with RCON).
   locally. Guarded by a spec (server_mode_spec checks every write_file
   call's last arg is 0).
 
+## Config surface policy
+
+Keep the CLI/env surface from growing. Rules for adding any flag or env
+var (applies to new AND existing knobs):
+
+1. **Hardcode first.** Add a knob only when you can name a concrete run
+   that sets it to a non-default value. (`memories/`, the LLM model, the
+   endpoint, and the provider are hardcoded — no knobs.)
+2. **One source per setting.** Never expose both a flag and an env var
+   for the same thing.
+3. **Secrets are env-only** — never a CLI flag (shell history / `ps` /
+   committed scripts leak it). `HIVE_API_KEY` is the only AI knob.
+4. **One feature = one toggle.** No flag AND env for the same on/off
+   switch (there's no `--ai-agent`/`HIVE_AGENT` pair — the agent is
+   implicit: on in server mode iff `HIVE_API_KEY` is set).
+5. **Deterministic defaults don't get knobs.** If a value can only ever
+   be one thing, hardcode it.
+
+Current AI config surface:
+
+| Knob | Source | Type |
+|------|--------|------|
+| agent on/off | implicit (server mode + `HIVE_API_KEY`) | — |
+| api key | `HIVE_API_KEY` | env (secret) |
+| model | `DEFAULT_MODEL` | hardcoded |
+| endpoint | `DEFAULT_API_BASE` | hardcoded |
+| provider | `:openai` | hardcoded |
+
 ## Usage
 
 ```bash
 # Server host, everything auto-detected (interface, port, IP, RCON):
 sudo ruby factorio-sniffer.rb
 
-# With the Hivemind AI agent (answers "hivemind" mentions in chat):
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --ai-agent
-sudo ruby factorio-sniffer.rb --ai-agent --ai-api-key "$HIVE_API_KEY" --ai-model glm-5.3
+# With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
+# agent auto-enables in server mode (no flag, no extra args):
+HIVE_API_KEY=... sudo ruby factorio-sniffer.rb --save-capture
+# (No key = no AI. Endpoint/model/provider are hardcoded — no configurables.)
 
 # Pcap from a 2.0 server (action tables differ from 2.1):
 ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0

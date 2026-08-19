@@ -158,7 +158,7 @@ end
 # lookups) can be added the same way as HivemindSay — they get access to
 # the rcon client / the sniffer's item/player DBs via the tool constructor.
 class HiveMindAgent
-  # Default OpenAI-compatible endpoint + model (override via HIVE_*/--ai-*).
+  # OpenAI-compatible endpoint + model (hardcoded — no flags/env overrides).
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
   DEFAULT_MODEL    = 'deepseek-v4-flash'
 
@@ -316,19 +316,19 @@ class HiveMindAgent
     true
   end
 
-  # rcon: an RconClient (for game.print replies). model/provider/api_key/
-  # api_base override the defaults and HIVE_* env vars. Chat completions
-  # need an API key (HIVE_API_KEY / --ai-api-key / OPENAI_API_KEY).
+  # rcon: an RconClient (for game.print replies). Chat completions need
+  # an API key: HIVE_API_KEY env (the agent's key — there is deliberately
+  # no --ai-api-key/OPENAI_API_KEY fallback; no key = agent disabled).
   # session_path: false disables the session file; memory_dir: false
-  # disables long-term memory (default memories/).
-  def initialize(rcon:, model: nil, provider: nil, api_key: nil,
-                 api_base: nil, trigger: TRIGGER, session_path: nil, memory_dir: nil)
+  # disables long-term memory (default memories/). model / provider /
+  # api_base are HARDCODED to the defaults (no flags, no env overrides).
+  def initialize(rcon:, api_key: nil, trigger: TRIGGER, session_path: nil, memory_dir: nil)
     @rcon = rcon
     @trigger = trigger
-    @model = model || ENV['HIVE_MODEL'] || DEFAULT_MODEL
-    @provider = (provider || ENV['HIVE_PROVIDER'] || :openai).to_sym
-    @api_key = api_key || ENV['HIVE_API_KEY'] || ENV['OPENAI_API_KEY']
-    @api_base = api_base || ENV['HIVE_API_BASE'] || DEFAULT_API_BASE
+    @model = DEFAULT_MODEL
+    @provider = :openai
+    @api_key = api_key || ENV['HIVE_API_KEY']
+    @api_base = DEFAULT_API_BASE
     @last_ask = 0.0
     @last_greet = 0.0
     @exchanges = 0
@@ -368,7 +368,7 @@ class HiveMindAgent
     # already sits in the conversation after the first delivery.
     @memories_sent = Set.new
 
-    configure_llm(provider)
+    configure_llm
     hook_chat_observers if @chat
     load_session if @session_path && !@disabled
   end
@@ -500,7 +500,7 @@ class HiveMindAgent
 
   # ── LLM plumbing ──────────────────────────────────────────────────
 
-  def configure_llm(provider)
+  def configure_llm
     RubyLLM.configure do |config|
       config.openai_api_base = @api_base
       config.openai_api_key = @api_key if @api_key
@@ -516,7 +516,7 @@ class HiveMindAgent
     end
 
     if @api_key.nil? || @api_key.empty?
-      warn '[hivemind] no API key set (HIVE_API_KEY / --ai-api-key / OPENAI_API_KEY) — agent disabled'
+      warn '[hivemind] no API key set (HIVE_API_KEY) — agent disabled'
       @disabled = true
       return
     end

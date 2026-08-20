@@ -200,7 +200,7 @@ end
 # LLM response. The response is sent back to in-game chat through the
 # HivemindSay tool (RCON game.print) so everyone sees it. A rolling
 # conversation context is kept in the LLM chat object so follow-ups make
-# sense; it is only cleared by /clear (a new session).
+# sense; it is only cleared by /compact (a new session).
 #
 # LLM: ruby_llm against a configurable OpenAI-compatible endpoint (default
 # https://opencode.ai/zen/go/v1). More tools (RCON queries, packet-decoder
@@ -323,8 +323,11 @@ class HiveMindAgent
   # say/rcon_query — and the prompt demands all updates in a single
   # batched call. Runs under the mutex so it can't interleave with a live
   # ask. Manual only: triggered by /compact — never on quit (no auto
-  # compaction). Explicitly does NOT clear the session — /forget does
-  # that separately (run both to start a new session with memory).
+  # compaction). The /compact command wipes the session after a SUCCESSFUL
+  # pass ("distill then start fresh"); on failure the session is kept
+  # (the error is logged, never silently swallowed into a clear).
+  # clear_session! stays callable standalone so the wipe can be
+  # scripted/tested without the LLM call.
   def compact_memory!(reason = nil)
     return false if @disabled || !memory_enabled?
     return false unless compactable?
@@ -362,11 +365,11 @@ class HiveMindAgent
   # Forget the CURRENT session (live conversation + queued console lines)
   # but KEEP the long-term memories. The next turn re-seeds the system
   # prompt (SOUL/KNOWLEDGE) and re-injects the online players' memories.
-  # Explicitly separate from compaction: run /compact first if you want
-  # the session distilled into memory BEFORE it is wiped (or /compact,
-  # then /forget). Clears the persisted session file too. This is the
-  # manual "start a new session" — it exists separately because compaction
-  # alone must not clear while we are still testing memory reliability.
+  # The sniffer's /compact command runs this right after a SUCCESSFUL
+  # compaction, so a compacted session starts fresh (distill then wipe).
+  # Since /forget and /clear were removed, /compact is the only interactive
+  # trigger here — this method also stays callable to clear WITHOUT
+  # distilling. Clears the persisted session file too.
   def clear_session!
     @mutex.synchronize do
       @chat&.reset_messages!
@@ -860,7 +863,7 @@ class HiveMindAgent
   # Player memories injected into the per-turn USER prompt (SOUL and
   # KNOWLEDGE ride in the system prompt — see system_prompt_with_memories).
   # The turn's player (the one who triggered, or the one being greeted)
-  # gets their memory; on a fresh session (process start / /forget /
+  # gets their memory; on a fresh session (process start / /compact /
   # conversation reset) the memories of ALL currently-online players are
   # seeded too — joins alone can't reach players who were already connected
   # when the session began. Each player is delivered ONCE per session (the

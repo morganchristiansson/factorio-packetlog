@@ -112,9 +112,8 @@ either on a client or on the game server host (server mode, with RCON).
   object identity, history, pointer, mutexes survive two reloads.
 - **Interactive filter console**: type `/show NAME`, `/actions`,
   `/noise`, `/debug` (toggle decoded per-action lines), `/stats`,
-  `/compact` (run Hivemind memory
-  compaction now), `/forget`/`/clear` (wipe Hivemind's session, keep
-  memories) at the sniffer's stdin to filter console output live (survives
+  `/compact` (distill the session into memory, then wipe it — starts
+  fresh) at the sniffer's stdin to filter console output live (survives
   hot reloads). Chat is always printed. See `docs/server-mode.md`.
 - **RCON data channel**: `rcon.print(data)` returns values through RCON;
   `helpers.table_to_json` for tables (JSON, parsed with stdlib

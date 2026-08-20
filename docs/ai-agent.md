@@ -62,11 +62,15 @@ Triggers:
   directory (no flag/env); `memory_dir: false` on the agent disables memory
   entirely (used by the specs).
 
-Compaction is deliberately **separate from clearing the session**: run
-`/compact` to distill the session into memory, then `/forget` (alias
-`/clear`) to wipe the conversation + queued console lines (keeping the
-memories) for a fresh start. (A future version may auto-clear after a
-successful compaction.)
+`/compact` distills the session into memory and then **wipes the
+conversation + queued console lines** (keeping the memories) for a fresh
+start — distill-then-start-fresh in one command (the old `/forget` and
+`/clear` commands were removed; `/compact` is now the only way to clear
+the session). The wipe happens only after a **successful** pass: if
+compaction errors, the failure is logged and the session is KEPT — a
+stalled/errored pass never silently clears an un-distilled session. If
+the agent is disabled, compaction is unavailable and the session is NOT
+cleared.
 
 ### How memories reach the model
 
@@ -77,7 +81,7 @@ successful compaction.)
   compactions — provider-side prompt caching keeps working.
 - **Per-player memories** ride in the per-turn user prompt: the player
   this turn concerns (the one who triggered the chat, or the one being
-  greeted on join). On a **fresh session** (process start / `/forget` /
+  greeted on join). On a **fresh session** (process start / `/compact` /
   conversation reset) the memories of **all currently-online players are
   seeded too** — joins alone can't reach players who were already
   connected when the session began. Each player is delivered **once per

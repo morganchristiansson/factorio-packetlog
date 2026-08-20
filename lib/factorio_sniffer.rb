@@ -1039,8 +1039,7 @@ class FactorioSniffer
           /debug                       toggle decoded per-action lines
           /filter                      show current filter state
           /stats                       print session stats
-          /compact                     run Hivemind memory compaction now (manual)
-          /forget | /clear             clear Hivemind's session (keeps long-term memories)
+          /compact                     distill session into memory, then start fresh
       HELP
     when '/players'
       puts "online (#{online_players.size}): #{online_players.join(', ')}"
@@ -1060,20 +1059,21 @@ class FactorioSniffer
       if @agent && @agent.memory_enabled?
         # Runs in a background thread so the console stays responsive (the
         # compaction LLM call takes seconds; it queues behind any live ask).
-        Thread.new { @agent.compact_memory!('manual') }
-        puts 'memory compaction started — see [hivemind] logs'
+        # The session is wiped only after a SUCCESSFUL pass — if compaction
+        # errors, compact_memory! logs it (warn → console) and returns
+        # false, and the session is kept: a stuck/failed pass must never
+        # silently wipe an un-distilled session. Both calls serialize on
+        # the agent mutex.
+        Thread.new do
+          if @agent.compact_memory!('manual')
+            @agent.clear_session!
+          else
+            puts 'memory compaction FAILED — session kept (see [hivemind] error above)'
+          end
+        end
+        puts 'memory compaction started — session resets when done (see [hivemind] logs)'
       else
-        puts 'memory compaction unavailable (AI agent disabled or memory store off)'
-      end
-    when '/forget', '/clear'
-      if @agent
-        # Forgetting is explicit and fast — separate from compaction: the
-        # session is wiped but SOUL/KNOWLEDGE/player memories are kept
-        # (run /compact first to distill the session before you wipe it).
-        @agent.clear_session!
-        puts 'session cleared — Hivemind starts fresh (long-term memories preserved)'
-      else
-        puts 'no Hivemind agent (AI agent disabled) — nothing to clear'
+        puts 'memory compaction unavailable (AI agent disabled or memory store off) — session NOT cleared'
       end
     else
       puts "unknown command #{parts[0]} — try /help"

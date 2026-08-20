@@ -102,6 +102,15 @@ class MemoryStore
     write_key(key, content)
   end
 
+  # Sanitize a player name / memory key into its filesystem-safe form (the
+  # player-memory filename segment). Public so the agent can compare seen
+  # names against existing player_names.
+  def sanitize_key(key)
+    key.to_s.dup.force_encoding('UTF-8').scrub('?')
+        .gsub(%r{[/\\]}, '_').gsub(/\.\./, '_').gsub(/[\x00-\x1F]/, '_')
+        .strip[0, MAX_NAME]
+  end
+
   private
 
   def path_for(key)
@@ -111,9 +120,7 @@ class MemoryStore
     when SOUL_KEY then File.join(@dir, 'SOUL.md')
     when KNOWLEDGE_KEY then File.join(@dir, 'KNOWLEDGE.md')
     else
-      safe = k.dup.force_encoding('UTF-8').scrub('?')
-              .gsub(%r{[/\\]}, '_').gsub(/\.\./, '_').gsub(/[\x00-\x1F]/, '_')
-              .strip[0, MAX_NAME]
+      safe = sanitize_key(k)
       return nil if safe.empty?
       File.join(@dir, 'players', "#{safe}.md")
     end

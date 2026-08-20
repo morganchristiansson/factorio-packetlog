@@ -338,14 +338,20 @@ class HiveMindAgent
       tool = WriteMemories.new(store: @memory_store)
       chat.with_tool(tool)
       start = chat.messages.size
+      seen = players_seen   # snapshot BEFORE the pass (console may grow during it)
       begin
         chat.with_instructions(COMPACTION_PROMPT)  # swaps the system prompt in place
-        chat.ask(compaction_material)
+        chat.ask(compaction_material(seen))
         if tool.written.empty?
           log 'memory compaction — no memory changes (model decided nothing worth updating)'
         else
           tool.written.each { |key, content| log "memory compaction — #{key}: #{content.each_char.count} chars" }
         end
+        # Coverage diagnostic: any player the session touched who still has
+        # no memory blob? (The prompt requires one per player, but the
+        # model may not comply — better to log it than to wonder.)
+        missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
+        log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
       ensure
         # Strip the pass from the live conversation and restore the live
         # system prompt + tool set (so the session that continues is
@@ -1278,8 +1284,15 @@ class HiveMindAgent
     - Overwrite each memory with its COMPLETE new content — the tool
       replaces the whole blob; it does not merge. Anything you leave out
       is lost.
-    - Only include memories that genuinely changed. Do not rewrite
-      unchanged ones.
+    - EVERY player named in "Players encountered this session" must have
+      a memory blob when you finish: keep an existing one (extend it with
+      anything new from this session) or write a fresh one for a player
+      with no memory yet. A brief profile is fine for a low-interaction
+      player (who they are, how they play, any notable moments — or just
+      "present this session, no notable interaction yet"). Never drop a
+      player from memory because they had little to say.
+    - soul and knowledge: only rewrite what genuinely changed; do not
+      rewrite unchanged ones.
     - Keep each memory concise and information-dense — a few paragraphs
       at most. The model reads these as long-term memory, not as a
       transcript.
@@ -1316,18 +1329,23 @@ class HiveMindAgent
   end
 
   # Everything the compaction model sees, as one big user prompt: current
-  # memories (start from these), a fresh server context, pending follow-ups
-  # (the model's own plans/goals — worth remembering), and console lines
-  # not yet in the conversation. The conversation THREAD itself is
-  # the message history already in the live chat (compaction runs inside
-  # it), so it is not duplicated here.
-  def compaction_material
+  # memories (start from these), the players encountered this session (the
+  # coverage list — every one must end with a memory, see COMPACTION_PROMPT),
+  # a fresh server context, pending follow-ups (the model's own
+  # plans/goals — worth remembering), and console lines not yet in the
+  # conversation. The conversation THREAD itself is the message history
+  # already in the live chat (compaction runs inside it), so it is not
+  # duplicated here.
+  def compaction_material(seen = players_seen)
     parts = []
     current = @memory_store.all
     if current.empty?
       parts << 'Current memories: none exist yet — everything will be written fresh.'
     else
       parts << "Current memories:\n" + current.map { |key, text| "=== #{key} ===\n#{text}" }.join("\n\n")
+    end
+    unless seen.empty?
+      parts << "Players encountered this session (EVERY one of these must have a memory by the end):\n#{seen.sort.join(', ')}"
     end
     snap = context_snapshot
     parts << "Current server context:\n#{snap}" unless snap.empty?
@@ -1341,6 +1359,32 @@ class HiveMindAgent
     end
     parts << "Console lines:\n#{console.join("\n")}" unless console.empty?
     parts.join("\n\n")
+  end
+
+  # Distinct player names this session touched: anyone who joined, left, or
+  # chatted, got a memory injected (memories_sent), holds an existing
+  # player memory, or is currently online. Join/leave console lines carry
+  # the name in the MESSAGE text (player field is nil there) — parse those
+  # too, so a player who only joined and left still counts as encountered.
+  # Compaction must end with a memory for every one of them (COMPACTION_PROMPT).
+  # Called under @mutex (memory_prompt mutates @memories_sent under it too).
+  def players_seen
+    players = Set.new
+    @console_mutex.synchronize do
+      (@console_queue + @recent_console).each do |p, msg|
+        if p
+          name = clean_text(p)
+          players << name unless name.empty?
+        elsif msg =~ /\A(\S+) (?:joined|left) the game/
+          name = clean_text(Regexp.last_match(1))
+          players << name unless name.empty?
+        end
+      end
+    end
+    @memories_sent.each { |p| players << clean_text(p) }
+    @memory_store.player_names.each { |p| players << clean_text(p) }
+    online_player_list.each { |p| players << clean_text(p) }
+    players
   end
 
   # Seconds remaining as a compact human duration ("9m", "1h5m", "90s").

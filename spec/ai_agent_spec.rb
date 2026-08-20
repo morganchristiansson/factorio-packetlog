@@ -921,6 +921,30 @@ class TestHiveMindAgent < Minitest::Test
     end
   end
 
+  def test_players_seen_covers_every_source_including_join_leave_only
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent.online_provider = -> { [{ name: 'zoe' }] }
+    agent.player_stats_provider = -> { [] }
+    # chat lines (player field set)
+    agent.send(:append_history, 'alice', 'hello')
+    agent.send(:append_history, 'bob', 'i will build a mall')
+    # join/leave lines: name lives in the MESSAGE text, player field nil
+    agent.send(:append_history, nil, 'carol joined the game')
+    agent.send(:append_history, nil, 'dave left the game')
+    # memory injected this session
+    agent.instance_variable_get(:@memories_sent) << 'erin'
+    # existing on-disk player memory
+    Dir.mktmpdir do |dir|
+      store = MemoryStore.new(dir)
+      store.write_player('frank', 'frank likes trains')
+      agent.instance_variable_set(:@memory_store, store)
+      seen = agent.send(:players_seen)
+      %w[alice bob carol dave erin frank zoe].each do |name|
+        assert_includes seen, name, "expected #{name} to be seen"
+      end
+    end
+  end
+
   def test_compact_memory_runs_inside_live_chat_with_batched_tool
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
@@ -959,6 +983,8 @@ class TestHiveMindAgent < Minitest::Test
       assert_includes seen[:material], '=== soul ==='
       assert_includes seen[:material], 'Console lines:'
       assert_includes seen[:material], 'alice: i will build the mall'
+      assert_includes seen[:material], 'Players encountered this session'
+      assert_includes seen[:material], 'alice'          # from the console line
       refute_includes seen[:material], 'Session conversation:'
       # compaction stripped its own messages: the live thread is unchanged
       assert_equal pre_size, chat.messages.size

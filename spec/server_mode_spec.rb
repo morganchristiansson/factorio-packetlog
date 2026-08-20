@@ -566,5 +566,65 @@ Dir.mktmpdir do |dir|
   check(parsed['1'] == 'alice', 'clean entry survives')
 end
 
+# ── Heartbeat timeout: crashed/offline players are dropped ──
+puts "\nHeartbeat watchdog"
+
+# The timeout is server-mode only: client mode gets the server's S→C
+# PeerDisconnect broadcast for crashes. In server mode a player whose
+# heartbeats stop (crash / power / network loss — nothing is sent) must be
+# removed from @online after HEARTBEAT_TIMEOUT and reported to the agent
+# console queue, instead of lingering undefinedly (prevents the stale-roster
+# forever problem).
+st_wd = spec_state_with_capture
+wd_events = []
+# NOTE: no :interface in opts → ensure_timeout_watchdog must NOT start a
+# thread in tests (guarded). We drive check_heartbeat_timeouts directly.
+s_wd = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st_wd)
+check(s_wd.instance_variable_get(:@timeout_watchdog).nil?,
+      'no watchdog thread in tests (no :interface)')
+agent = Object.new
+agent.define_singleton_method(:on_player_event) { |kind, name| wd_events << [kind, name] }
+s_wd.instance_variable_set(:@agent, agent)
+s_wd.instance_variable_set(:@show_players, [])
+s_wd.instance_variable_set(:@debug, false)
+s_wd.instance_variable_set(:@attrs, PlayerAttrs.new)
+now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+wd_online = s_wd.instance_variable_get(:@online)
+wd_hb = s_wd.instance_variable_get(:@last_heartbeat_at)
+wd_online['alive'] = 1
+wd_hb['alive'] = now - 1        # heartbeat a second ago → fine
+wd_online['stale'] = 2
+wd_hb['stale'] = now - (30 + 5) # silent for 35s → timeout
+wd_out = StringIO.new
+old_stdout = $stdout
+$stdout = wd_out
+begin
+  s_wd.send(:check_heartbeat_timeouts)
+ensure
+  $stdout = old_stdout
+end
+check(!wd_online.key?('stale'), 'stale player removed from @online')
+check(wd_online.key?('alive'), 'recently-heartbeat player kept')
+check(!wd_hb.key?('stale'), 'stale timestamp cleaned up')
+check(wd_events.include?([:timeout, 'stale']), 'agent got on_player_event(:timeout)')
+check(!wd_events.include?([:timeout, 'alive']), 'alive player did not fire timeout')
+check(wd_out.string.include?('stale timed out (no heartbeat'), 'console prints the timeout line')
+
+# a heartbeat arriving before the scan must cancel the drop (touch refreshed
+# the timestamp → below the threshold at scan time)
+wd_online['half'] = 3
+wd_hb['half'] = now - (30 + 2)
+s_wd.send(:touch_heartbeat_name, 'half')   # fresh proof of life
+s_wd.send(:check_heartbeat_timeouts)
+check(wd_online.key?('half'), 'refreshed heartbeat cancels the timeout')
+
+# touch_heartbeat stamps by src_ip resolution too (the packet-top path)
+s_wd.instance_variable_set(:@conn_ip_name, { '10.0.0.77' => 'ripe' })
+wd_online['ripe'] = 4
+wd_hb['ripe'] = now - (30 + 4)
+s_wd.send(:touch_heartbeat, '10.0.0.77')
+s_wd.send(:check_heartbeat_timeouts)
+check(wd_online.key?('ripe'), 'src_ip touch keeps the player alive')
+
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

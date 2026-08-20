@@ -68,7 +68,15 @@ either on a client or on the game server host (server mode, with RCON).
   peer_id — the peer_id form is the S→C broadcast, which we never see).
   msg 14 (RequestForHeartbeatWhenDisconnecting) is kept as a fallback
   path but has never been observed in captures. Crashes/timeouts send
-  neither — those linger in @online until reload.
+  neither — they are caught by the heartbeat watchdog instead: a
+  server-mode thread tracks each player's last C→S heartbeat
+  (@last_heartbeat_at, per-player Hash; stamped on EVERY incoming packet
+  from the player's IP or name) and drops players silent for
+  HEARTBEAT_TIMEOUT (30s, deliberately high — a false positive forces a
+  rejoin, a false negative just registers late). Fires
+  on_player_event(:timeout) → console line so the LLM sees the roster
+  change. Client mode needs no watchdog: the server detects the drop and
+  broadcasts S→C PeerDisconnect, which the normal leave path handles.
 - **Join/leave in server mode (C→S only)**: joins are detected at the
   msg-4 + first-C→S-heartbeat confirm ("confirmed as game player #N") →
   `HiveMindAgent#on_player_event(:joined, …)` (fires the greeting); clean

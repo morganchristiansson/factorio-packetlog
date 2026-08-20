@@ -20,13 +20,22 @@ class SnifferState
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :show_actions, :hide_actions,
-                :debug
+                :debug, :last_heartbeat_at, :online_mutex, :timeout_watchdog
 end
 
 # ─────────────────────────────────────────────────────────────────────
 # Main Application
 # ─────────────────────────────────────────────────────────────────────
 class FactorioSniffer
+  # Seconds without a C→S heartbeat before a player is considered gone
+  # (server mode only). Clients heartbeat continuously (every 2 ticks at
+  # 60 UPS ≈ 33ms), so this is a very conservative ceiling: a false
+  # positive is essentially impossible, and a false negative just delays
+  # the timeout. Deliberately NO knob — the cadence isn't fully documented
+  # and slightly-high beats slightly-low (a wrongly dropped player must
+  # rejoin the deterministic sim; a late timeout just registers late).
+  HEARTBEAT_TIMEOUT = 30.0
+
   def initialize(options, state = nil)
     @options = options
     @state = state || SnifferState.new
@@ -77,6 +86,17 @@ class FactorioSniffer
     # roster, added on NewPeerInfo (join), index bound from the first C→S
     # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
     @online = @state.online || {}
+    # Per-player C→S heartbeat liveness (server mode): name → monotonic
+    # timestamp of the last packet seen from that player's source. The
+    # watchdog (see ensure_timeout_watchdog) drops players who stop
+    # heartbeating — crashes/power loss send nothing, unlike the clean
+    # quits that PeerDisconnect catches. Survives hot reloads via state.
+    @last_heartbeat_at = @state.last_heartbeat_at || {}
+    @online_mutex = @state.online_mutex || Mutex.new  # guards @online + @last_heartbeat_at
+    @timeout_watchdog = @state.timeout_watchdog
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @online_mutex.synchronize { @online.each_key { |n| @last_heartbeat_at[n] ||= now } }
+    ensure_timeout_watchdog
     # src_ip → name for CONFIRMED (in-game) players — lets a clean-quit
     # signal (C→S PeerDisconnect sync action / msg 14) resolve the leaver
     # without S→C analysis.
@@ -274,6 +294,9 @@ class FactorioSniffer
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
       st.debug = @debug
+      st.last_heartbeat_at = @last_heartbeat_at
+      st.online_mutex = @online_mutex
+      st.timeout_watchdog = @timeout_watchdog
     end
   end
 
@@ -322,6 +345,11 @@ class FactorioSniffer
 
   def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data, raw_frame = nil)
     @stats[:packets] += 1
+
+    # Liveness: any incoming C→S packet proves the client is connected —
+    # stamped BEFORE parse so even packets dropped from analysis/capture
+    # (TransferBlocks, keepalives) keep the player alive.
+    touch_heartbeat(src_ip) if @options[:server]
 
     # Client mode auto-named capture: resolve the server IP from the first
     # identifiable packet and create the writer (server mode creates it at
@@ -464,6 +492,7 @@ class FactorioSniffer
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
         @player_db.add(pid, sa[:username])
         @online[sa[:username]] ||= nil  # index bound once a C→S heartbeat confirms it
+        touch_heartbeat_name(sa[:username])
         @attrs.connect(sa[:username], @game_tick)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
@@ -513,6 +542,7 @@ class FactorioSniffer
             @player_db.add(idx + 1, name)
             @player_db.remove_other_entries_for(name, idx + 1)
             @online[name] = idx + 1
+            touch_heartbeat_name(name)
             @attrs.set_index(name, idx + 1)
             # src_ip → name for connected players: lets the clean-quit
             # signals (C→S PeerDisconnect sync action, msg 14 fallback)
@@ -978,6 +1008,7 @@ class FactorioSniffer
       @player_db.add(p[:index], p[:name])
       @player_db.remove_other_entries_for(p[:name], p[:index])
       @online[p[:name]] = p[:index]  # authoritative online seed (name → game index)
+      touch_heartbeat_name(p[:name])   # alive as of now — packets keep it fresh
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts}  [rcon]  connected players (#{players.size}): " +
@@ -1153,6 +1184,83 @@ class FactorioSniffer
     @agent&.on_player_event(:left, name)
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} left the game" if player_visible?(name)
+  end
+
+  # Record liveness for a player: ANY incoming C→S packet — real-action or
+  # keepalive heartbeat — proves the client is connected. Called for every
+  # incoming packet BEFORE parsing, so even packets later dropped from
+  # analysis/capture (e.g. TransferBlocks) keep a joiner alive mid-download.
+  # Server mode only — client mode sees the server's own detection via the
+  # S→C PeerDisconnect broadcast and needs no watchdog.
+  def touch_heartbeat(src_ip)
+    name = @conn_names[src_ip] || @conn_ip_name[src_ip]
+    return unless name
+    @online_mutex.synchronize { @last_heartbeat_at[name] = Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+  end
+
+  # Explicit liveness stamp at the moment a name enters @online — covers the
+  # joins the packet-top src_ip touch can't reach (players sharing one
+  # source IP behind NAT, where only the name/index path is exact).
+  def touch_heartbeat_name(name)
+    return unless name
+    @online_mutex.synchronize { @last_heartbeat_at[name] = Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+  end
+
+  # Watchdog tick: drop players whose heartbeats stopped (crashes/power
+  # loss send nothing — clean quits announce via PeerDisconnect instead).
+  # Scans every second, then re-verifies each candidate under the lock so
+  # a packet that arrived since the scan can't get a live player dropped.
+  # Fires on_player_event(:timeout) — the console line makes the LLM aware
+  # — and mirrors attrs.disconnect. Client mode needs NO watchdog: the server
+  # detects the drop itself and broadcasts PeerDisconnect (S→C), which the
+  # normal leave path handles.
+  def check_heartbeat_timeouts
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    stale = []
+    @online_mutex.synchronize do
+      @online.each_key do |name|
+        t = @last_heartbeat_at[name]
+        stale << [name, now - t] if t && now - t > HEARTBEAT_TIMEOUT
+      end
+    end
+    stale.each { |name, idle| timeout_player(name, idle, now) }
+  end
+
+  def timeout_player(name, idle, now)
+    removed = false
+    @online_mutex.synchronize do
+      last = @last_heartbeat_at[name]
+      if last && now - last > HEARTBEAT_TIMEOUT   # refreshed since the scan → still alive
+        @online.delete(name)
+        @last_heartbeat_at.delete(name)
+        removed = true
+      end
+    end
+    return unless removed
+    @attrs.disconnect(name, @game_tick)
+    @agent&.on_player_event(:timeout, name)
+    ts_str = Time.now.strftime('%H:%M:%S.%L')
+    puts "#{ts_str}  #{name} timed out (no heartbeat for #{idle.round}s) — likely crashed or disconnected; may re-join" if player_visible?(name)
+  end
+
+  # One watchdog thread for the process: started on construction in live
+  # SERVER mode; stored in state so a hot reload (threads keep running
+  # across `load`) doesn't spawn a duplicate. The thread calls this object's
+  # method, which after a reload resolves to the NEW class definition while
+  # operating on the SAME shared state hashes (@online/@last_heartbeat_at/…).
+  def ensure_timeout_watchdog
+    return unless @options[:server] && @options[:interface] && !@options[:pcap]
+    return if @timeout_watchdog&.alive?
+    @timeout_watchdog = Thread.new do
+      Thread.current.name = 'heartbeat-watchdog'
+      loop do
+        sleep 1.0
+        check_heartbeat_timeouts
+      rescue StandardError => e
+        warn "#{Time.now.strftime('%H:%M:%S')}  heartbeat watchdog error: #{e.class}: #{e.message}"
+      end
+    end
+    @state.timeout_watchdog = @timeout_watchdog
   end
 
   # Reassemble a chat message split across input-action segments. The

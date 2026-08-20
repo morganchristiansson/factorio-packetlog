@@ -222,7 +222,7 @@ class HiveMindAgent
   # standalone word: "hm, hello", "HM, hello", "HM: hello", "wdyt? hm"
   # all page the agent, while "shmoose", "hmm", "ahm", "hmx" do not.
   WORD_TRIGGERS = ['hm']
-  MIN_INTERVAL = 5.0            # minimum seconds between LLM calls (anti-spam)
+  MIN_INTERVAL = 5.0            # min seconds between LLM calls from the SAME player (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   # Max UNREAD console lines kept between prompts. NOT a limit on what the
   # model sees (that's the conversation) — the queue drains on every
@@ -245,7 +245,7 @@ class HiveMindAgent
   # new ivars. rehydrate_state! rebuilds whatever is missing; this constant
   # is how it knows a reload happened. The general fix for "hot reload broke
   # the agent's new state", not a per-ivar workaround.
-  STATE_VERSION = 2
+  STATE_VERSION = 3
 
   # Default SOUL memory — seeded into memories/SOUL.md on first run (never
   # overwrites an existing/edited file). The live system prompt points here
@@ -400,7 +400,7 @@ class HiveMindAgent
     @provider = :openai
     @api_key = api_key || ENV['HIVE_API_KEY']
     @api_base = DEFAULT_API_BASE
-    @last_ask = 0.0
+    @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_greet = 0.0
     @mutex = Mutex.new
     @chat = nil
@@ -688,7 +688,7 @@ class HiveMindAgent
 
     @mutex ||= Mutex.new
     @console_mutex ||= Mutex.new
-    @last_ask ||= 0.0
+    @last_ask_at ||= {}         # per-player rate limit timestamps
     @last_greet ||= 0.0
     @memories_sent ||= Set.new
     @console_queue ||= []
@@ -1079,12 +1079,15 @@ class HiveMindAgent
     return false if msg.empty?
     return false unless trigger_match?(msg)
 
-    # Atomic check-and-set rate limiter so bursts of mentions can't fire
-    # concurrent LLM calls.
+    # Per-player rate limiter: only the SAME player is throttled within
+    # MIN_INTERVAL (spam collapse). Different players are never dropped —
+    # their threads queue on the complete mutex, so each gets a sequential
+    # turn whose prompt includes the previous Q&A (the shared chat object).
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @mutex.synchronize do
-      return false if now - @last_ask < MIN_INTERVAL
-      @last_ask = now
+      last = @last_ask_at[player]
+      return false if last && now - last < MIN_INTERVAL
+      @last_ask_at[player] = now
     end
 
     # LLM calls run off the sniffer's packet loop (seconds of latency).

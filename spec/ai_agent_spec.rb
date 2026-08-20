@@ -658,6 +658,37 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal 1, asks, 'each variant pings (rate limiter collapses rapid-fire to one)'
   end
 
+  def test_different_players_not_rate_limited_sequential_turns
+    # The rate limiter is PER-PLAYER: another player triggering right after
+    # a reply must get their own turn (queued on the complete mutex, so
+    # sequential and seeing the prior Q&A) — never dropped just because
+    # someone else asked recently.
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent.online_provider = -> { [] }
+    agent.player_stats_provider = -> { [] }
+    asked = []
+    agent.define_singleton_method(:complete) do |p|
+      asked << p
+      sleep 0.05            # simulate the slow LLM call so ordering shows
+      ''
+    end
+    agent.on_chat('alice', 'hivemind hi')
+    agent.on_chat('bob', 'hivemind hello')
+    sleep 0.4
+    assert_equal 2, asked.size, 'different players each get a turn'
+    assert_includes asked.join, 'In-game chat from alice: hivemind hi'
+    assert_includes asked.join, 'In-game chat from bob: hivemind hello'
+
+    # same player again within the window is still collapsed (anti-spam),
+    # using a fresh player so the first trigger is outside any old window
+    asks2 = 0
+    agent.define_singleton_method(:complete) { |_p| asks2 += 1; '' }
+    agent.on_chat('carol', 'hivemind again')
+    agent.on_chat('carol', 'hivemind stop')
+    sleep 0.4
+    assert_equal 1, asks2, 'same-player spam still collapses to one ask'
+  end
+
   def test_trigger_label_includes_extras
     assert_includes @agent.trigger_label, 'hivemind'
     assert_includes @agent.trigger_label, 'good bot'

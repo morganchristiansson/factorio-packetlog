@@ -722,7 +722,14 @@ class HiveMindAgent
       config.openai_api_base = @api_base
       config.openai_api_key = @api_key if @api_key
       config.default_model = @model
-      config.request_timeout = 60
+      # Read timeout ceiling for EVERY request (faraday). Raised from 60s
+      # because memory compaction sends the WHOLE conversation (hundreds of
+      # messages — the input-token-cache reuse is the point) and the model
+      # can legitimately take 1-2min to answer such a large prompt; 60s
+      # killed it with Net::ReadTimeout (session kept, compaction failed).
+      # Normal chat replies respond in seconds, so 300 only moves the
+      # ceiling, not the latency.
+      config.request_timeout = 300
       config.max_retries = 1
       # RubyLLM defaults to sending the system prompt as role `developer`
       # (OpenAI's newer convention) on OpenAI-compatible endpoints; some

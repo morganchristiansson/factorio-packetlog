@@ -140,6 +140,55 @@ class WriteMemories < RubyLLM::Tool
   end
 end
 
+# RubyLLM tool: schedule a follow-up turn after a delay (like JavaScript
+# setTimeout). The model uses it when a plan or request needs a later
+# check/reminder — e.g. "rally the players to defend spawn" →
+# schedule_followup(delay 600, "check whether spawn is defended and remind
+# players"). When the delay elapses the agent runs a fresh LLM turn whose
+# prompt carries the CURRENT context (online players, console lines since
+# the last prompt) plus the scheduled task, so the follow-up sees what
+# actually happened, can reply via say, run read-only RCON queries, or
+# schedule further follow-ups. Returns a follow-up id; CancelFollowUp
+# cancels it. Persisted with the session file (absolute deadlines) so a
+# restart re-arms pending follow-ups.
+class ScheduleFollowUp < RubyLLM::Tool
+  desc 'Schedule a follow-up action after a delay — like JavaScript setTimeout. ' \
+       'After delay_seconds, you get a fresh turn with the current context ' \
+       '(online players, new console lines) and this task. Use it to follow up ' \
+       'on plans and requests, e.g. after "rally the players to defend spawn" ' \
+       'schedule a reminder or a status check for later. Returns a follow-up id ' \
+       '— cancel it with cancel_followup. Minimum delay: 15 seconds.'
+
+  param :delay_seconds, type: 'number',
+                        desc: 'How many seconds from now until the follow-up fires (minimum 15).'
+  param :task, type: 'string',
+               desc: 'What to check or do at that time, written for your future self (which will have fresh context).'
+
+  def initialize(agent:)
+    @agent = agent
+  end
+
+  def execute(delay_seconds:, task:)
+    @agent.schedule_followup(delay_seconds: delay_seconds, task: task)
+  end
+end
+
+# RubyLLM tool: cancel a pending follow-up (like JavaScript clearTimeout).
+class CancelFollowUp < RubyLLM::Tool
+  desc 'Cancel a pending follow-up by its id (returned by schedule_followup) — like JavaScript clearTimeout.'
+
+  param :followup_id, type: 'integer',
+                      desc: 'The id of the follow-up to cancel.'
+
+  def initialize(agent:)
+    @agent = agent
+  end
+
+  def execute(followup_id:)
+    @agent.cancel_followup(followup_id)
+  end
+end
+
 # HiveMind agent — an LLM persona that lives inside the Factorio sniffer.
 #
 # Input: in-game chat decoded from the packet stream. The sniffer calls
@@ -186,6 +235,17 @@ class HiveMindAgent
   RESEED_LINES = 10             # console lines kept in @recent_console (for memory compaction)
   GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
+  # Scheduled follow-ups (the schedule_followup tool, JS-setTimeout-like).
+  MIN_FOLLOWUP_DELAY = 15.0     # min seconds before a follow-up can fire (anti ping-pong/abuse)
+  MAX_PENDING_FOLLOWUPS = 5     # cap on pending follow-ups (the model cancels stale ones)
+  # Version of the agent's RUNTIME instance state (its ivars). BUMP this
+  # whenever initialize's ivar layout changes (adds/removes state). A hot
+  # reload (Ctrl-C `load`) keeps the SAME agent object (SnifferState.ai_agent)
+  # — initialize never re-runs — so an object built by older code lacks the
+  # new ivars. rehydrate_state! rebuilds whatever is missing; this constant
+  # is how it knows a reload happened. The general fix for "hot reload broke
+  # the agent's new state", not a per-ivar workaround.
+  STATE_VERSION = 2
 
   # Default SOUL memory — seeded into memories/SOUL.md on first run (never
   # overwrites an existing/edited file). The live system prompt points here
@@ -315,6 +375,9 @@ class HiveMindAgent
         @console_queue.clear
         @recent_console.clear
       end
+      # Pending follow-ups belong to the session being wiped — drop them so
+      # a stale timer can't inject a turn into the fresh session later.
+      @followup_mutex.synchronize { @followups.clear }
       @chat&.with_instructions(system_prompt_with_memories)
     end
     persist! if @session_path
@@ -339,6 +402,16 @@ class HiveMindAgent
     @mutex = Mutex.new
     @chat = nil
     @greet_on_join = GREET_ON_JOIN
+    # Pending scheduled follow-ups (schedule_followup tool) + their mutex
+    # and condition variable, so a single scheduler thread sleeps until the
+    # next due time instead of polling. Entries carry a MONOTONIC due (used
+    # to fire) and an absolute unix due_at (persisted, so a restart re-arms
+    # with the correct remaining delay). Survive hot reloads (agent persists
+    # in state); cleared by clear_session! — they belong to the session.
+    @followups = []
+    @followup_mutex = Mutex.new
+    @followup_cond = ConditionVariable.new
+    @followup_seq = 0
     # Console lines are a QUEUE drained on each prompt: append_history
     # enqueues (chat lines, join/leave events, the agent's own replies via
     # HivemindSay#on_sent / the fallback send_reply); unread_console drains
@@ -375,6 +448,8 @@ class HiveMindAgent
     configure_llm
     hook_chat_observers if @chat
     load_session if @session_path && !@disabled
+    @state_version = STATE_VERSION  # marks this object as built by current code
+    start_scheduler unless @disabled
   end
 
   # ── Console logging / LLM-run observation ─────────────────────────
@@ -536,6 +611,105 @@ class HiveMindAgent
     end
   end
 
+  # Schedule a follow-up turn (like JavaScript setTimeout). delay_seconds:
+  # seconds from now; task: what your future self should check/do (it will
+  # receive fresh context). Returns the tool-result string for the model.
+  # Enforces a minimum delay (anti ping-pong/abuse) and a cap on pending
+  # follow-ups. Callable from the LIVE conversation only (the tool is
+  # registered there) — the compaction chat never sees it.
+  def schedule_followup(delay_seconds:, task:)
+    return 'Error: the agent is disabled.' if @disabled
+    delay = delay_seconds.to_f
+    return 'Error: delay_seconds must be a positive number of seconds.' if delay <= 0
+    return "Error: minimum delay is #{MIN_FOLLOWUP_DELAY.to_i} seconds." if delay < MIN_FOLLOWUP_DELAY
+    task_text = clean_text(task)
+    return 'Error: task is empty.' if task_text.empty?
+
+    pending = @followup_mutex.synchronize { @followups.size }
+    if pending >= MAX_PENDING_FOLLOWUPS
+      return "Error: #{pending} follow-ups already pending (max #{MAX_PENDING_FOLLOWUPS}) — cancel one first."
+    end
+
+    now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @followup_seq += 1
+    entry = { id: @followup_seq,
+              due: now_mono + delay,              # monotonic — fires this process
+              due_at: Time.now.to_f + delay,      # absolute unix — persisted, restart-safe
+              task: task_text }
+    @followup_mutex.synchronize do
+      @followups << entry
+      @followup_cond.signal  # wake the scheduler if this became the soonest
+    end
+    log "follow-up ##{entry[:id]} scheduled (in #{delay.round}s): #{trunc(task_text, 100)}"
+    persist! if @session_path
+    "Follow-up ##{entry[:id]} scheduled for +#{delay.round}s: #{trunc(task_text, 200)}"
+  end
+
+  # Cancel a pending follow-up (like JavaScript clearTimeout). A follow-up
+  # the scheduler has already popped for firing can't be cancelled. Returns
+  # the tool-result string for the model.
+  def cancel_followup(followup_id:)
+    id = followup_id.to_i
+    removed = @followup_mutex.synchronize do
+      before = @followups.size
+      @followups.reject! { |f| f[:id] == id }
+      @followup_cond.signal if @followups.size < before
+      before - @followups.size
+    end
+    return "Error: follow-up ##{id} not found (already fired or cancelled)." if removed.zero?
+    log "follow-up ##{id} cancelled"
+    persist! if @session_path
+    "Follow-up ##{id} cancelled."
+  end
+
+  # ── Runtime state rehydration (the ONE hot-reload seam) ────────
+
+  # Rebuild any runtime ivars a hot-reloaded object (built by OLDER code)
+  # is missing, plus run per-version migrations. Called from exactly ONE
+  # place — the sniffer's reconstruction point, right next to where it
+  # re-points the providers after every Ctrl-C `load`. initialize already
+  # built everything on a fresh object (and set @state_version), so this
+  # is a silent no-op there; on a stale object it fills in the missing
+  # parts, logs once, and records the version — thereafter it is a no-op
+  # forever.
+  #
+  # Contract with the dev workflow: hot reload keeps the tool CLASSES
+  # live (register_tools recreates them fresh per ask — no restart for
+  # tool changes), but if a change adds/removes INSTANCE state, bump
+  # STATE_VERSION and express the migration here. If a state change ever
+  # can't be written as a `||=` fill-in (e.g. needs a destroyed-and-remade
+  # resource), log "restart required" here and return nil/raise instead of
+  # guessing — a full restart is the correct fallback, not more plumbing.
+  def rehydrate_state!
+    return if @state_version && @state_version >= STATE_VERSION
+
+    @mutex ||= Mutex.new
+    @console_mutex ||= Mutex.new
+    @last_ask ||= 0.0
+    @last_greet ||= 0.0
+    @memories_sent ||= Set.new
+    @console_queue ||= []
+    @recent_console ||= []
+    @followups ||= []
+    @followup_mutex ||= Mutex.new
+    @followup_cond ||= ConditionVariable.new
+    @followup_seq ||= 0
+    # (future STATE_VERSION-specific migrations go here, keyed on
+    #  @state_version)
+    @state_version = STATE_VERSION
+    log "agent runtime state rehydrated to v#{STATE_VERSION} " \
+        '(hot-reloaded object built by older code — no restart needed)'
+  end
+
+  # Start the follow-up scheduler thread unless one is already running.
+  # Called at the same single seam, after rehydrate_state! (a stale object
+  # built before the feature exists has no thread yet); also revives a
+  # thread that died. Safe to call repeatedly.
+  def ensure_followup_scheduler
+    return if @disabled
+    start_scheduler if @scheduler.nil? || !@scheduler.alive?
+  end
+
   private
 
   # ── LLM plumbing ──────────────────────────────────────────────────
@@ -588,6 +762,8 @@ class HiveMindAgent
     return unless @chat
     @chat.with_tool(HivemindSay.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
     @chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
+    @chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp)
+    @chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp)
   end
 
   def ask_llm(player, message)
@@ -931,6 +1107,66 @@ class HiveMindAgent
     @rcon.say("#{prefix}#{text}")
   end
 
+  # Per-turn prompt for a firing follow-up: the scheduled task + whatever
+  # turn_prompt injects (fresh context snapshot, console lines queued since
+  # the last prompt, player memories). The model may reply, query, schedule
+  # again, or stay silent.
+  def followup_prompt(task)
+    turn_prompt(
+      "SCHEDULED FOLLOW-UP — you set this for yourself earlier, and the time has come.\n" \
+      "Task: #{task}\n\n" \
+      'The context above is fresh (online players, console lines since your last turn). ' \
+      'Check on the situation and act as you see fit: send a chat message (say tool), ' \
+      'run read-only queries (rcon_query), schedule another follow-up, or stay silent ' \
+      "if nothing needs doing. Keep any message under #{MAX_REPLY_LEN} characters.",
+      player: nil
+    )
+  end
+
+  # Fire a scheduled follow-up: one fresh LLM turn with the current context
+  # + the task. Runs on the scheduler thread; complete() serializes with
+  # player asks/greets via @mutex, so a follow-up never interleaves with a
+  # live conversation — lines queued meanwhile are drained into its prompt.
+  def fire_followup(entry)
+    return if @disabled
+    log "follow-up ##{entry[:id]} firing: #{trunc(entry[:task], 120)}"
+    reply = complete(followup_prompt(entry[:task]))
+    send_reply(reply)
+  rescue StandardError => e
+    log_error("follow-up ##{entry[:id]} failed", e)
+  end
+
+  # Background thread that fires due follow-ups. Holds @followup_mutex for
+  # the check-and-sleep atomically (ConditionVariable#wait releases it while
+  # sleeping), so schedule_followup's signal can never be lost: it either
+  # wakes the wait or the loop re-checks right after. The thread survives
+  # hot reloads (the agent object persists — the block still resolves
+  # methods against the reloaded classes) and is recreated on a full
+  # restart when pending follow-ups are re-armed from the session file.
+  def start_scheduler
+    @scheduler = Thread.new do
+      loop do
+        begin
+          entry = @followup_mutex.synchronize do
+            now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            idx = @followups.index { |f| f[:due] <= now }
+            if idx
+              @followups.delete_at(idx)
+            else
+              next_due = @followups.map { |f| f[:due] }.min
+              wait = next_due ? [next_due - now, 60.0].min : 60.0
+              @followup_cond.wait(@followup_mutex, wait)
+              nil
+            end
+          end
+          fire_followup(entry) if entry
+        rescue StandardError => e
+          log_error('follow-up scheduler error', e)
+        end
+      end
+    end
+  end
+
   SYSTEM_PROMPT = <<~PROMPT
     You are "Hivemind". Your personality — who you are, your voice, how
     you relate to players — lives in SOUL, shown below under "Persistent
@@ -993,6 +1229,12 @@ class HiveMindAgent
       to fetch live server info. NEVER use it to modify game state: no
       admin/permission changes, no build/destroy/reset commands, no /sc
       Lua that writes or mutates. Read-only only.
+    - schedule_followup: set a timer for a follow-up turn later (like
+      JavaScript setTimeout) — when it fires, you get a fresh turn with the
+      current context and the task you set. Use it for plans and requests
+      that need a check or reminder later (e.g. "check in 10 minutes
+      whether spawn is held and remind players to defend it"). Returns a
+      follow-up id; cancel_followup cancels a pending one (like clearTimeout).
   PROMPT
 
   # System prompt for a MEMORY COMPACTION pass — a separate one-shot chat
@@ -1061,8 +1303,9 @@ class HiveMindAgent
   end
 
   # Everything the compaction model sees, as one big user prompt: current
-  # memories (start from these), a fresh server context, and console
-  # lines not yet in the conversation. The conversation THREAD itself is
+  # memories (start from these), a fresh server context, pending follow-ups
+  # (the model's own plans/goals — worth remembering), and console lines
+  # not yet in the conversation. The conversation THREAD itself is
   # the message history already in the live chat (compaction runs inside
   # it), so it is not duplicated here.
   def compaction_material
@@ -1075,11 +1318,23 @@ class HiveMindAgent
     end
     snap = context_snapshot
     parts << "Current server context:\n#{snap}" unless snap.empty?
+    followups = @followup_mutex.synchronize do
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @followups.map { |f| "##{f[:id]} (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
+    end
+    parts << "Pending scheduled follow-ups:\n#{followups.join("\n")}" unless followups.empty?
     console = @console_mutex.synchronize do
       (@console_queue + @recent_console).uniq.map { |p, m| p ? "#{p}: #{m}" : m }
     end
     parts << "Console lines:\n#{console.join("\n")}" unless console.empty?
     parts.join("\n\n")
+  end
+
+  # Seconds remaining as a compact human duration ("9m", "1h5m", "90s").
+  def format_remaining(secs)
+    s = [secs.to_i, 0].max
+    return "#{s}s" if s < 60
+    "#{s / 60}m#{s % 60}s"
   end
 
   # Plain-text transcript of the live conversation, one line per message,
@@ -1130,6 +1385,28 @@ class HiveMindAgent
     if data['recent_console'].is_a?(Array)
       @recent_console = data['recent_console'].map { |e| [e[0], e[1].to_s] }
     end
+    # Re-arm pending follow-ups their absolute unix deadlines. An entry
+    # that came DUE during downtime gets a past-due monotonic time and the
+    # scheduler fires it on its first tick (correct: the task was already
+    # due). Skipped entries (bad data / empty task) are simply dropped.
+    n_rearmed = 0
+    if data['followups'].is_a?(Array)
+      data['followups'].each do |id, due_at, task|
+        next unless due_at.is_a?(Numeric)
+        task_text = clean_text(task)
+        next if task_text.empty?
+        id = id.to_i
+        next if id <= 0 || @followups.any? { |f| f[:id] == id }
+        @followup_seq = id if id > @followup_seq
+        now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @followups << { id: id,
+                        due: now_mono + (due_at.to_f - Time.now.to_f),
+                        due_at: due_at.to_f,
+                        task: task_text }
+        n_rearmed += 1
+      end
+    end
+    @followup_cond.signal if n_rearmed.positive?
     messages = data['messages'] || []
     # Pass 1: tool_call ids declared by assistant messages, so tool results
     # can be re-linked (a restored tool message whose call is missing would
@@ -1158,7 +1435,9 @@ class HiveMindAgent
         @chat.add_message(role: :user, content: m['content'])
       end
     end
-    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, #{messages.size} conversation messages"
+    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, " \
+         "#{messages.size} conversation messages" \
+         "#{n_rearmed.positive? ? ", #{n_rearmed} follow-ups re-armed" : ''}"
   rescue JSON::ParserError, StandardError => e
     log_error('session load failed — starting fresh', e)
     @console_queue = []
@@ -1175,14 +1454,16 @@ class HiveMindAgent
     {}
   end
 
-  # Full persist: console queue + recent + conversation messages. Called
-  # after each completion (conversation changed).
+  # Full persist: console queue + recent + pending follow-ups + conversation
+  # messages. Called after each completion (conversation changed) and from
+  # schedule/cancel so a crash between triggers can't lose a scheduled timer.
   def persist!
     @console_mutex.synchronize do
       data = {
         'version' => 1,
         'console_queue' => @console_queue,
         'recent_console' => @recent_console,
+        'followups' => @followup_mutex.synchronize { @followups.map { |f| [f[:id], f[:due_at], f[:task]] } },
         'messages' => serialize_messages,
       }
       write_session(data)

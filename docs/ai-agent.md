@@ -147,7 +147,7 @@ player chat ──► write_to_console action (C→S packet)
   long an entry lives. You can only infer the window indirectly: a long
   gap between triggers where `cached` drops to 0 means the prior prefix
   expired.
-- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `HIVE_SESSION` env overrides; `session_path: false` disables.
+- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `HIVE_SESSION` env overrides; `session_path: false` disables.
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or
@@ -256,8 +256,22 @@ server mode — client/pcap runs never auto-enable (the agent needs RCON).
 
 The agent survives Ctrl-C code reloads (kept in `SnifferState.ai_agent`),
 so LLM context, the rate limiter, and the RubyLLM connection carry over.
-Only a second Ctrl-C (quit) ends it — and since it's a plain object with no
-threads, there's nothing to clean up.
+Only a second Ctrl-C (quit) ends it. The only thread it owns is the
+follow-up scheduler — a plain sleep-on-condition-variable thread with no
+shared state beyond the pending list, which keeps running across reloads
+(methods resolve against the reloaded classes) and needs no cleanup.
+
+Reload keeps the agent OBJECT, not its construction — `initialize` never
+re-runs, so code that added new instance state (e.g. the follow-up
+scheduler) must bring a stale object up to date. That is handled at the
+sniffer's single reconstruction seam: right where it re-points the
+providers it calls `@agent.rehydrate_state!` (version-gated by
+`STATE_VERSION`, fills in whatever an older-build object lacks, logs once,
+then becomes a permanent no-op) and `@agent.ensure_followup_scheduler`.
+It's deliberately ONE hook, not per-method guards; and if a future state
+change can't be expressed as a `||=` fill-in, `rehydrate_state!` logs
+"restart required" rather than piling on plumbing — a full restart is the
+correct fallback.
 
 ## Tools
 
@@ -276,6 +290,18 @@ rebind tool classes immediately — no restart needed for tool changes.
   1500 chars). The tool desc and system prompt instruct read-only use: no
   admin/permission changes, no state mutation. A leading `/` is added if
   missing.
+- **`ScheduleFollowUp`** (`schedule_followup(delay_seconds:, task:)`) — a
+  one-shot timer (like JavaScript `setTimeout`) for a **follow-up turn**.
+  When the delay elapses, the agent runs a fresh LLM turn whose prompt
+  carries the current context (online players, stats, console lines since
+  the last prompt) plus the scheduled task — the model can check on a
+  plan, remind players, run RCON queries, or chain another follow-up.
+  Minimum delay 15s, at most 5 pending (the tool errors beyond that and
+  the model cancels stale ones). Returns a follow-up id. See
+  "Scheduled follow-ups (timers)" below.
+- **`CancelFollowUp`** (`cancel_followup(followup_id:)`) — cancels a
+  pending follow-up (like `clearTimeout`); an id that already fired or
+  was cancelled errors.
 
 Future candidates (same pattern):
 
@@ -284,3 +310,44 @@ Future candidates (same pattern):
 - `recent_actions` — what players have been doing (from the packet decoder).
 
 Not wired up yet, per requirements.
+
+## Scheduled follow-ups (timers)
+
+`schedule_followup` gives the model JavaScript-`setTimeout`-style timers:
+it schedules a follow-up turn, and the agent fires a fresh LLM turn when
+the delay elapses. This is how plans and requests get followed up without
+anyone having to page the agent again. Example:
+
+    "Rally the players to defend spawn."                          player asks
+    → schedule_followup(delay_seconds: 600,
+                        task: "check whether spawn is still defended; if
+                        not, rally the players again")
+
+10 minutes later the model gets a fresh turn with the task plus what has
+happened since (new chat / join / leave lines, online players, stats) —
+it can reply in chat (say), run read-only RCON queries to check the state,
+schedule another follow-up to keep watching, or stay silent if nothing
+needs doing.
+
+- **Mechanics**: a single background scheduler thread sleeps on a
+  condition variable until the next due time (signalled on schedule/cancel,
+  so no polling). Firing runs through the same `complete` path as player
+  asks — serialized under the same mutex — so a follow-up never
+  interleaves with a live conversation; console lines queued meanwhile
+  are drained into its prompt (nothing is lost).
+- **Guards**: minimum delay 15s (anti ping-pong / abuse) and at most 5
+  pending follow-ups — beyond that the tool returns an error; the model
+  is expected to cancel stale ones. Follow-ups are the model's own
+  choice, so they stay rare and cheap.
+- **Persistence**: pending follow-ups are stored in the session file with
+  **absolute unix deadlines** (monotonic time doesn't survive reboots),
+  so a restart re-arms them — one that came due while the process was
+  down fires on startup. `clear_session!` (run by `/compact` after
+  distilling) cancels all pending follow-ups: they belong to the session
+  being wiped.
+- **Compaction**: pending follow-ups are listed in the compaction material
+  ("Pending scheduled follow-ups: #3 (in 9m30s): check the mall"), so
+  plans/goals can be remembered across sessions.
+- The follow-up timer fires even when nobody is addressing the agent —
+  that's the point: it is Hivemind keeping its own promises.
+

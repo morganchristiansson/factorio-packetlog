@@ -113,6 +113,177 @@ class TestHiveMindAgent < Minitest::Test
     assert_kind_of Proc, tool.instance_variable_get(:@on_sent)
   end
 
+  def test_register_tools_includes_followup_tools
+    tools = @agent.instance_variable_get(:@chat).tools
+    assert tools.key?(:schedule_follow_up), 'schedule_followup tool registered'
+    assert tools.key?(:cancel_follow_up), 'cancel_followup tool registered'
+  end
+
+  # ── Scheduled follow-ups (timeout tool) ────────────────────────
+
+  def test_schedule_followup_stores_entry_and_returns_id
+    result = @agent.schedule_followup(delay_seconds: 60, task: 'check spawn defense')
+    assert_match(/Follow-up #\d+ scheduled for \+60s/, result)
+    entries = @agent.instance_variable_get(:@followups)
+    assert_equal 1, entries.size
+    assert_equal 'check spawn defense', entries.first[:task]
+    assert_operator entries.first[:due_at], :>, Time.now.to_f, 'absolute unix deadline (for restart re-arm)'
+    assert_operator entries.first[:due], :>, Process.clock_gettime(Process::CLOCK_MONOTONIC), 'monotonic due (for firing)'
+  end
+
+  def test_schedule_followup_validates_delay_and_task
+    assert_match(/minimum delay/, @agent.schedule_followup(delay_seconds: 1, task: 'too soon'))
+    assert_match(/positive number/, @agent.schedule_followup(delay_seconds: 0, task: 'zero'))
+    assert_match(/empty/, @agent.schedule_followup(delay_seconds: 60, task: '   '))
+    assert_empty @agent.instance_variable_get(:@followups)
+  end
+
+  def test_schedule_followup_caps_pending
+    max = HiveMindAgent::MAX_PENDING_FOLLOWUPS
+    max.times { |i| @agent.schedule_followup(delay_seconds: 60, task: "t#{i}") }
+    result = @agent.schedule_followup(delay_seconds: 60, task: 'overflow')
+    assert_match(/max #{max}/, result)
+    assert_equal max, @agent.instance_variable_get(:@followups).size
+  end
+
+  def test_cancel_followup_removes_entry
+    @agent.schedule_followup(delay_seconds: 60, task: 'check')
+    id = @agent.instance_variable_get(:@followups).first[:id]
+    assert_match(/cancelled/, @agent.cancel_followup(followup_id: id))
+    assert_empty @agent.instance_variable_get(:@followups)
+    assert_match(/not found/, @agent.cancel_followup(followup_id: id))
+  end
+
+  def test_schedule_tool_wires_into_agent
+    tool = ScheduleFollowUp.new(agent: @agent)
+    result = tool.call('delay_seconds' => 60, 'task' => 'remind players')
+    assert_match(/Follow-up #\d+ scheduled/, result)
+    assert_equal 'remind players', @agent.instance_variable_get(:@followups).first[:task]
+    # invalid args never reach the agent
+    err = ScheduleFollowUp.new(agent: @agent).call('delay_seconds' => -5, 'task' => 'x')
+    assert err.is_a?(Hash) || err.to_s.include?('Error') || err.to_s.include?('Invalid')
+  end
+
+  def test_fire_followup_runs_turn_with_task_and_fresh_context
+    @agent.schedule_followup(delay_seconds: 60, task: 'remind spawn defense')
+    @agent.send(:append_history, 'bob', 'biters at the wall!')  # queued since last prompt
+    entry = @agent.instance_variable_get(:@followups).first
+    prompts = []
+    @agent.define_singleton_method(:complete) { |p| prompts << p; 'hold the line' }
+    @agent.send(:fire_followup, entry)
+    assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
+    assert_includes prompts.first, 'remind spawn defense'
+    assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
+    assert_includes @agent.instance_variable_get(:@rcon).sent.last, 'hold the line', 'model reply is broadcast'
+  end
+
+  def test_fire_followup_stays_silent_when_model_returns_nothing
+    @agent.schedule_followup(delay_seconds: 60, task: 'check')
+    entry = @agent.instance_variable_get(:@followups).first
+    @agent.define_singleton_method(:complete) { |_p| '' }  # model decides nothing needs doing
+    @agent.send(:fire_followup, entry)
+    assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
+  end
+
+  def test_followups_survive_restart
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1.online_provider = -> { [] }
+      a1.player_stats_provider = -> { [] }
+      a1.schedule_followup(delay_seconds: 60, task: 'remind spawn defense')
+      a1.send(:persist!)
+      data = JSON.parse(File.read(sess))
+      assert_equal 1, data['followups'].size, 'follow-up persisted with its deadline'
+
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2.online_provider = -> { [] }
+      a2.player_stats_provider = -> { [] }
+      a2.define_singleton_method(:complete) { |_p| '' }
+      fups = a2.instance_variable_get(:@followups)
+      assert_equal 1, fups.size
+      assert_equal 'remind spawn defense', fups.first[:task]
+      assert_equal a1.instance_variable_get(:@followups).first[:id], fups.first[:id], 'id preserved'
+      assert_operator fups.first[:due], :>, Process.clock_gettime(Process::CLOCK_MONOTONIC), 'remaining delay kept'
+    end
+  end
+
+  def test_overdue_followup_fires_after_restart
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1.online_provider = -> { [] }
+      a1.player_stats_provider = -> { [] }
+      a1.schedule_followup(delay_seconds: 60, task: 'ping')
+      # Rewrite the persisted deadline to the near future (simulates downtime)
+      data = JSON.parse(File.read(sess))
+      data['followups'] = [[1, Time.now.to_f + 0.4, 'ping']]
+      File.write(sess, JSON.generate(data))
+
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2.online_provider = -> { [] }
+      a2.player_stats_provider = -> { [] }
+      a2.define_singleton_method(:complete) { |_p| '' }
+      deadline = Time.now + 3
+      sleep 0.05 until a2.instance_variable_get(:@followups).empty? || Time.now > deadline
+      assert_empty a2.instance_variable_get(:@followups), 're-armed follow-up fired by the scheduler'
+    end
+  end
+
+  def test_clear_session_cancels_pending_followups
+    @agent.schedule_followup(delay_seconds: 60, task: 'remind')
+    assert @agent.clear_session!
+    assert_empty @agent.instance_variable_get(:@followups)
+  end
+
+  # Regression: hot reload (Ctrl-C `load`) keeps the agent OBJECT but not
+  # its construction — an agent created by an OLDER build has no follow-up
+  # ivars and no scheduler thread. The sniffer's single reconstruction
+  # seam (rehydrate_state! + ensure_followup_scheduler, right where it
+  # re-points the providers) fills those in; the reloaded methods must not
+  # crash on the object afterwards.
+  def test_hot_reloaded_old_build_agent_survives_followup_code
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    # Simulate an object built by OLDER code: no follow-up state, no
+    # scheduler thread (old code never started one), and a stale
+    # @state_version. Kill the scheduler this NEW build started so the
+    # simulation is faithful and nothing leaks into other tests.
+    agent.instance_variable_get(:@scheduler)&.kill
+    agent.instance_variable_get(:@scheduler)&.join(0.1)
+    %i[@followups @followup_mutex @followup_cond @followup_seq @scheduler].each do |ivar|
+      agent.remove_instance_variable(ivar) if agent.instance_variable_defined?(ivar)
+    end
+    agent.instance_variable_set(:@state_version, nil)
+    class << agent
+      def complete(_p) = '' # never hit the network
+    end
+
+    # The single seam the sniffer runs on every reconstruction:
+    agent.rehydrate_state!
+    agent.ensure_followup_scheduler
+    assert agent.instance_variable_get(:@scheduler)&.alive?, 'scheduler started at the seam'
+
+    result = agent.schedule_followup(delay_seconds: 30, task: 'post-reload check')
+    assert_match(/scheduled/, result)
+    assert_equal 'post-reload check', agent.instance_variable_get(:@followups).first[:task]
+    agent.send(:persist!)  # the exact crash from the live run
+    assert agent.send(:compaction_material).include?('Pending scheduled follow-ups:')
+    assert agent.clear_session!
+    assert_empty agent.instance_variable_get(:@followups)
+  end
+
+  def test_compaction_material_lists_pending_followups
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent.online_provider = -> { [] }
+      agent.player_stats_provider = -> { [] }
+      agent.schedule_followup(delay_seconds: 60, task: 'check the mall')
+      material = agent.send(:compaction_material)
+      assert_includes material, 'Pending scheduled follow-ups:'
+      assert_includes material, 'check the mall'
+    end
+  end
+
   # ── Session persistence (restart-safe) ─────────────────────────
 
   def test_session_persists_and_restores_across_restart

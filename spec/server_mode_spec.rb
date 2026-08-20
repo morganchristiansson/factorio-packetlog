@@ -590,11 +590,8 @@ s_wd.instance_variable_set(:@debug, false)
 s_wd.instance_variable_set(:@attrs, PlayerAttrs.new)
 now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 wd_online = s_wd.instance_variable_get(:@online)
-wd_hb = s_wd.instance_variable_get(:@last_heartbeat_at)
-wd_online['alive'] = 1
-wd_hb['alive'] = now - 1        # heartbeat a second ago → fine
-wd_online['stale'] = 2
-wd_hb['stale'] = now - (30 + 5) # silent for 35s → timeout
+wd_online['alive'] = { index: 1, hb: now - 1 }        # heartbeat a second ago → fine
+wd_online['stale'] = { index: 2, hb: now - (30 + 5) } # silent for 35s → timeout
 wd_out = StringIO.new
 old_stdout = $stdout
 $stdout = wd_out
@@ -605,26 +602,32 @@ ensure
 end
 check(!wd_online.key?('stale'), 'stale player removed from @online')
 check(wd_online.key?('alive'), 'recently-heartbeat player kept')
-check(!wd_hb.key?('stale'), 'stale timestamp cleaned up')
 check(wd_events.include?([:timeout, 'stale']), 'agent got on_player_event(:timeout)')
 check(!wd_events.include?([:timeout, 'alive']), 'alive player did not fire timeout')
 check(wd_out.string.include?('stale timed out (no heartbeat'), 'console prints the timeout line')
 
 # a heartbeat arriving before the scan must cancel the drop (touch refreshed
 # the timestamp → below the threshold at scan time)
-wd_online['half'] = 3
-wd_hb['half'] = now - (30 + 2)
+wd_online['half'] = { index: 3, hb: now - (30 + 2) }
 s_wd.send(:touch_heartbeat_name, 'half')   # fresh proof of life
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_online.key?('half'), 'refreshed heartbeat cancels the timeout')
 
 # touch_heartbeat stamps by src_ip resolution too (the packet-top path)
 s_wd.instance_variable_set(:@conn_ip_name, { '10.0.0.77' => 'ripe' })
-wd_online['ripe'] = 4
-wd_hb['ripe'] = now - (30 + 4)
+wd_online['ripe'] = { index: 4, hb: now - (30 + 4) }
 s_wd.send(:touch_heartbeat, '10.0.0.77')
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_online.key?('ripe'), 'src_ip touch keeps the player alive')
+
+# legacy state shape (plain Integer instead of a record) is normalized at
+# construction — the watchdog must not crash on it
+st_legacy = spec_state_with_capture
+st_legacy.online = { 'oldshape' => 7 }
+s_legacy = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st_legacy)
+legacy_rec = s_legacy.instance_variable_get(:@online)['oldshape']
+check(legacy_rec.is_a?(Hash) && legacy_rec[:index] == 7 && legacy_rec[:hb],
+      'legacy Integer @online value normalized to a record at init')
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

@@ -20,7 +20,7 @@ class SnifferState
                 :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :show_actions, :hide_actions,
-                :debug, :last_heartbeat_at, :online_mutex, :timeout_watchdog
+                :debug, :online_mutex, :timeout_watchdog
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -86,16 +86,24 @@ class FactorioSniffer
     # roster, added on NewPeerInfo (join), index bound from the first C→S
     # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
     @online = @state.online || {}
-    # Per-player C→S heartbeat liveness (server mode): name → monotonic
-    # timestamp of the last packet seen from that player's source. The
-    # watchdog (see ensure_timeout_watchdog) drops players who stop
-    # heartbeating — crashes/power loss send nothing, unlike the clean
-    # quits that PeerDisconnect catches. Survives hot reloads via state.
-    @last_heartbeat_at = @state.last_heartbeat_at || {}
-    @online_mutex = @state.online_mutex || Mutex.new  # guards @online + @last_heartbeat_at
-    @timeout_watchdog = @state.timeout_watchdog
+    # Per-player records for the LIVE roster (packet-maintained in server
+    # mode; survives hot reloads via state):
+    #   name => { index: game index (nil until a heartbeat confirms it),
+    #             hb:    monotonic ts of the last C→S heartbeat }
+    # The hb field drives the timeout watchdog — crashes/power loss send
+    # nothing, unlike the clean quits PeerDisconnect catches. ONE hash, ONE
+    # lock: status and liveness are always updated together atomically.
+    @online_mutex = @state.online_mutex || Mutex.new  # guards @online
+    # Normalize state from older layouts: plain Integer values (old shape)
+    # and records missing :hb all get a fresh liveness stamp so the watchdog
+    # can't drop a player before proof of life arrives.
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @online_mutex.synchronize { @online.each_key { |n| @last_heartbeat_at[n] ||= now } }
+    @online_mutex.synchronize do
+      @online.each do |name, v|
+        @online[name] = v.is_a?(Hash) ? { index: v[:index], hb: v[:hb] || now } : { index: v, hb: now }
+      end
+    end
+    @timeout_watchdog = @state.timeout_watchdog
     ensure_timeout_watchdog
     # src_ip → name for CONFIRMED (in-game) players — lets a clean-quit
     # signal (C→S PeerDisconnect sync action / msg 14) resolve the leaver
@@ -294,7 +302,6 @@ class FactorioSniffer
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
       st.debug = @debug
-      st.last_heartbeat_at = @last_heartbeat_at
       st.online_mutex = @online_mutex
       st.timeout_watchdog = @timeout_watchdog
     end
@@ -491,7 +498,7 @@ class FactorioSniffer
         @peer_names[sa[:peer_id]] = sa[:username]
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
         @player_db.add(pid, sa[:username])
-        @online[sa[:username]] ||= nil  # index bound once a C→S heartbeat confirms it
+        @online[sa[:username]] ||= { index: nil, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }  # index bound once a C→S heartbeat confirms it
         touch_heartbeat_name(sa[:username])
         @attrs.connect(sa[:username], @game_tick)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
@@ -541,8 +548,7 @@ class FactorioSniffer
           if name
             @player_db.add(idx + 1, name)
             @player_db.remove_other_entries_for(name, idx + 1)
-            @online[name] = idx + 1
-            touch_heartbeat_name(name)
+            @online[name] = { index: idx + 1, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }
             @attrs.set_index(name, idx + 1)
             # src_ip → name for connected players: lets the clean-quit
             # signals (C→S PeerDisconnect sync action, msg 14 fallback)
@@ -561,7 +567,7 @@ class FactorioSniffer
           # Peer-id-based guess (peer_id+1) may differ for returning players;
           # remove any other slot claiming our name.
           @player_db.remove_other_entries_for(@self_name, idx + 1)
-          @online[@self_name] = idx + 1
+          @online[@self_name] = { index: idx + 1, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }
           @attrs.set_index(@self_name, idx + 1)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
@@ -1007,8 +1013,7 @@ class FactorioSniffer
     players.each do |p|
       @player_db.add(p[:index], p[:name])
       @player_db.remove_other_entries_for(p[:name], p[:index])
-      @online[p[:name]] = p[:index]  # authoritative online seed (name → game index)
-      touch_heartbeat_name(p[:name])   # alive as of now — packets keep it fresh
+      @online[p[:name]] = { index: p[:index], hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }  # authoritative online seed (name → game index)
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts}  [rcon]  connected players (#{players.size}): " +
@@ -1152,7 +1157,7 @@ class FactorioSniffer
                    admin: a[:admin], online_time: a[:online_time],
                    afk_time: a[:afk_time])
       # Players already online per RCON are authoritative for @online too
-      @online[a[:name]] ||= a[:index] if a[:connected]
+      @online[a[:name]] ||= { index: a[:index], hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) } if a[:connected]
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     admins = attrs.select { |a| a[:admin] }.map { |a| a[:name] }
@@ -1195,15 +1200,23 @@ class FactorioSniffer
   def touch_heartbeat(src_ip)
     name = @conn_names[src_ip] || @conn_ip_name[src_ip]
     return unless name
-    @online_mutex.synchronize { @last_heartbeat_at[name] = Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    @online_mutex.synchronize do
+      rec = @online[name]
+      rec[:hb] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if rec
+    end
   end
 
-  # Explicit liveness stamp at the moment a name enters @online — covers the
-  # joins the packet-top src_ip touch can't reach (players sharing one
-  # source IP behind NAT, where only the name/index path is exact).
+  # Explicit liveness stamp — used at the moment a record enters @online,
+  # covering the joins the packet-top src_ip touch can't reach (players
+  # sharing one source IP behind NAT, where only the name/index path is
+  # exact). Pre-confirm players (in @conn_names, not yet in @online) need
+  # no stamp: the watchdog only ever drops confirmed roster members.
   def touch_heartbeat_name(name)
     return unless name
-    @online_mutex.synchronize { @last_heartbeat_at[name] = Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+    @online_mutex.synchronize do
+      rec = @online[name]
+      rec[:hb] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if rec
+    end
   end
 
   # Watchdog tick: drop players whose heartbeats stopped (crashes/power
@@ -1218,8 +1231,8 @@ class FactorioSniffer
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     stale = []
     @online_mutex.synchronize do
-      @online.each_key do |name|
-        t = @last_heartbeat_at[name]
+      @online.each do |name, rec|
+        t = rec[:hb]
         stale << [name, now - t] if t && now - t > HEARTBEAT_TIMEOUT
       end
     end
@@ -1229,10 +1242,10 @@ class FactorioSniffer
   def timeout_player(name, idle, now)
     removed = false
     @online_mutex.synchronize do
-      last = @last_heartbeat_at[name]
+      rec = @online[name]
+      last = rec && rec[:hb]
       if last && now - last > HEARTBEAT_TIMEOUT   # refreshed since the scan → still alive
         @online.delete(name)
-        @last_heartbeat_at.delete(name)
         removed = true
       end
     end
@@ -1247,7 +1260,7 @@ class FactorioSniffer
   # SERVER mode; stored in state so a hot reload (threads keep running
   # across `load`) doesn't spawn a duplicate. The thread calls this object's
   # method, which after a reload resolves to the NEW class definition while
-  # operating on the SAME shared state hashes (@online/@last_heartbeat_at/…).
+  # operating on the SAME shared state hashes (@online etc.).
   def ensure_timeout_watchdog
     return unless @options[:server] && @options[:interface] && !@options[:pcap]
     return if @timeout_watchdog&.alive?

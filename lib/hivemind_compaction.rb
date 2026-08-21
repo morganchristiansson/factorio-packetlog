@@ -55,6 +55,9 @@ module HiveMindCompaction
         removed = chat.messages.slice!(start..) || []
         chat.with_instructions(system_prompt_with_memories)
         chat.tools.delete(:write_memories)
+        # Drop the persisted-conversation cache: the next persist must
+        # re-serialize WITHOUT the stripped compaction messages.
+        @persisted_messages = nil
         log "memory compaction — stripped #{removed.size} temp messages from the live conversation" if removed.any?
       end
     end

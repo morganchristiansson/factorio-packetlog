@@ -526,17 +526,18 @@ class HiveMindAgent
     "Persistent player memories:\n#{lines.join("\n\n")}\n\n"
   end
 
-  # Current online roster + player stats (a fresh snapshot per turn), e.g.
-  #   Currently online players: Alice, Bob (2 players).
-  #   Player stats (total play time; live session included for online
-  #   players): Alice: 5h12m (admin); Bob: 2h3m; Carol: 1d3h (offline).
+  # Current online roster + per-player stats in ONE line (a fresh snapshot
+  # per turn) — offline players are never listed (joins/leaves arrive as
+  # console events instead), e.g.
+  #   Online players (2): Alice: 5h12m (admin); Bob: 2h3m (afk 5m).
   def context_snapshot
-    lines = []
-    online = online_player_list
-    lines << "Currently online players: #{online.join(', ')} (#{online.size} players)." unless online.empty?
     stats = player_stat_lines
-    lines << "Player stats (total play time across sessions; live session included for online players): #{stats.join('; ')}." unless stats.empty?
-    lines.join("\n")
+    return "Online players (#{stats.size}): #{stats.join('; ')}." unless stats.empty?
+    # No stats available (standalone agent, RCON down): fall back to the
+    # packet-derived online roster's bare names.
+    online = online_player_list
+    return '' if online.empty?
+    "Online players (#{online.size}): #{online.join(', ')}"
   end
 
   # Console lines not yet included in any prompt: drains the queue (each
@@ -650,18 +651,22 @@ class HiveMindAgent
   # if the provider yields nothing (attrs not seeded yet / query failed),
   # fall back to a direct RCON query. Names are force-cleaned (see
   # online_player_list).
+  # One "Name: total-play-time (flags)" fragment per CONNECTED player.
+  # Offline players are omitted entirely — the prompt covers who is online
+  # right now; lifetime stats of everyone else are noise (and a growing
+  # token cost on long-lived servers). Flags: admin; afk <time> while
+  # connected and idle.
   def player_stat_lines
     list = @player_stats_provider ? (@player_stats_provider.call || []) : []
     list = @rcon&.player_attributes || [] if list.empty? && @rcon
-    list.map do |p|
+    list.select { |p| p[:connected] }.map do |p|
       time = format_ticks(p[:online_time_ticks] || p[:online_time])
       flags = []
       flags << 'admin' if p[:admin]
-      flags << 'offline' unless p[:connected]
-      # afk_time (ticks since their last action) — only meaningful while
-      # connected; shown as "afk 5m" when idle.
+      # afk_time (ticks since their last action) — reset by any real input
+      # action; shown as "afk 5m" when idle.
       afk = p[:afk_time_ticks] || p[:afk_time]
-      flags << "afk #{format_ticks(afk)}" if p[:connected] && afk && afk.to_i > 60
+      flags << "afk #{format_ticks(afk)}" if afk && afk.to_i > 60
       suffix = flags.empty? ? '' : " (#{flags.join(', ')})"
       "#{clean_text(p[:name])}: #{time}#{suffix}"
     end

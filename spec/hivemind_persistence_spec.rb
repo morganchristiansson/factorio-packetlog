@@ -116,4 +116,33 @@ class TestHivemindPersistence < Minitest::Test
     end
   end
 
+  # Regression: persist_queue! (fired by append_history on every chat line)
+  # used to rewrite the session file WITHOUT the messages/followups keys,
+  # clobbering the conversation persisted moments earlier by persist! — a
+  # restart then resumed empty and /compact had nothing to distill. The
+  # cheap path must write the FULL snapshot (messages from the cache).
+  def test_queue_persist_never_clobbers_conversation
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1.online_provider = -> { [] }
+      a1.player_stats_provider = -> { [] }
+      a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
+      a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
+      a1.send(:persist!)
+
+      # a chat line arrives after the ask → append_history → persist_queue!
+      a1.send(:append_history, 'alice', 'hello hivemind')
+      data = JSON.parse(File.read(sess))
+      assert data['messages'].is_a?(Array) && data['messages'].size >= 2,
+             'queue persist must keep the conversation in the file'
+
+      # restart restores both conversation and console queue
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      texts = a2.instance_variable_get(:@chat).messages.map(&:content).map(&:to_s)
+      assert_includes texts, 'the bus is at 1k spm'
+      assert_equal [['alice', 'hello hivemind']], a2.instance_variable_get(:@console_queue)
+    end
+  end
+
 end

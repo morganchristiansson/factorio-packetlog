@@ -59,8 +59,10 @@ class TestHiveMindAgent < Minitest::Test
   # UTF-8 instruction at prompt assembly (`prompt << instruction`) →
   # Encoding::CompatibilityError, agent aborts mid-ask.
   def test_turn_prompt_survives_binary_flagged_unicode_names
-    @agent.online_provider = -> { [{ name: "sévérin".b }] }
-    @agent.player_stats_provider = -> { [{ name: "émoji".b, online_time_ticks: 3600, connected: false }] }
+    @agent.player_stats_provider = -> { [
+      { name: "sévérin".b, online_time_ticks: 60, connected: true },
+      { name: "émoji".b, online_time_ticks: 3600, connected: true },
+    ] }
     @agent.send(:append_history, "sévérin".b, "talking to the other machine".b)
     @agent.send(:append_history, 'alice', 'another line')
 
@@ -117,7 +119,7 @@ class TestHiveMindAgent < Minitest::Test
     # in the per-turn user prompt (turn_prompt).
     sp = HiveMindAgent::SYSTEM_PROMPT
     refute_includes sp, 'Current context:'
-    refute_includes sp, 'Currently online players:'
+    refute_includes sp, 'Online players ('
   end
 
 
@@ -145,10 +147,15 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_context_snapshot_includes_online_and_stats
     @agent.online_provider = -> { ['alice'] }
-    @agent.player_stats_provider = -> { [{ name: 'alice', index: 1, connected: true, admin: true, online_time_ticks: 5_040_000 }] }
+    @agent.player_stats_provider = -> { [
+      { name: 'alice', index: 1, connected: true, admin: true, online_time_ticks: 5_040_000 },
+      { name: 'offlineguy', index: 2, connected: false, online_time_ticks: 99_999 },
+    ] }
     snap = @agent.send(:context_snapshot)
-    assert_includes snap, 'Currently online players: alice (1 players).'
-    assert_includes snap, 'alice: 23h20m (admin)'
+    # Merged section: names + play time for ONLINE players only —
+    # offline players must not appear at all.
+    assert_includes snap, 'Online players (1): alice: 23h20m (admin).'
+    refute_includes snap, 'offlineguy'
   end
 
 

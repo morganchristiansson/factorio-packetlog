@@ -110,31 +110,40 @@ module HiveMindPersistence
     {}
   end
 
-  # Full persist: console queue + recent + pending follow-ups + conversation
-  # messages. Called after each completion (conversation changed) and from
-  # schedule/cancel so a crash between triggers can't lose a scheduled timer.
+  # Full session snapshot: console queue + recent + pending follow-ups +
+  # conversation messages. BOTH persist paths must write ALL keys — a
+  # partial rewrite (queue-only) used to clobber the persisted conversation
+  # whenever a chat line arrived after an ask, losing the session on
+  # restart (nothing left for /compact to distill).
+  def session_data
+    {
+      'version' => 1,
+      'console_queue' => @console_queue,
+      'recent_console' => @recent_console,
+      'followups' => @followup_mutex.synchronize { @followups.map { |f| [f[:id], f[:due_at], f[:task]] } },
+      'messages' => (@persisted_messages ||= serialize_messages),
+    }
+  end
+
+  # Full persist: called after each completion (conversation changed) and
+  # from schedule/cancel so a crash between triggers can't lose a scheduled
+  # timer. Re-serializes the conversation into the cache reused by
+  # persist_queue! (the cheap path must never fall back to stale messages).
   def persist!
     @console_mutex.synchronize do
-      data = {
-        'version' => 1,
-        'console_queue' => @console_queue,
-        'recent_console' => @recent_console,
-        'followups' => @followup_mutex.synchronize { @followups.map { |f| [f[:id], f[:due_at], f[:task]] } },
-        'messages' => serialize_messages,
-      }
-      write_session(data)
+      @persisted_messages = serialize_messages
+      write_session(session_data)
     end
   end
 
-  # Cheap persist (queue/recent only) — called from append_history on the
-  # packet thread so a crash between triggers doesn't lose unread lines.
+  # Cheap persist — called from append_history on the packet thread so a
+  # crash between triggers doesn't lose unread lines. Writes the FULL
+  # snapshot; the conversation comes from the cache (@persisted_messages,
+  # refreshed by persist!) so serializing messages per chat line costs
+  # nothing and the file can never lose messages/followups.
   def persist_queue!
     @console_mutex.synchronize do
-      write_session({
-        'version' => 1,
-        'console_queue' => @console_queue,
-        'recent_console' => @recent_console,
-      })
+      write_session(session_data)
     end
   end
 

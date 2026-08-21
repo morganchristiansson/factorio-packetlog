@@ -18,6 +18,9 @@ require 'ruby_llm'
 # reply appears in game chat immediately and no follow-up completion is
 # generated (faster, and the final text response can't double-send).
 class HivemindReply < RubyLLM::Tool
+  # Chat prefix shared with the agent's plain-text fallback path (send_reply).
+  REPLY_PREFIX = 'Hivemind> '
+
   # Model-facing name (RubyLLM defaults to the underscored class name,
   # "hivemind_reply"). Sessions persisted before this override carry the
   # old "hivemind_say" name — load_session rewrites those on restore.
@@ -31,7 +34,7 @@ class HivemindReply < RubyLLM::Tool
 
   # on_sent: optional callback invoked with the sent text (the agent uses
   # it to append its own replies to the rolling chat history).
-  def initialize(rcon:, prefix: 'Hivemind> ', on_sent: nil)
+  def initialize(rcon:, prefix: REPLY_PREFIX, on_sent: nil)
     @rcon = rcon
     @prefix = prefix
     @last_sent = nil
@@ -72,7 +75,7 @@ class RconQuery < RubyLLM::Tool
     return 'Error: empty command' if cmd.empty?
     cmd = "/#{cmd}" unless cmd.start_with?('/')
     out = @rcon.command(cmd).to_s.strip
-    out = out.each_char.take(@max_output).join + '…' if out.each_char.count > @max_output
+    out = "#{out[0, @max_output]}…" if out.length > @max_output
     out.empty? ? '(no output)' : out
   rescue StandardError => e
     "RCON error: #{e.class}: #{e.message}"

@@ -57,7 +57,6 @@ class HiveMindAgent
   HISTORY_SIZE = 1000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   RESEED_LINES = 10             # console lines kept in @recent_console (for memory compaction)
-  GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # Callable returning the names of players currently online (the sniffer
   # sets this to its packet-derived list each construction — see
@@ -361,7 +360,7 @@ class HiveMindAgent
   # player's long-term memory is injected into the greeting prompt (once
   # per session) so the welcome is informed by who they are.
   def greet_join(name, line, attrs = nil)
-    return if @disabled || !GREET_ON_JOIN
+    return if @disabled
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @mutex.synchronize do
       return if now - @last_greet < GREET_INTERVAL
@@ -544,7 +543,7 @@ class HiveMindAgent
       unread.pop if exclude && unread.last == exclude
       unread.reject! { |p, _| p == 'hivemind' }  # replies live in the conversation
       unread.map do |player, msg|
-        clipped = msg.each_char.first(HISTORY_LINE_LEN).join
+        clipped = msg[0, HISTORY_LINE_LEN]
         player ? "#{clean_text(player)}: #{clipped}" : clipped
       end
     end
@@ -627,15 +626,13 @@ class HiveMindAgent
   # both so it knows how to place the newcomer.
   def join_facts(attrs)
     return '' unless attrs
-    parts = []
+    facts = []
     ticks = attrs[:online_time_ticks] || attrs[:online_time]
-    parts << "they have played #{format_ticks(ticks)} in total" if ticks
-    parts << 'they are an admin' if attrs[:admin] == true
-    parts << 'they are not an admin' if attrs[:admin] == false
-    return '' if parts.empty?
-    # "... in total and they are an admin" → "... in total and are an admin"
-    joined = parts.join(' and ').sub(/\A(they have played .+ in total) and they (are)/, '\1 and \2')
-    " — #{joined}"
+    facts << "have played #{format_ticks(ticks)} in total" if ticks
+    facts << 'are an admin' if attrs[:admin] == true
+    facts << 'are not an admin' if attrs[:admin] == false
+    return '' if facts.empty?
+    " — they #{facts.join(' and ')}"
   end
 
   # Player attribute lines for the system context. Primary source: the
@@ -679,11 +676,10 @@ class HiveMindAgent
     parts.join
   end
 
-  # Strip markdown-ish noise and clamp length without splitting UTF-8 chars.
+  # Strip markdown-ish noise and clamp length. String#[] counts CHARACTERS
+  # on UTF-8 strings, so no manual each_char dance is needed.
   def clean_reply(text)
-    text = text.gsub('`', '').gsub(/[*_]{1,2}/, '')
-    chars = text.each_char.first(MAX_REPLY_LEN).join
-    chars.strip
+    text.gsub('`', '').gsub(/[*_]{1,2}/, '')[0, MAX_REPLY_LEN].strip
   end
 
   # ── Trigger / rate limit / reply ──────────────────────────────────
@@ -731,8 +727,7 @@ class HiveMindAgent
   def send_reply(text)
     return if text.nil? || text.empty?
     append_history('hivemind', text)
-    prefix = 'Hivemind> '
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{text}"
-    @rcon.say("#{prefix}#{text}")
+    @rcon.say("#{HivemindReply::REPLY_PREFIX}#{text}")
   end
 end

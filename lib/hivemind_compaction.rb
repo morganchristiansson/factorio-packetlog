@@ -41,7 +41,7 @@ module HiveMindCompaction
         if tool.written.empty?
           log 'memory compaction — no memory changes (model decided nothing worth updating)'
         else
-          tool.written.each { |key, content| log "memory compaction — #{key}: #{content.each_char.count} chars" }
+          tool.written.each { |key, content| log "memory compaction — #{key}: #{content.length} chars" }
         end
         # Coverage diagnostic: any player the session touched who still has
         # no memory blob? (The prompt requires one per player, but the

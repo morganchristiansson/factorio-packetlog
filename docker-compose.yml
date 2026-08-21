@@ -10,7 +10,7 @@ services:
     # Mount the repo read-only (source is managed on the host or via the agent)
     volumes:
       - .:/workspace
-      - ./.git:/workspace/.git:ro
+      # - ./.git:/workspace/.git:ro
       - /home/morgan/factorio/data:/factorio-data:ro
       - s25client-home:/home/ubuntu
     working_dir: /workspace

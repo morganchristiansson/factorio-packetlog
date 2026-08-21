@@ -11,3 +11,10 @@ hivemind-session.json
 
 # Hivemind long-term memory (written by memory compaction on quit / /compact)
 memories/
+
+# Bundler (bundle install inside the dev container)
+/vendor/
+/.bundle/
+
+# stray session tmp files
+.tmp

@@ -16,11 +16,11 @@ require_relative 'player_attrs'
 # file keeps its position, player names survive, and stats are continuous.
 class SnifferState
   attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
-                :self_ip, :self_name, :self_index, :peer_names, :conn_names,
-                :conn_ip_name, :roster_loaded, :ai_agent, :online, :attrs,
+                :self_ip, :self_name, :self_index, :peer_names,
+                :ip_names, :roster_loaded, :ai_agent, :attrs,
                 :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
                 :show_players, :show_actions, :hide_actions,
-                :debug, :online_mutex, :timeout_watchdog
+                :debug, :timeout_watchdog
 end
 
 # ─────────────────────────────────────────────────────────────────────
@@ -81,34 +81,17 @@ class FactorioSniffer
     # peer_id (network) -> name, for join/leave events (peer ids are NOT
     # game indexes; game indexes come from heartbeat actions instead).
     @peer_names = @state.peer_names || {}
-    # name -> game index for players currently in-game. Unlike player_db
-    # (permanent mapping) this tracks ONLINE status: seeded from the RCON
-    # roster, added on NewPeerInfo (join), index bound from the first C→S
-    # heartbeat, removed on PeerDisconnect. Survives hot reloads via state.
-    @online = @state.online || {}
-    # Per-player records for the LIVE roster (packet-maintained in server
-    # mode; survives hot reloads via state):
-    #   name => { index: game index (nil until a heartbeat confirms it),
-    #             hb:    monotonic ts of the last C→S heartbeat }
-    # The hb field drives the timeout watchdog — crashes/power loss send
-    # nothing, unlike the clean quits PeerDisconnect catches. ONE hash, ONE
-    # lock: status and liveness are always updated together atomically.
-    @online_mutex = @state.online_mutex || Mutex.new  # guards @online
-    # Normalize state from older layouts: plain Integer values (old shape)
-    # and records missing :hb all get a fresh liveness stamp so the watchdog
-    # can't drop a player before proof of life arrives.
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @online_mutex.synchronize do
-      @online.each do |name, v|
-        @online[name] = v.is_a?(Hash) ? { index: v[:index], hb: v[:hb] || now } : { index: v, hb: now }
-      end
-    end
+    # The live roster + liveness live entirely in @attrs (PlayerAttrs):
+    # "online" == record with :connected, whose :hb field drives the timeout
+    # watchdog. One structure, one lock — no parallel copies to drift.
     @timeout_watchdog = @state.timeout_watchdog
     ensure_timeout_watchdog
-    # src_ip → name for CONFIRMED (in-game) players — lets a clean-quit
-    # signal (C→S PeerDisconnect sync action / msg 14) resolve the leaver
-    # without S→C analysis.
-    @conn_ip_name = @state.conn_ip_name || {}
+    # src_ip → [name, confirmed]: every player seen connecting (msg 4
+    # username), flipped to confirmed once their first C→S heartbeat action
+    # binds a game index. Lets liveness touches and clean-quit signals
+    # (C→S PeerDisconnect sync action / msg 14) resolve WHO without S→C
+    # analysis. Survives hot reloads via state.
+    @ip_names = @state.ip_names || {}
     # Cross-packet chat segment reassembly buffer: [player, total_segs] =>
     # {seg_no => payload}. Split chat messages arrive as separate
     # input-action segments across packets; merged when complete. Survives
@@ -116,6 +99,7 @@ class FactorioSniffer
     @chat_segments = @state.chat_segments || {}
     # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
     # once from RCON, maintained by packet decoding. See PlayerAttrs.
+    # Also owns the live roster (connected records) + liveness (:hb).
     @attrs = @state.attrs || PlayerAttrs.new
     # Latest game tick observed in heartbeat tick closures — the clock for
     # lazy online_time computation (60 ticks/s, tick is in every closure).
@@ -140,8 +124,7 @@ class FactorioSniffer
                     (options[:server_ip] ? [options[:server_ip]] : detect_local_ipv4)
       # src_ip -> username, learned from ConnectionRequestReplyConfirm (msg 4,
       # incoming). Bound to the real game index by the client's first C→S
-      # heartbeat action below.
-      @conn_names = @state.conn_names || {}
+      # heartbeat action below. (@ip_names, defined above for all modes.)
       # RCON roster: authoritative {name -> index} for players connected at
       # startup. Loaded once before capture; players who join later are
       # learned from the packet stream (msg 4 + first C→S heartbeat).
@@ -288,12 +271,10 @@ class FactorioSniffer
       st.self_name = @self_name
       st.self_index = @self_index
       st.peer_names = @peer_names
-      st.conn_names = @conn_names
-      st.conn_ip_name = @conn_ip_name
+      st.ip_names = @ip_names
       st.chat_segments = @chat_segments
       st.roster_loaded = @state.roster_loaded
       st.ai_agent = @agent
-      st.online = @online
       st.attrs = @attrs
       st.game_tick = @game_tick
       st.attrs_loaded = @state.attrs_loaded
@@ -302,7 +283,6 @@ class FactorioSniffer
       st.show_actions = @show_actions
       st.hide_actions = @hide_actions
       st.debug = @debug
-      st.online_mutex = @online_mutex
       st.timeout_watchdog = @timeout_watchdog
     end
   end
@@ -454,7 +434,7 @@ class FactorioSniffer
           # Server mode: every connecting client's username (not just a
           # "self" client). Bound to a game index by their first C→S
           # heartbeat action below.
-          @conn_names[src_ip] = cc[:username]
+          @ip_names[src_ip] = [cc[:username], false]
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{cc[:username]} connected (from #{src_ip})"
         else
@@ -498,8 +478,9 @@ class FactorioSniffer
         @peer_names[sa[:peer_id]] = sa[:username]
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
         @player_db.add(pid, sa[:username])
-        @online[sa[:username]] ||= { index: nil, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }  # index bound once a C→S heartbeat confirms it
-        touch_heartbeat_name(sa[:username])
+        # Join = liveness proof (connect stamps hb); index bound once a
+        # C→S heartbeat confirms it.
+        @attrs.connect(sa[:username], @game_tick)
         @attrs.connect(sa[:username], @game_tick)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
@@ -512,7 +493,6 @@ class FactorioSniffer
         if sa[:peer_id]
           # S→C broadcast form (client mode): names the departed peer.
           pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
-          @online.delete(pname) if pname
           @attrs.disconnect(pname, @game_tick) if pname
           @agent&.on_player_event(:left, pname) if pname
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
@@ -527,11 +507,12 @@ class FactorioSniffer
       end
     end
 
-    # Bind usernames to game indexes from C→S heartbeat actions. In a C→S
-    # tick closure the first real action carries the SENDER's game index
-    # (delta chain starts from 0xFFFF, so the first delta IS the index+1).
+    # The SENDER's game index: in a C→S tick closure the first real action
+    # carries the SENDER's game index (delta chain starts from 0xFFFF, so
+    # the first delta IS the index+1). A heartbeat carrying input actions
+    # IS the liveness proof — identify by index, not by src_ip.
+    idx = nil
     if hdr[:msg_type] == 6 && hb[:tick_closures]&.any?
-      idx = nil
       hb[:tick_closures].each do |tc|
         real = tc[:actions]&.find { |a| a[:type] != 0 && a[:type] != 84 }
         if real
@@ -539,39 +520,50 @@ class FactorioSniffer
           break
         end
       end
-      if idx
-        if @options[:server]
-          # Server mode: learn EVERY client's name→index. msg 4 gave us
-          # src_ip→name; the first real action in their C→S heartbeat gives
-          # the game index. RCON /players is the authoritative cross-check.
-          name = @conn_names.delete(src_ip)
-          if name
-            @player_db.add(idx + 1, name)
-            @player_db.remove_other_entries_for(name, idx + 1)
-            @online[name] = { index: idx + 1, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }
-            @attrs.set_index(name, idx + 1)
-            # src_ip → name for connected players: lets the clean-quit
-            # signals (C→S PeerDisconnect sync action, msg 14 fallback)
-            # resolve the leaver on C→S alone. Server mode has no S→C
-            # analysis (NewPeerInfo/PeerDisconnect broadcasts are dropped),
-            # so joins are detected here and leaves via the final
-            # heartbeat's PeerDisconnect sync action.
-            @conn_ip_name[src_ip] = name
-            @agent&.on_player_event(:joined, name)
-            ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-            puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
-          end
-        elsif @self_name && src_ip == @self_ip && @self_index.nil?
-          @self_index = idx
-          @player_db.add(idx + 1, @self_name)
-          # Peer-id-based guess (peer_id+1) may differ for returning players;
-          # remove any other slot claiming our name.
-          @player_db.remove_other_entries_for(@self_name, idx + 1)
-          @online[@self_name] = { index: idx + 1, hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }
-          @attrs.set_index(@self_name, idx + 1)
+    end
+
+    # Liveness by NAME (server mode): stamp the roster record matching the
+    # sender's game index. This reaches everyone the src_ip touch can't:
+    # players seeded from the RCON roster (already in-game at startup —
+    # they never send msg 4, so their IP was never learned) and NAT'd
+    # clients sharing one source IP. Also learns the src_ip binding so
+    # later keepalive-only heartbeats (no actions → no index) still touch
+    # via touch_heartbeat(src_ip).
+    touch_heartbeat_index(idx + 1, src_ip) if @options[:server] && idx
+
+    # Bind usernames to game indexes from C→S heartbeat actions (joins:
+    # msg 4 name + first real action's index → "confirmed as game player").
+    if idx && hdr[:msg_type] == 6 && hb[:tick_closures]&.any?
+      if @options[:server]
+        # Server mode: learn EVERY client's name→index. msg 4 gave us
+        # src_ip→name; the first real action in their C→S heartbeat gives
+        # the game index. RCON /players is the authoritative cross-check.
+        entry = @ip_names[src_ip]
+        name = entry && !entry[1] ? entry[0] : nil  # unconfirmed only
+        if name
+          entry[1] = true  # confirmed — never re-fire the join event
+          @player_db.add(idx + 1, name)
+          @player_db.remove_other_entries_for(name, idx + 1)
+          @attrs.set_index(name, idx + 1)  # confirming heartbeat = liveness proof
+          # src_ip → name for connected players: lets the clean-quit
+          # signals (C→S PeerDisconnect sync action, msg 14 fallback)
+          # resolve the leaver on C→S alone. Server mode has no S→C
+          # analysis (NewPeerInfo/PeerDisconnect broadcasts are dropped),
+          # so joins are detected here and leaves via the final
+          # heartbeat's PeerDisconnect sync action.
+          @agent&.on_player_event(:joined, name)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-          puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
+          puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
         end
+      elsif @self_name && src_ip == @self_ip && @self_index.nil?
+        @self_index = idx
+        @player_db.add(idx + 1, @self_name)
+        # Peer-id-based guess (peer_id+1) may differ for returning players;
+        # remove any other slot claiming our name.
+        @player_db.remove_other_entries_for(@self_name, idx + 1)
+        @attrs.set_index(@self_name, idx + 1)
+        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+        puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
       end
     end
 
@@ -1013,7 +1005,9 @@ class FactorioSniffer
     players.each do |p|
       @player_db.add(p[:index], p[:name])
       @player_db.remove_other_entries_for(p[:name], p[:index])
-      @online[p[:name]] = { index: p[:index], hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) }  # authoritative online seed (name → game index)
+      # Authoritative live-roster seed (connected + index + fresh hb);
+      # time accounting is player_attributes' job (load_player_attrs).
+      @attrs.roster_online(p[:name], p[:index])
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts}  [rcon]  connected players (#{players.size}): " +
@@ -1027,7 +1021,7 @@ class FactorioSniffer
   # bound to game indexes by C→S heartbeats. Sorted for stable output.
   # Used by the HiveMind agent to know who is online.
   def online_players
-    @online.keys.sort
+    @attrs.online_names
   end
 
   # Snapshot of mirrored player attributes for the AI agent, with
@@ -1155,9 +1149,7 @@ class FactorioSniffer
     attrs.each do |a|
       @attrs.seed(a[:name], index: a[:index], connected: a[:connected],
                    admin: a[:admin], online_time: a[:online_time],
-                   afk_time: a[:afk_time])
-      # Players already online per RCON are authoritative for @online too
-      @online[a[:name]] ||= { index: a[:index], hb: Process.clock_gettime(Process::CLOCK_MONOTONIC) } if a[:connected]
+                   afk_time: a[:afk_time])  # connected seeds join the live roster
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
     admins = attrs.select { |a| a[:admin] }.map { |a| a[:name] }
@@ -1176,15 +1168,13 @@ class FactorioSniffer
   # Clean-quit signal in server mode: called from the C→S PeerDisconnect
   # sync action (the client's final heartbeat — the observed quit path) and
   # from C→S msg 14 (RequestForHeartbeatWhenDisconnecting, kept as a
-  # documented fallback). Resolve the player by src_ip — @conn_ip_name for
-  # index-confirmed players, @conn_names for players who quit while still
-  # downloading the map (never bound to an index) — and mark them offline.
-  # Note: crashes and timeouts send neither — those leave stale @online
-  # entries until a reload/restart (server mode has no S→C analysis).
+  # Resolve a leaver by src_ip and mark them offline. Called for clean
+  # quits only — crashes/timeouts send nothing and are caught by the
+  # heartbeat watchdog instead.
   def handle_client_disconnect(src_ip, ts)
-    name = @conn_ip_name.delete(src_ip) || @conn_names&.delete(src_ip)
+    entry = @ip_names.delete(src_ip)
+    name = entry && entry[0]
     return unless name
-    @online.delete(name)
     @attrs.disconnect(name, @game_tick)
     @agent&.on_player_event(:left, name)
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
@@ -1198,58 +1188,38 @@ class FactorioSniffer
   # Server mode only — client mode sees the server's own detection via the
   # S→C PeerDisconnect broadcast and needs no watchdog.
   def touch_heartbeat(src_ip)
-    name = @conn_names[src_ip] || @conn_ip_name[src_ip]
-    return unless name
-    @online_mutex.synchronize do
-      rec = @online[name]
-      rec[:hb] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if rec
-    end
+    entry = @ip_names[src_ip]
+    @attrs.touch(entry[0]) if entry
   end
 
-  # Explicit liveness stamp — used at the moment a record enters @online,
-  # covering the joins the packet-top src_ip touch can't reach (players
-  # sharing one source IP behind NAT, where only the name/index path is
-  # exact). Pre-confirm players (in @conn_names, not yet in @online) need
-  # no stamp: the watchdog only ever drops confirmed roster members.
-  def touch_heartbeat_name(name)
-    return unless name
-    @online_mutex.synchronize do
-      rec = @online[name]
-      rec[:hb] = Process.clock_gettime(Process::CLOCK_MONOTONIC) if rec
-    end
+  # Liveness by game index (server mode): a C→S heartbeat carrying input
+  # actions names its sender by game index — no IP needed. Stamps EVERY
+  # connected roster record with that index (exactly one in practice),
+  # covering roster-seeded players (never sent msg 4 → no src_ip binding)
+  # and NAT'd clients sharing one source IP. Also learns the src_ip binding
+  # (first claim wins; NAT means it can't be exact) so later keepalive-only
+  # heartbeats keep touching via touch_heartbeat(src_ip).
+  def touch_heartbeat_index(game_index, src_ip)
+    names = @attrs.touch_by_index(game_index)
+    return if names.empty? || @ip_names.key?(src_ip)
+    @ip_names[src_ip] = [names.first, true]  # index-bound ⇒ confirmed
   end
 
   # Watchdog tick: drop players whose heartbeats stopped (crashes/power
   # loss send nothing — clean quits announce via PeerDisconnect instead).
-  # Scans every second, then re-verifies each candidate under the lock so
+  # Scans every second, then re-verifies each candidate under attrs' lock so
   # a packet that arrived since the scan can't get a live player dropped.
   # Fires on_player_event(:timeout) — the console line makes the LLM aware
-  # — and mirrors attrs.disconnect. Client mode needs NO watchdog: the server
-  # detects the drop itself and broadcasts PeerDisconnect (S→C), which the
-  # normal leave path handles.
+  # — and folds the session via attrs.disconnect. Client mode needs NO
+  # watchdog: the server detects the drop itself and broadcasts
+  # PeerDisconnect (S→C), which the normal leave path handles.
   def check_heartbeat_timeouts
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    stale = []
-    @online_mutex.synchronize do
-      @online.each do |name, rec|
-        t = rec[:hb]
-        stale << [name, now - t] if t && now - t > HEARTBEAT_TIMEOUT
-      end
-    end
-    stale.each { |name, idle| timeout_player(name, idle, now) }
+    @attrs.stale_online(HEARTBEAT_TIMEOUT).each { |name, idle| timeout_player(name, idle) }
   end
 
-  def timeout_player(name, idle, now)
-    removed = false
-    @online_mutex.synchronize do
-      rec = @online[name]
-      last = rec && rec[:hb]
-      if last && now - last > HEARTBEAT_TIMEOUT   # refreshed since the scan → still alive
-        @online.delete(name)
-        removed = true
-      end
-    end
-    return unless removed
+  def timeout_player(name, idle)
+    # Refreshed since the scan → still alive.
+    return unless @attrs.still_stale?(name, HEARTBEAT_TIMEOUT)
     @attrs.disconnect(name, @game_tick)
     @agent&.on_player_event(:timeout, name)
     ts_str = Time.now.strftime('%H:%M:%S.%L')
@@ -1260,7 +1230,7 @@ class FactorioSniffer
   # SERVER mode; stored in state so a hot reload (threads keep running
   # across `load`) doesn't spawn a duplicate. The thread calls this object's
   # method, which after a reload resolves to the NEW class definition while
-  # operating on the SAME shared state hashes (@online etc.).
+  # operating on the SAME shared state objects (@attrs records etc.).
   def ensure_timeout_watchdog
     return unless @options[:server] && @options[:interface] && !@options[:pcap]
     return if @timeout_watchdog&.alive?

@@ -70,9 +70,12 @@ either on a client or on the game server host (server mode, with RCON).
   path but has never been observed in captures. Crashes/timeouts send
   neither — they are caught by the heartbeat watchdog instead: a
   server-mode thread tracks each player's last C→S heartbeat in their
-  @online record (@online = name → {index, hb}, one hash/one lock — hb
-  stamped on EVERY incoming packet from the player's IP and at every
-  roster/join/bind) and drops players silent for HEARTBEAT_TIMEOUT
+  PlayerAttrs record (:hb on the name-keyed attrs record — one hash, one
+  lock; hb stamped on EVERY incoming packet from the player's IP and at
+  every roster/join/bind, plus by index for any heartbeat carrying real
+  input actions — the sender's game index names it directly, which
+  reaches roster-seeded and NAT'd players whose IP was never learned)
+  and drops players silent for HEARTBEAT_TIMEOUT
   (30s, deliberately high — a false positive forces a rejoin, a false
   negative just registers late). Fires
   on_player_event(:timeout) → console line so the LLM sees the roster

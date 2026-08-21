@@ -31,60 +31,89 @@
 #
 # Keyed by player NAME (unique in Factorio); game indexes are bound from
 # C→S heartbeats / the roster.
+#
+# This is ALSO the single live-roster structure: "online" == record with
+# :connected. Each record carries :hb (monotonic ts of the last C→S
+# heartbeat proof) which drives the server-mode timeout watchdog. One hash,
+# one lock — status, index and liveness are always updated together
+# atomically (one structure per player — no parallel copies to drift).
 class PlayerAttrs
   def initialize
     @players = {}  # name -> {index:, connected:, admin:, base_ticks:,
-                   #         session_start:, afk_seed:, afk_anchor:, last_action:}
+                   #         session_start:, afk_seed:, afk_anchor:, last_action:,
+                   #         hb:}
+    @mutex = Mutex.new
   end
 
   # Seed from an RCON player_attributes query result (one hash per player:
   # {index:, name:, connected:, admin:, online_time:, afk_time:}).
+  # Connected seeds are the authoritative live-roster entry at startup;
+  # they get an immediate liveness stamp so the watchdog can't drop them
+  # before proof of life arrives.
   def seed(name, index:, connected:, admin:, online_time:, afk_time: 0)
-    p = (@players[name] ||= {})
-    p[:index] ||= index
-    p[:connected] = connected
-    p[:admin] = admin
-    p[:base_ticks] = online_time.to_i
-    p[:afk_seed] = afk_time.to_i
-    p[:afk_anchor] = nil  # anchored at the first observed game tick
-    p[:last_action] = nil # first real action resets afk to 0
-    # Connected players are anchored at the first observed game tick;
-    # offline players have no live session at all.
-    p[:session_start] = nil
-    p
-  end
-
-  # NewPeerInfo — player joined. Session start = current game tick. If the
-  # player was seeded as connected but not yet anchored, anchor here.
-  def connect(name, tick)
-    p = (@players[name] ||= {})
-    if p[:connected] && p[:session_start]
-      p  # already tracked live — don't restart the session (double-count)
-    else
-      p[:connected] = true
-      p[:session_start] ||= tick
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = (@players[name] ||= {})
+      p[:index] ||= index
+      p[:connected] = connected
+      p[:admin] = admin
+      p[:base_ticks] = online_time.to_i
+      p[:afk_seed] = afk_time.to_i
+      p[:afk_anchor] = nil  # anchored at the first observed game tick
+      p[:last_action] = nil # first real action resets afk to 0
+      # Connected players are anchored at the first observed game tick;
+      # offline players have no live session at all.
+      p[:session_start] = nil
+      p[:hb] = now if connected && !p[:hb]
       p
     end
   end
 
-  # PeerDisconnect — fold the live session into base_ticks and go offline.
-  def disconnect(name, tick)
-    p = @players[name]
-    return unless p
-    if p[:connected] && p[:session_start]
-      p[:base_ticks] += [tick - p[:session_start], 0].max
+  # NewPeerInfo — player joined. Session start = current game tick; the
+  # join itself is liveness proof. If the player was seeded as connected but
+  # not yet anchored, anchor here.
+  def connect(name, tick)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = (@players[name] ||= {})
+      if p[:connected] && p[:session_start]
+        p  # already tracked live — don't restart the session (double-count)
+      else
+        p[:connected] = true
+        p[:session_start] ||= tick
+        p[:hb] = now
+        p
+      end
     end
-    p[:connected] = false
-    p[:session_start] = nil
-    p[:last_action] = nil
-    p
   end
 
-  # Bind a game index (C→S heartbeat confirmation / roster).
+  # PeerDisconnect — fold the live session into base_ticks and go offline
+  # (removes the player from the live roster; hb goes irrelevant).
+  def disconnect(name, tick)
+    @mutex.synchronize do
+      p = @players[name]
+      next nil unless p
+      if p[:connected] && p[:session_start]
+        p[:base_ticks] += [tick - p[:session_start], 0].max
+      end
+      p[:connected] = false
+      p[:session_start] = nil
+      p[:last_action] = nil
+      p[:hb] = nil
+      p
+    end
+  end
+
+  # Bind a game index (C→S heartbeat confirmation / roster). The confirming
+  # heartbeat is itself liveness proof.
   def set_index(name, index)
-    p = (@players[name] ||= {})
-    p[:index] = index
-    p
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = (@players[name] ||= {})
+      p[:index] = index
+      p[:hb] = now if p[:connected]
+      p
+    end
   end
 
   # A real input action from the player resets afk_time to 0. Called with
@@ -148,5 +177,79 @@ class PlayerAttrs
         afk_time_ticks: afk_time_ticks(name, current_tick),
       }
     end.sort_by { |p| p[:name] }
+  end
+
+  # ── Live roster / liveness (drives the server-mode timeout watchdog) ──
+
+  # Liveness stamp by name — ANY incoming C→S packet from the player proves
+  # they're connected. Only stamps CONNECTED records: a stale packet from a
+  # past session must not resurrect anyone.
+  def touch(name)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = @players[name]
+      p[:hb] = now if p && p[:connected]
+    end
+  end
+
+  # Liveness stamp by game index — a C→S heartbeat carrying input actions
+  # names its sender by index, no IP needed. Reaches players whose src_ip
+  # was never learned (roster-seeded at startup, NAT'd clients sharing one
+  # IP). Returns the names stamped (normally exactly one).
+  def touch_by_index(game_index)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    names = []
+    @mutex.synchronize do
+      @players.each do |n, p|
+        next unless p[:connected] && p[:index] == game_index
+        p[:hb] = now
+        names << n
+      end
+    end
+    names
+  end
+
+  # Watchdog scan: connected players whose last liveness proof is older
+  # than +timeout+ seconds → [[name, idle_seconds], …].
+  def stale_online(timeout)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    stale = []
+    @mutex.synchronize do
+      @players.each do |name, p|
+        next unless p[:connected] && p[:hb]
+        idle = now - p[:hb]
+        stale << [name, idle] if idle > timeout
+      end
+    end
+    stale
+  end
+
+  # Watchdog re-check under the lock: did fresh liveness arrive since the
+  # scan? (A packet that landed between scan and re-check cancels the drop.)
+  def still_stale?(name, timeout)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = @players[name]
+      p && p[:connected] && p[:hb] && (now - p[:hb]) > timeout
+    end
+  end
+
+  # Names of players currently in-game. Sorted for stable output.
+  def online_names
+    @mutex.synchronize { @players.select { |_, p| p[:connected] }.keys.sort }
+  end
+
+  # RCON roster seed (load_roster): authoritative live-roster entry —
+  # connected + index + fresh hb — WITHOUT touching time accounting
+  # (session/afk anchoring is player_attributes' job).
+  def roster_online(name, index)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @mutex.synchronize do
+      p = (@players[name] ||= {})
+      p[:connected] = true
+      p[:index] ||= index
+      p[:hb] ||= now
+      p
+    end
   end
 end

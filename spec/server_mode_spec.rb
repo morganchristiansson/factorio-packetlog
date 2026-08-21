@@ -204,10 +204,19 @@ puts "\nTest 6: dedicated server detection"
 require_relative '../lib/server_detect'
 
 # dedicated: rcon flags (what our vanilla server uses)
+# Live-process checks need an ACTUAL factorio binary running (pgrep -x);
+# the /proc cmdline scan in ServerDetect matches any process mentioning
+# "factorio" (test harnesses do), so gate on pgrep to stay skippable
+# off-host.
+has_factorio = system('pgrep -x factorio > /dev/null 2>&1')
 info = ServerDetect.detect
-check(info[:dedicated] == true, "current process detected as dedicated (flags: #{info[:dedicated_flags].inspect})")
-check((info[:dedicated_flags] & %w[--rcon-bind --rcon-password --server-settings]).size >= 2,
-      'rcon/start-server flags are the giveaway')
+if !has_factorio
+  puts '  SKIP: no factorio process on this host — live-process detection skipped'
+else
+  check(info[:dedicated] == true, "current process detected as dedicated (flags: #{info[:dedicated_flags].inspect})")
+  check((info[:dedicated_flags] & %w[--rcon-bind --rcon-password --server-settings]).size >= 2,
+        'rcon/start-server flags are the giveaway')
+end
 
 # dedicated via --start-server alone
 check(ServerDetect.matching_flags('bin/x64/factorio --start-server mysave.zip', ServerDetect::DEDICATED_ONLY_FLAGS) == ['--start-server'],
@@ -233,7 +242,7 @@ check(ServerDetect.serving?({ dedicated: true, hosting_flags: [], pid: 1 }), 'de
 check(ServerDetect.serving?({ dedicated: false, hosting_flags: ['--map-settings'], pid: 1 }), 'hosting flags ⇒ serving')
 check(!ServerDetect.serving?({}), 'empty info ⇒ not serving')
 real = ServerDetect.detect
-check(ServerDetect.serving?(real), 'live process is serving (auto-server would engage)')
+check(ServerDetect.serving?(real), 'live process is serving (auto-server would engage)') if has_factorio
 
 # capture_iface: with a single non-loopback interface there's nothing to choose
 non_lo = Socket.getifaddrs.select { |a| a.addr&.ipv4? && a.name != 'lo' }.map(&:name).uniq
@@ -572,9 +581,9 @@ puts "\nHeartbeat watchdog"
 # The timeout is server-mode only: client mode gets the server's S→C
 # PeerDisconnect broadcast for crashes. In server mode a player whose
 # heartbeats stop (crash / power / network loss — nothing is sent) must be
-# removed from @online after HEARTBEAT_TIMEOUT and reported to the agent
-# console queue, instead of lingering undefinedly (prevents the stale-roster
-# forever problem).
+# removed from the live roster (attrs connected records) after
+# HEARTBEAT_TIMEOUT and reported to the agent console queue, instead of
+# lingering undefinedly (prevents the stale-roster forever problem).
 st_wd = spec_state_with_capture
 wd_events = []
 # NOTE: no :interface in opts → ensure_timeout_watchdog must NOT start a
@@ -589,9 +598,12 @@ s_wd.instance_variable_set(:@show_players, [])
 s_wd.instance_variable_set(:@debug, false)
 s_wd.instance_variable_set(:@attrs, PlayerAttrs.new)
 now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-wd_online = s_wd.instance_variable_get(:@online)
-wd_online['alive'] = { index: 1, hb: now - 1 }        # heartbeat a second ago → fine
-wd_online['stale'] = { index: 2, hb: now - (30 + 5) } # silent for 35s → timeout
+wd_attrs = s_wd.instance_variable_get(:@attrs)
+wd_attrs.roster_online('alive', 1)
+wd_attrs.roster_online('stale', 2)
+wd_players = wd_attrs.instance_variable_get(:@players)   # internals: age hb directly
+wd_players['alive'][:hb] = now - 1         # heartbeat a second ago → fine
+wd_players['stale'][:hb] = now - (30 + 5)  # silent for 35s → timeout
 wd_out = StringIO.new
 old_stdout = $stdout
 $stdout = wd_out
@@ -600,34 +612,27 @@ begin
 ensure
   $stdout = old_stdout
 end
-check(!wd_online.key?('stale'), 'stale player removed from @online')
-check(wd_online.key?('alive'), 'recently-heartbeat player kept')
+check(!wd_attrs.online_names.include?('stale'), 'stale player removed from the live roster')
+check(wd_attrs.online_names.include?('alive'), 'recently-heartbeat player kept')
 check(wd_events.include?([:timeout, 'stale']), 'agent got on_player_event(:timeout)')
 check(!wd_events.include?([:timeout, 'alive']), 'alive player did not fire timeout')
 check(wd_out.string.include?('stale timed out (no heartbeat'), 'console prints the timeout line')
 
 # a heartbeat arriving before the scan must cancel the drop (touch refreshed
 # the timestamp → below the threshold at scan time)
-wd_online['half'] = { index: 3, hb: now - (30 + 2) }
-s_wd.send(:touch_heartbeat_name, 'half')   # fresh proof of life
+wd_attrs.roster_online('half', 3)
+wd_players['half'][:hb] = now - (30 + 2)
+s_wd.send(:touch_heartbeat_index, 3, '10.0.0.55')   # fresh proof of life by index
 s_wd.send(:check_heartbeat_timeouts)
-check(wd_online.key?('half'), 'refreshed heartbeat cancels the timeout')
+check(wd_attrs.online_names.include?('half'), 'refreshed heartbeat cancels the timeout')
 
 # touch_heartbeat stamps by src_ip resolution too (the packet-top path)
-s_wd.instance_variable_set(:@conn_ip_name, { '10.0.0.77' => 'ripe' })
-wd_online['ripe'] = { index: 4, hb: now - (30 + 4) }
+s_wd.instance_variable_get(:@ip_names)['10.0.0.77'] = ['ripe', true]
+wd_attrs.roster_online('ripe', 4)
+wd_players['ripe'][:hb] = now - (30 + 4)
 s_wd.send(:touch_heartbeat, '10.0.0.77')
 s_wd.send(:check_heartbeat_timeouts)
-check(wd_online.key?('ripe'), 'src_ip touch keeps the player alive')
-
-# legacy state shape (plain Integer instead of a record) is normalized at
-# construction — the watchdog must not crash on it
-st_legacy = spec_state_with_capture
-st_legacy.online = { 'oldshape' => 7 }
-s_legacy = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st_legacy)
-legacy_rec = s_legacy.instance_variable_get(:@online)['oldshape']
-check(legacy_rec.is_a?(Hash) && legacy_rec[:index] == 7 && legacy_rec[:hb],
-      'legacy Integer @online value normalized to a record at init')
+check(wd_attrs.online_names.include?('ripe'), 'src_ip touch keeps the player alive')
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

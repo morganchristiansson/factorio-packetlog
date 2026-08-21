@@ -55,8 +55,8 @@ Behavior:
   Clean leaves are seen via the C→S `PeerDisconnect` synchronizer action
   in the client's final heartbeat (the S→C broadcast form with a peer_id
   is never seen — no S→C analysis). Crashes/timeouts send nothing and
-  linger in @online until reload; poll RCON `/players` for authoritative
-  roster changes.
+  linger in the live roster until reload/restart; poll RCON `/players`
+  for authoritative roster changes.
 
 ### Auto-enable rule
 

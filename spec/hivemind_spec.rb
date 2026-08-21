@@ -2,10 +2,10 @@
 # frozen_string_literal: true
 
 # Tests for the Hivemind AI agent (chat history, tools, context).
-# Run: ruby -Ilib spec/ai_agent_spec.rb
+# Run: ruby -Ilib spec/hivemind_spec.rb
 
 require 'minitest/autorun'
-require 'ai_agent'
+require 'hivemind'
 
 class FakeRcon
   attr_reader :sent
@@ -61,8 +61,8 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal 'msg 5', history.first[1]  # oldest 5 dropped
   end
 
-  def test_hivemind_say_tool_appends_reply
-    tool = HivemindSay.new(rcon: FakeRcon.new,
+  def test_reply_tool_appends_history
+    tool = HivemindReply.new(rcon: FakeRcon.new,
                            on_sent: ->(t) { @agent.send(:append_history, 'hivemind', t) })
     tool.call('text' => 'bus is at 1k spm')
     assert_equal ['hivemind', 'bus is at 1k spm'], @agent.instance_variable_get(:@console_queue).last
@@ -109,7 +109,7 @@ class TestHiveMindAgent < Minitest::Test
   end
 
   def test_register_tools_wires_on_sent_callback
-    tool = @agent.instance_variable_get(:@chat).tools[:hivemind_say]
+    tool = @agent.instance_variable_get(:@chat).tools[:reply]
     assert_kind_of Proc, tool.instance_variable_get(:@on_sent)
   end
 
@@ -689,10 +689,10 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal 1, asks2, 'same-player spam still collapses to one ask'
   end
 
-  def test_trigger_label_includes_extras
-    assert_includes @agent.trigger_label, 'hivemind'
-    assert_includes @agent.trigger_label, 'good bot'
-    assert_includes @agent.trigger_label, 'hm'
+  def test_triggers_constant_lists_all_phrases
+    %w[hivemind good\ bot goodbot hm].each do |t|
+      assert_includes HiveMindAgent::TRIGGERS, t
+    end
   end
 
   # ── Word-boundary trigger: "hm" ────────────────────────────────
@@ -990,7 +990,7 @@ class TestHiveMindAgent < Minitest::Test
       assert_equal pre_size, chat.messages.size
       # and write_memories is gone from the live toolset
       refute_includes chat.tools.keys, :write_memories
-      assert chat.tools.key?(:hivemind_say)
+      assert chat.tools.key?(:reply)
       assert chat.tools.key?(:rcon_query)
     end
   end

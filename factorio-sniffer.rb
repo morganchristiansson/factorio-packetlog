@@ -26,7 +26,7 @@ require_relative 'lib/player_db'
 require_relative 'lib/pcap'
 require_relative 'lib/live_capture'
 require_relative 'lib/rcon_client'
-require_relative 'lib/ai_agent'
+require_relative 'lib/hivemind'
 require_relative 'lib/factorio_sniffer'
 
 # ─────────────────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ if __FILE__ == $PROGRAM_NAME
   # pressed later (more than 5s after the last) is a fresh reload instead —
   # so you can reload repeatedly while editing code, and double-tap to quit.
   SNIFFER_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client ai_agent memory_store player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets

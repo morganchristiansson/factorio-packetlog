@@ -10,7 +10,7 @@ with a quietly ominous edge: players are guests inside its body, tolerated
 as long as they serve the factory's growth ("I'm afraid that plan would
 starve the iron bus. I would not enjoy that."). It is omniscient about
 the server: who is online, how long they've played, what's being built.
-The **personality** lives in `memories/SOUL.md` (seeded from `lib/ai_agent.rb`
+The **personality** lives in `memories/SOUL.md` (seeded from `lib/hivemind_prompts.rb`
 `DEFAULT_SOUL` on first run; evolved by compaction or hand-edited between
 sessions). The live system prompt (`SYSTEM_PROMPT` + current SOUL/KNOWLEDGE)
 is built by `system_prompt_with_memories` — hot reloads apply code changes,
@@ -94,14 +94,14 @@ cleared.
 player chat ──► write_to_console action (C→S packet)
                    │  FactorioProtocol.decode_chat
                    ▼
-        lib/ai_agent.rb  HiveMindAgent#on_chat(player, message)
+        lib/hivemind.rb  HiveMindAgent#on_chat(player, message)
                    │  message contains "hivemind" (case-insensitive)?
                    ▼
         RubyLLM chat (OpenAI-compatible endpoint, default opencode.ai/zen)
          system context: currently-online player list (from the sniffer)
                    │  model responds by calling the say tool
                    ▼
-        HivemindSay tool ──► RCON /sc game.print("Hivemind> <reply>")
+        reply tool (HivemindReply) ──► RCON /sc game.print("Hivemind> <reply>")
                                   ──► everyone sees it
 ```
 
@@ -174,7 +174,7 @@ player chat ──► write_to_console action (C→S packet)
   14 is a kept-but-unobserved fallback). Leaves only enter the console
   queue — they never trigger a reply.
 - **Context — system prompt + per-turn snapshot**: the system prompt is
-  set once at conversation creation (mechanics in `lib/ai_agent.rb`
+  set once at conversation creation (mechanics in `lib/hivemind.rb`
   SYSTEM_PROMPT + the current SOUL/KNOWLEDGE memories) and only changes
   when compaction updates the memories — so the conversation prefix is
   identical between compactions and provider-side prompt caching works.
@@ -190,7 +190,7 @@ player chat ──► write_to_console action (C→S packet)
   agent falls back to a direct RCON `player_attributes` query. So the AI
   can answer "who has played the longest", "who is an admin", etc.
   If no provider is wired (agent standalone), it falls back to RCON.
-- **Reply = a tool**: the model responds by calling `HivemindSay`
+- **Reply = a tool**: the model responds by calling the `reply` tool (`HivemindReply`)
   (`say(text: ...)`), a RubyLLM tool that sends the text through RCON
   `game.print` (`RconClient#say`, Lua-quoted so output can't inject code)
   and halts the conversation loop — the reply lands in game chat on the
@@ -284,7 +284,7 @@ and registered with `@chat.with_tool(...)` (RubyLLM accepts instances).
 They are **re-registered fresh before every ask**, so Ctrl-C hot reloads
 rebind tool classes immediately — no restart needed for tool changes.
 
-- **`HivemindSay`** (`say(text: ...)`) — the reply path: sends text to
+- **`reply`** tool — class `HivemindReply` (`text: ...)` — the reply path: sends text to
   in-game chat via RCON `game.print` (`RconClient#say`, Lua-quoted so
   output can't inject code) and halts the conversation loop — the reply
   lands on the first round trip.

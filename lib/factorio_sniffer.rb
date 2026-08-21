@@ -7,7 +7,7 @@ require_relative 'player_db'
 require_relative 'pcap'
 require_relative 'live_capture'
 require_relative 'rcon_client'
-require_relative 'ai_agent'
+require_relative 'hivemind'
 require_relative 'player_attrs'
 
 # Mutable session state carried across hot reloads. The entry point keeps
@@ -189,7 +189,7 @@ class FactorioSniffer
           @agent.online_provider = -> { online_players }
           @agent.player_stats_provider = -> { player_stats }
           unless @agent.disabled?
-            puts "[hivemind] AI agent online — answering chat for \"#{@agent.trigger_label}\" (model #{@agent.model})"
+            puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{HiveMindAgent::DEFAULT_MODEL})"
           end
         else
           warn '[hivemind] AI agent auto-enabled (server mode + HIVE_API_KEY) but RCON is unavailable (--no-rcon?); agent disabled'

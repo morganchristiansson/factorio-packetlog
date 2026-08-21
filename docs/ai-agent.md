@@ -265,17 +265,7 @@ follow-up scheduler — a plain sleep-on-condition-variable thread with no
 shared state beyond the pending list, which keeps running across reloads
 (methods resolve against the reloaded classes) and needs no cleanup.
 
-Reload keeps the agent OBJECT, not its construction — `initialize` never
-re-runs, so code that added new instance state (e.g. the follow-up
-scheduler) must bring a stale object up to date. That is handled at the
-sniffer's single reconstruction seam: right where it re-points the
-providers it calls `@agent.rehydrate_state!` (version-gated by
-`STATE_VERSION`, fills in whatever an older-build object lacks, logs once,
-then becomes a permanent no-op) and `@agent.ensure_followup_scheduler`.
-It's deliberately ONE hook, not per-method guards; and if a future state
-change can't be expressed as a `||=` fill-in, `rehydrate_state!` logs
-"restart required" rather than piling on plumbing — a full restart is the
-correct fallback.
+On hot reload the sniffer re-points the agent's providers and calls `@agent.ensure_followup_scheduler`. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars. Changes that add/remove instance state need a full restart; method/tool/prompt changes hot-reload fine.
 
 ## Tools
 

@@ -59,15 +59,6 @@ class HiveMindAgent
   RESEED_LINES = 10             # console lines kept in @recent_console (for memory compaction)
   GREET_ON_JOIN = true          # welcome joining players (LLM greeting)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
-  # Version of the agent's RUNTIME instance state (its ivars). BUMP this
-  # whenever initialize's ivar layout changes (adds/removes state). A hot
-  # reload (Ctrl-C `load`) keeps the SAME agent object (SnifferState.ai_agent)
-  # — initialize never re-runs — so an object built by older code lacks the
-  # new ivars. rehydrate_state! rebuilds whatever is missing; this constant
-  # is how it knows a reload happened. The general fix for "hot reload broke
-  # the agent's new state", not a per-ivar workaround.
-  STATE_VERSION = 5
-
   # Callable returning the names of players currently online (the sniffer
   # sets this to its packet-derived list each construction — see
   # FactorioSniffer#online_players). Falls back to an RCON roster query.
@@ -223,7 +214,6 @@ class HiveMindAgent
 
     hook_chat_observers if @chat
     load_session if @session_path && !@disabled
-    @state_version = STATE_VERSION  # marks this object as built by current code
     start_scheduler unless @disabled
   end
 
@@ -395,45 +385,6 @@ class HiveMindAgent
         log_error('greeting error', e)
       end
     end
-  end
-
-  # ── Runtime state rehydration (the ONE hot-reload seam) ────────
-
-  # Rebuild any runtime ivars a hot-reloaded object (built by OLDER code)
-  # is missing, plus run per-version migrations. Called from exactly ONE
-  # place — the sniffer's reconstruction point, right next to where it
-  # re-points the providers after every Ctrl-C `load`. initialize already
-  # built everything on a fresh object (and set @state_version), so this
-  # is a silent no-op there; on a stale object it fills in the missing
-  # parts, logs once, and records the version — thereafter it is a no-op
-  # forever.
-  #
-  # Contract with the dev workflow: hot reload keeps the tool CLASSES
-  # live (register_tools recreates them fresh per ask — no restart for
-  # tool changes), but if a change adds/removes INSTANCE state, bump
-  # STATE_VERSION and express the migration here. If a state change ever
-  # can't be written as a `||=` fill-in (e.g. needs a destroyed-and-remade
-  # resource), log "restart required" here and return nil/raise instead of
-  # guessing — a full restart is the correct fallback, not more plumbing.
-  def rehydrate_state!
-    return if @state_version && @state_version >= STATE_VERSION
-
-    @mutex ||= Mutex.new
-    @console_mutex ||= Mutex.new
-    @last_ask_at ||= {}         # per-player rate limit timestamps
-    @last_greet ||= 0.0
-    @memories_sent ||= Set.new
-    @console_queue ||= []
-    @recent_console ||= []
-    @followups ||= []
-    @followup_mutex ||= Mutex.new
-    @followup_cond ||= ConditionVariable.new
-    @followup_seq ||= 0
-    # (future STATE_VERSION-specific migrations go here, keyed on
-    #  @state_version)
-    @state_version = STATE_VERSION
-    log "agent runtime state rehydrated to v#{STATE_VERSION} " \
-        '(hot-reloaded object built by older code — no restart needed)'
   end
 
   private

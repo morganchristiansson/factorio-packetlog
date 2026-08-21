@@ -63,9 +63,8 @@ module HiveMindFollowUps
   end
 
   # Start the follow-up scheduler thread unless one is already running.
-  # Called at the same single seam, after rehydrate_state! (a stale object
-  # built before the feature exists has no thread yet); also revives a
-  # thread that died. Safe to call repeatedly.
+  # Called at the sniffer's reconstruction seam after every reload; also
+  # revives a thread that died. Safe to call repeatedly.
   def ensure_followup_scheduler
     return if @disabled
     start_scheduler if @scheduler.nil? || !@scheduler.alive?

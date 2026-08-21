@@ -175,11 +175,10 @@ class FactorioSniffer
       @agent = @state.ai_agent
       # Re-point the agent's online-player source at THIS sniffer instance —
       # needed on every construction (fresh or hot-reloaded) since the agent
-      # persists while the sniffer object is rebuilt. Rehydrate its runtime
-      # state too: a hot-reloaded agent object was built by code that may
-      # predate the current ivar layout (initialize never re-runs on reload),
-      # and rehydrate_state! fills in whatever is missing (no-op when current).
-      @agent.rehydrate_state! if @agent
+      # persists while the sniffer object is rebuilt.
+      # NOTE: hot reload swaps CODE, not object shape — the agent keeps its
+      # boot-time ivars. Changes that add/remove instance state need a full
+      # restart; method/tool/prompt changes hot-reload fine.
       @agent.ensure_followup_scheduler if @agent
       @agent.online_provider = -> { online_players } if @agent
       @agent.player_stats_provider = -> { player_stats } if @agent

@@ -236,33 +236,21 @@ class TestHiveMindAgent < Minitest::Test
     assert_empty @agent.instance_variable_get(:@followups)
   end
 
-  # Regression: hot reload (Ctrl-C `load`) keeps the agent OBJECT but not
-  # its construction — an agent created by an OLDER build has no follow-up
-  # ivars and no scheduler thread. The sniffer's single reconstruction
-  # seam (rehydrate_state! + ensure_followup_scheduler, right where it
-  # re-points the providers) fills those in; the reloaded methods must not
-  # crash on the object afterwards.
-  def test_hot_reloaded_old_build_agent_survives_followup_code
+  # The follow-up scheduler thread must survive hot reloads: the agent
+  # object persists while code is reloaded, but a thread that died (or was
+  # never started) is revived at the sniffer's reconstruction seam via
+  # ensure_followup_scheduler.
+  def test_hot_reloaded_agent_gets_scheduler_revived_at_seam
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    # Simulate an object built by OLDER code: no follow-up state, no
-    # scheduler thread (old code never started one), and a stale
-    # @state_version. Kill the scheduler this NEW build started so the
-    # simulation is faithful and nothing leaks into other tests.
     agent.instance_variable_get(:@scheduler)&.kill
     agent.instance_variable_get(:@scheduler)&.join(0.1)
-    %i[@followups @followup_mutex @followup_cond @followup_seq @scheduler].each do |ivar|
-      agent.remove_instance_variable(ivar) if agent.instance_variable_defined?(ivar)
-    end
-    agent.instance_variable_set(:@state_version, nil)
-    class << agent
-      def complete(_p) = '' # never hit the network
-    end
 
-    # The single seam the sniffer runs on every reconstruction:
-    agent.rehydrate_state!
     agent.ensure_followup_scheduler
     assert agent.instance_variable_get(:@scheduler)&.alive?, 'scheduler started at the seam'
 
+    class << agent
+      def complete(_p) = '' # never hit the network
+    end
     result = agent.schedule_followup(delay_seconds: 30, task: 'post-reload check')
     assert_match(/scheduled/, result)
     assert_equal 'post-reload check', agent.instance_variable_get(:@followups).first[:task]

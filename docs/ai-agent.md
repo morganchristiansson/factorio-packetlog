@@ -221,8 +221,11 @@ HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-
 The key is read from the `HIVE_API_KEY` environment variable **only** —
 deliberately no CLI flag and no `OPENAI_API_KEY` fallback, so an ambient
 key elsewhere on the box can't silently turn the agent on (or off). The
-endpoint, model, and provider are hardcoded (`openai` provider, the
-`https://opencode.ai/zen/go/v1` base, `deepseek-v4-flash`).
+provider is fixed (`openai` — any OpenAI-compatible endpoint works);
+endpoint and model default to `https://opencode.ai/zen/go/v1` /
+`deepseek-v4-flash` and can be overridden per run via `HIVE_API_BASE`
+and `HIVE_MODEL`. The constructor's `api_key:` param is a spec-only
+injection point — production code never passes it.
 
 System prompt role: RubyLLM sends the system prompt as role `developer`
 by default (OpenAI's newer convention). Some endpoints/models (e.g.

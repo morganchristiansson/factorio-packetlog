@@ -34,7 +34,9 @@ class HiveMindAgent
   include HiveMindPersistence  # session file: load_session / persist!
   include HiveMindCompaction   # long-term memory distillation (/compact)
   include HiveMindFollowUps    # scheduled follow-ups + scheduler thread
-  # OpenAI-compatible endpoint + model (hardcoded — no flags/env overrides).
+  # OpenAI-compatible endpoint + model. Defaults, overridable per run via
+  # HIVE_API_BASE / HIVE_MODEL (same family as HIVE_API_KEY) — e.g. pointing
+  # the agent at a different provider without touching code.
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
   DEFAULT_MODEL    = 'deepseek-v4-flash'
 
@@ -106,11 +108,14 @@ class HiveMindAgent
   end
 
   # rcon: an RconClient (for game.print replies). Chat completions need
-  # an API key: HIVE_API_KEY env (the agent's key — there is deliberately
-  # no --ai-api-key/OPENAI_API_KEY fallback; no key = agent disabled).
-  # session_path: false disables the session file; memory_dir: false
-  # disables long-term memory (default memories/). model / provider /
-  # api_base are HARDCODED to the defaults (no flags, no env overrides).
+  # an API key: HIVE_API_KEY env by default; the api_key PARAM exists as
+  # the specs' injection point ('sk-test') — production never passes it.
+  # Model/endpoint resolve from HIVE_MODEL / HIVE_API_BASE or the class
+  # defaults. session_path: false disables the session file;
+  # memory_dir: false disables long-term memory (default memories/).
+  # Resolved model id (HIVE_MODEL or default) — startup log reads this.
+  attr_reader :model
+
   def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil)
     @rcon = rcon
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
@@ -160,17 +165,19 @@ class HiveMindAgent
     # already sits in the conversation after the first delivery.
     @memories_sent = Set.new
 
-    # ── LLM wiring, inlined. Endpoint/model/provider are HARDCODED constants;
-    #    the only variable input is the API key (param or HIVE_API_KEY env).
+    # ── LLM wiring, inlined. Provider is fixed (:openai — any OpenAI-
+    #    compatible endpoint); model/base/key come from env or defaults.
     #    The rescues cover THIS block only: a missing gem or a provider
     #    rejection disables the agent instead of killing the sniffer, while
     #    any other init bug (memory store, session path) still raises loudly.
     llm_api_key = api_key || ENV['HIVE_API_KEY']
+    @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
+    api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
     begin
       RubyLLM.configure do |config|
-        config.openai_api_base = DEFAULT_API_BASE
+        config.openai_api_base = api_base
         config.openai_api_key = llm_api_key if llm_api_key
-        config.default_model = DEFAULT_MODEL
+        config.default_model = @model
         # Read timeout ceiling for EVERY request (faraday). Raised from 60s
         # because memory compaction sends the WHOLE conversation (hundreds of
         # messages — the input-token-cache reuse is the point) and the model
@@ -196,7 +203,7 @@ class HiveMindAgent
         # RubyLLM's registry, so resolve with assume_model_exists: true and an
         # explicit provider. Fail loudly here (startup) rather than at ask time.
         @chat = RubyLLM.chat(
-          model: DEFAULT_MODEL,
+          model: @model,
           provider: :openai,
           assume_model_exists: true
         )

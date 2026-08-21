@@ -147,8 +147,8 @@ Keep the CLI/env surface from growing. Rules for adding any flag or env
 var (applies to new AND existing knobs):
 
 1. **Hardcode first.** Add a knob only when you can name a concrete run
-   that sets it to a non-default value. (`memories/`, the LLM model, the
-   endpoint, and the provider are hardcoded — no knobs.)
+   that sets it to a non-default value. (`memories/` and the provider are
+   hardcoded — no knobs.)
 2. **One source per setting.** Never expose both a flag and an env var
    for the same thing.
 3. **Secrets are env-only** — never a CLI flag (shell history / `ps` /
@@ -165,8 +165,8 @@ Current AI config surface:
 |------|--------|------|
 | agent on/off | implicit (server mode + `HIVE_API_KEY`) | — |
 | api key | `HIVE_API_KEY` | env (secret) |
-| model | `DEFAULT_MODEL` | hardcoded |
-| endpoint | `DEFAULT_API_BASE` | hardcoded |
+| model | `HIVE_MODEL` or `DEFAULT_MODEL` | env |
+| endpoint | `HIVE_API_BASE` or `DEFAULT_API_BASE` | env |
 | provider | `:openai` | hardcoded |
 
 ## Usage
@@ -178,8 +178,9 @@ sudo ruby factorio-sniffer.rb
 # With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
 # agent auto-enables in server mode (no flag, no extra args):
 HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
-# (Capture is always on; --keep HOURS bounds disk. No key = no AI;
-# endpoint/model/provider are hardcoded — no configurables.)
+# (Capture is always on; --keep HOURS bounds disk. No key = no AI.
+# Provider is fixed (:openai); model/endpoint overridable via
+# HIVE_MODEL / HIVE_API_BASE.)
 
 # Pcap from a 2.0 server (action tables differ from 2.1):
 ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0

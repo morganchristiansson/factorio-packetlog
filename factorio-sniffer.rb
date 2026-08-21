@@ -103,10 +103,10 @@ if __FILE__ == $PROGRAM_NAME
     end
   end
 
-  # Implicit Hivemind agent (see above): server mode + HIVE_API_KEY.
-  if options[:server] && !options[:pcap] && !(ENV['HIVE_API_KEY'].to_s.empty?)
-    options[:ai_agent] = true
-  end
+  # Implicit Hivemind agent (see above): server mode, live capture.
+  # Without HIVE_API_KEY the agent constructs disabled and says so once;
+  # this is the ONLY key-presence decision outside HiveMindAgent.
+  options[:ai_agent] = true if options[:server] && !options[:pcap]
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring

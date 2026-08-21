@@ -173,32 +173,35 @@ class HiveMindAgent
     llm_api_key = api_key || ENV['HIVE_API_KEY']
     @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
     api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
-    begin
-      RubyLLM.configure do |config|
-        config.openai_api_base = api_base
-        config.openai_api_key = llm_api_key if llm_api_key
-        config.default_model = @model
-        # Read timeout ceiling for EVERY request (faraday). Raised from 60s
-        # because memory compaction sends the WHOLE conversation (hundreds of
-        # messages — the input-token-cache reuse is the point) and the model
-        # can legitimately take 1-2min to answer such a large prompt; 60s
-        # killed it with Net::ReadTimeout (session kept, compaction failed).
-        # Normal chat replies respond in seconds, so 300 only moves the
-        # ceiling, not the latency.
-        config.request_timeout = 300
-        config.max_retries = 1
-        # RubyLLM defaults to sending the system prompt as role `developer`
-        # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
-        # endpoints (e.g. Console Go models) only accept `system` and reject
-        # the request. Use `system` explicitly.
-        config.openai_use_system_role = true
-        config.log_level = Logger::WARN if config.respond_to?(:log_level=)
-      end
 
-      if llm_api_key.nil? || llm_api_key.empty?
-        warn '[hivemind] no API key set (HIVE_API_KEY) — agent disabled'
-        @disabled = true
-      else
+    # THE key-presence decision. Everything downstream (handle, greet_join,
+    # compaction, ...) consults @disabled? — never the key again.
+    if llm_api_key.nil?
+      warn '[hivemind] no API key set (HIVE_API_KEY) — agent disabled'
+      @disabled = true
+    else
+      begin
+        RubyLLM.configure do |config|
+          config.openai_api_base = api_base
+          config.openai_api_key = llm_api_key
+          config.default_model = @model
+          # Read timeout ceiling for EVERY request (faraday). Raised from 60s
+          # because memory compaction sends the WHOLE conversation (hundreds of
+          # messages — the input-token-cache reuse is the point) and the model
+          # can legitimately take 1-2min to answer such a large prompt; 60s
+          # killed it with Net::ReadTimeout (session kept, compaction failed).
+          # Normal chat replies respond in seconds, so 300 only moves the
+          # ceiling, not the latency.
+          config.request_timeout = 300
+          config.max_retries = 1
+          # RubyLLM defaults to sending the system prompt as role `developer`
+          # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
+          # endpoints (e.g. Console Go models) only accept `system` and reject
+          # the request. Use `system` explicitly.
+          config.openai_use_system_role = true
+          config.log_level = Logger::WARN if config.respond_to?(:log_level=)
+        end
+
         # The endpoint's models (gpt-5.6-luna, glm-5.3, ...) are not in
         # RubyLLM's registry, so resolve with assume_model_exists: true and an
         # explicit provider. Fail loudly here (startup) rather than at ask time.
@@ -209,13 +212,13 @@ class HiveMindAgent
         )
         @chat.with_instructions(system_prompt_with_memories)
         register_tools
+      rescue LoadError => e
+        warn "[hivemind] ruby_llm not installed (bundle install) — agent disabled: #{e.message}"
+        @disabled = true
+      rescue StandardError => e
+        log_error('LLM init failed — agent disabled', e)
+        @disabled = true
       end
-    rescue LoadError => e
-      warn "[hivemind] ruby_llm not installed (bundle install) — agent disabled: #{e.message}"
-      @disabled = true
-    rescue StandardError => e
-      log_error('LLM init failed — agent disabled', e)
-      @disabled = true
     end
 
     hook_chat_observers if @chat

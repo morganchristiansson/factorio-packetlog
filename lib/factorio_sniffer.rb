@@ -191,7 +191,7 @@ class FactorioSniffer
             puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
           end
         else
-          warn '[hivemind] AI agent auto-enabled (server mode + HIVE_API_KEY) but RCON is unavailable (--no-rcon?); agent disabled'
+          warn '[hivemind] AI agent auto-enabled (server mode) but RCON is unavailable (--no-rcon?); agent disabled'
         end
       end
     end

@@ -32,9 +32,14 @@ class FactorioSniffer
   # 60 UPS ≈ 33ms), so this is a very conservative ceiling: a false
   # positive is essentially impossible, and a false negative just delays
   # the timeout. Deliberately NO knob — the cadence isn't fully documented
-  # and slightly-high beats slightly-low (a wrongly dropped player must
-  # rejoin the deterministic sim; a late timeout just registers late).
-  HEARTBEAT_TIMEOUT = 30.0
+  # and slightly-high beats slightly-low (a late timeout just registers
+  # late). Raised 30→60 after a verified false positive: a client whose
+  # game link stayed healthy (no server-side drop countdown, still online
+  # per RCON) showed 38–53s gaps in captured traffic (NAT/laggy path); the
+  # old threshold fired mid-gap. Note the watchdog has no resurrection
+  # path — touch() never revives a disconnected record — so a false
+  # positive sticks until rejoin/restart; keep headroom generous.
+  HEARTBEAT_TIMEOUT = 60.0
 
   def initialize(options, state = nil)
     @options = options

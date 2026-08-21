@@ -603,7 +603,7 @@ wd_attrs.roster_online('alive', 1)
 wd_attrs.roster_online('stale', 2)
 wd_players = wd_attrs.instance_variable_get(:@players)   # internals: age hb directly
 wd_players['alive'][:hb] = now - 1         # heartbeat a second ago → fine
-wd_players['stale'][:hb] = now - (30 + 5)  # silent for 35s → timeout
+wd_players['stale'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)  # silent for timeout+5s → timeout
 wd_out = StringIO.new
 old_stdout = $stdout
 $stdout = wd_out
@@ -621,7 +621,7 @@ check(wd_out.string.include?('stale timed out (no heartbeat'), 'console prints t
 # a heartbeat arriving before the scan must cancel the drop (touch refreshed
 # the timestamp → below the threshold at scan time)
 wd_attrs.roster_online('half', 3)
-wd_players['half'][:hb] = now - (30 + 2)
+wd_players['half'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 2)
 s_wd.send(:touch_heartbeat_index, 3, '10.0.0.55')   # fresh proof of life by index
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_attrs.online_names.include?('half'), 'refreshed heartbeat cancels the timeout')
@@ -629,7 +629,7 @@ check(wd_attrs.online_names.include?('half'), 'refreshed heartbeat cancels the t
 # touch_heartbeat stamps by src_ip resolution too (the packet-top path)
 s_wd.instance_variable_get(:@ip_names)['10.0.0.77'] = ['ripe', true]
 wd_attrs.roster_online('ripe', 4)
-wd_players['ripe'][:hb] = now - (30 + 4)
+wd_players['ripe'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 4)
 s_wd.send(:touch_heartbeat, '10.0.0.77')
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_attrs.online_names.include?('ripe'), 'src_ip touch keeps the player alive')

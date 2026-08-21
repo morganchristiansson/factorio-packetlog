@@ -28,9 +28,6 @@ module HiveMindPersistence
     if data['console_queue'].is_a?(Array)
       @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] }
     end
-    if data['recent_console'].is_a?(Array)
-      @recent_console = data['recent_console'].map { |e| [e[0], e[1].to_s] }
-    end
     # Re-arm pending follow-ups their absolute unix deadlines. An entry
     # that came DUE during downtime gets a past-due monotonic time and the
     # scheduler fires it on its first tick (correct: the task was already
@@ -97,7 +94,6 @@ module HiveMindPersistence
   rescue JSON::ParserError, StandardError => e
     log_error('session load failed — starting fresh', e)
     @console_queue = []
-    @recent_console = []
   end
 
   # Tool arguments are stored JSON-encoded (see serialize_messages); parse
@@ -119,7 +115,6 @@ module HiveMindPersistence
     {
       'version' => 1,
       'console_queue' => @console_queue,
-      'recent_console' => @recent_console,
       'followups' => @followup_mutex.synchronize { @followups.map { |f| [f[:id], f[:due_at], f[:task]] } },
       'messages' => (@persisted_messages ||= serialize_messages),
     }

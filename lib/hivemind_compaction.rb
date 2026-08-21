@@ -75,7 +75,7 @@ module HiveMindCompaction
   def compactable?
     return true if @chat && @chat.messages.any? { |m| m.role != :system }
     @console_mutex.synchronize do
-      return true unless @console_queue.empty? && @recent_console.empty?
+      return true unless @console_queue.empty?
     end
     false
   end
@@ -83,7 +83,7 @@ module HiveMindCompaction
   # One-line summary of what the compaction pass is reviewing.
   def session_summary
     n_messages = @chat ? @chat.messages.count { |m| m.role != :system } : 0
-    n_console = @console_mutex.synchronize { @console_queue.size + @recent_console.size }
+    n_console = @console_mutex.synchronize { @console_queue.size }
     "#{n_messages} conversation messages, #{n_console} console lines"
   end
 
@@ -114,7 +114,7 @@ module HiveMindCompaction
     end
     parts << "Pending scheduled follow-ups:\n#{followups.join("\n")}" unless followups.empty?
     console = @console_mutex.synchronize do
-      (@console_queue + @recent_console).uniq.map { |p, m| p ? "#{p}: #{m}" : m }
+      @console_queue.uniq.map { |p, m| p ? "#{p}: #{m}" : m }
     end
     parts << "Console lines:\n#{console.join("\n")}" unless console.empty?
     parts.join("\n\n")
@@ -130,7 +130,7 @@ module HiveMindCompaction
   def players_seen
     players = Set.new
     @console_mutex.synchronize do
-      (@console_queue + @recent_console).each do |p, msg|
+      @console_queue.each do |p, msg|
         if p
           name = clean_text(p)
           players << name unless name.empty?

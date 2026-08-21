@@ -58,7 +58,6 @@ class HiveMindAgent
   # gap; older lines are dropped with a warning if ever exceeded.
   HISTORY_SIZE = 1000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
-  RESEED_LINES = 10             # console lines kept in @recent_console (for memory compaction)
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # Callable returning the names of players currently online (the sniffer
   # sets this to its packet-derived list each construction — see
@@ -96,7 +95,6 @@ class HiveMindAgent
       @memories_sent.clear
       @console_mutex.synchronize do
         @console_queue.clear
-        @recent_console.clear
       end
       # Pending follow-ups belong to the session being wiped — drop them so
       # a stale timer can't inject a turn into the fresh session later.
@@ -135,16 +133,13 @@ class HiveMindAgent
     # Console lines are a QUEUE drained on each prompt: append_history
     # enqueues (chat lines, join/leave events, the agent's own replies via
     # HivemindReply's on_sent / the fallback send_reply); unread_console drains
-    # it, so each line reaches the model EXACTLY once. A ring buffer with a
-    # sent-pointer was buggy: evicting from the front desynchronized the
-    # pointer and silently lost the newest lines (goals written in console
-    # never reached Hivemind). @recent_console keeps the last RESEED_LINES
-    # for memory compaction (compaction_material).
+    # it, so each line reaches the model EXACTLY once. Delivered lines live on
+    # inside the persisted conversation (each prompt embeds them), so no side
+    # copy is kept.
     # Guarded by @console_mutex (separate from @mutex so the packet thread
     # never blocks on a slow LLM call). Survives hot reloads (the agent
     # persists in state).
     @console_queue = []
-    @recent_console = []
     @console_mutex = Mutex.new
     # Session persistence: console history + LLM conversation are saved to
     # disk so a full RESTART (not just Ctrl-C) can resume — packets while
@@ -571,14 +566,12 @@ class HiveMindAgent
   # (join/leave events); chat and replies carry the speaker name. When the
   # queue exceeds HISTORY_SIZE (no hivemind trigger in a long while), the
   # OLDEST unread lines are dropped with a warning — the next prompt stays
-  # bounded. @recent_console keeps the last RESEED_LINES regardless.
+  # bounded.
   def append_history(player, message)
     msg = clean_text(message)
     return if msg.empty?
     @console_mutex.synchronize do
       @console_queue << [player, msg]
-      @recent_console << [player, msg]
-      @recent_console.shift if @recent_console.size > RESEED_LINES
       if @console_queue.size > HISTORY_SIZE
         dropped = @console_queue.shift(@console_queue.size - HISTORY_SIZE)
         if dropped.any?

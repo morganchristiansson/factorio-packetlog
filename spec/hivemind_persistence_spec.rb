@@ -109,7 +109,6 @@ class TestHivemindPersistence < Minitest::Test
       chat = agent.instance_variable_get(:@chat)
       assert_empty chat.messages.reject { |m| m.role == :system }, 'conversation wiped'
       assert_empty agent.instance_variable_get(:@console_queue)
-      assert_empty agent.instance_variable_get(:@recent_console)
       assert_equal 'alice loves belts', store.player('alice'), 'memories kept'
       # persisted session file is wiped too
       assert_empty JSON.parse(File.read(sess))['messages']

@@ -197,7 +197,11 @@ ruby tools/rcon.rb status          # version/players/admins/time/evolution
 ruby tools/rcon.rb exec "/shout hi"  # or /sc for silent Lua
 
 # Tests:
-ruby -Ilib spec/ai_agent_spec.rb         # hivemind agent (history, tools, context)
+ruby -Ilib spec/hivemind_spec.rb             # hivemind agent core (triggers, context, greetings)
+ruby -Ilib spec/hivemind_tools_spec.rb       # RubyLLM tool classes
+ruby -Ilib spec/hivemind_persistence_spec.rb # session file round-trips
+ruby -Ilib spec/hivemind_compaction_spec.rb  # long-term memory + /compact
+ruby -Ilib spec/hivemind_followups_spec.rb   # scheduled follow-ups
 ruby -Ilib spec/server_mode_spec.rb       # server mode + ops
 ruby -Ilib spec/packet_fixtures_spec.rb   # real captured packets
 ruby -Ilib spec/factorio_protocol_spec.rb # protocol unit tests

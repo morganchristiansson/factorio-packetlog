@@ -1013,6 +1013,7 @@ class FactorioSniffer
   # between runs either way.
   def load_roster
     return unless @rcon
+    players = @rcon.connected_players
     return if players.nil? || players.empty?
     players.each do |p|
       @player_db.add(p[:index], p[:name])

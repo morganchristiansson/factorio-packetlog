@@ -99,6 +99,7 @@ class HiveMindAgent
     @mutex.synchronize do
       @chat&.reset_messages!
       @memories_sent.clear
+      @session_players_mutex.synchronize { @session_players.clear }
       @console_mutex.synchronize do
         @console_queue.clear unless keep_unread_console
       end
@@ -144,6 +145,7 @@ class HiveMindAgent
       msgs.slice!(floor...cut)
       log "session trimmed after compaction: dropped #{cut - floor} compacted messages, #{msgs.size - floor} kept"
       @memories_sent.clear
+      @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
       @chat.with_instructions(system_prompt_with_memories)
       @persisted_messages = nil   # force re-serialization of the trimmed thread
     end
@@ -205,6 +207,14 @@ class HiveMindAgent
     # re-seeds memories on first contact; within a session the memory
     # already sits in the conversation after the first delivery.
     @memories_sent = Set.new
+    # Players encountered THIS LLM session (since last compaction/reset).
+    # Persisted with the session file; drives compaction targets so they
+    # can't drift from what the session actually saw. Cleared on /compact
+    # success and clear_session!; console lines afterwards re-populate it.
+    # Own lock: marked from PACKET threads (must never wait on @mutex —
+    # an in-flight LLM call would stall the capture loop).
+    @session_players = Set.new
+    @session_players_mutex = Mutex.new
 
     # ── LLM wiring, inlined. Provider is fixed (:openai — any OpenAI-
     #    compatible endpoint); model/base/key come from env or defaults.
@@ -608,6 +618,7 @@ class HiveMindAgent
       next unless mem && !mem.strip.empty?
       lines << "=== memory of #{name} ===\n#{mem}"
       @memories_sent << name
+      mark_player_seen(name)
     end
     return '' if lines.empty?
     "Persistent player memories:\n#{lines.join("\n\n")}\n\n"
@@ -634,6 +645,15 @@ class HiveMindAgent
   # are already in the conversation as assistant messages. Player names
   # are re-cleaned here: queued entries may predate the boundary cleaning
   # (persisted across hot reloads).
+  # Mark a player as encountered in THIS LLM session. Called from every
+  # encounter point: console lines (chat + join/leave) via append_history,
+  # and memory injections via memory_prompt.
+  def mark_player_seen(name)
+    name = clean_text(name).strip
+    return if name.empty? || name == HiveMindAgent::AGENT_NAME
+    @session_players_mutex.synchronize { @session_players << name }
+  end
+
   def unread_console(exclude: nil)
     @console_mutex.synchronize do
       unread = @console_queue.dup
@@ -662,6 +682,13 @@ class HiveMindAgent
   def append_history(player, message)
     msg = clean_text(message)
     return if msg.empty?
+    # Track who appeared in this LLM session (persisted; drives compaction
+    # targets so they can't drift from what the session actually saw).
+    if player
+      mark_player_seen(player) unless player == HiveMindAgent::AGENT_NAME
+    elsif msg =~ /\A(\S+) (?:joined|left) the game/
+      mark_player_seen(Regexp.last_match(1))
+    end
     @console_mutex.synchronize do
       @console_queue << [player, msg]
       if @console_queue.size > HISTORY_SIZE

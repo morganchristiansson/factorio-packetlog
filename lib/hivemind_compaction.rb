@@ -221,30 +221,18 @@ module HiveMindCompaction
     parts.join("\n\n")
   end
 
-  # Distinct player names this session touched: anyone who joined, left, or
-  # chatted, got a memory injected (memories_sent), holds an existing
-  # player memory, or is currently online. Join/leave console lines carry
-  # the name in the MESSAGE text (player field is nil there) — parse those
-  # too, so a player who only joined and left still counts as encountered.
-  # Compaction must end with a memory for every one of them (COMPACTION_PROMPT).
-  # Called under @mutex (memory_prompt mutates @memories_sent under it too).
+  # Compaction targets: every player encountered THIS LLM session
+  # (@session_players — persisted with the session file via append_history
+  # and memory_prompt, so restarts and hot reloads can't drift it from
+  # what the conversation actually contains), plus every player who ALREADY
+  # has a blob on disk (each is reconsidered every run; usually answers
+  # UNCHANGED). Deliberately NOT: the console queue (belongs to the live
+  # bot's delivery cycle) or the online roster (silent players haven't
+  # appeared in this session). Called under @mutex.
   def players_seen
-    players = Set.new
-    @console_mutex.synchronize do
-      @console_queue.each do |p, msg|
-        if p
-          name = clean_text(p)
-          players << name unless name.empty? || name == HiveMindAgent::AGENT_NAME
-        elsif msg =~ /\A(\S+) (?:joined|left) the game/
-          name = clean_text(Regexp.last_match(1))
-          players << name unless name.empty?
-        end
-      end
-    end
-    @memories_sent.each { |p| players << clean_text(p) }
+    players = @session_players_mutex.synchronize { Set.new(@session_players) }
     @memory_store.player_names.each { |p| players << clean_text(p) }
-    online_player_list.each { |p| players << clean_text(p) }
-    players.delete(HiveMindAgent::AGENT_NAME)  # e.g. a stray blob from older builds
+    players.delete(HiveMindAgent::AGENT_NAME)  # stray blobs from older builds
     players
   end
 

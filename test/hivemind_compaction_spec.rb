@@ -120,17 +120,20 @@ class TestHivemindCompaction < Minitest::Test
     # join/leave lines: name lives in the MESSAGE text, player field nil
     agent.send(:append_history, nil, 'carol joined the game')
     agent.send(:append_history, nil, 'dave left the game')
-    # memory injected this session
-    agent.instance_variable_get(:@memories_sent) << 'erin'
+    # memory injected this session (memory_prompt marks via mark_player_seen)
+    agent.send(:mark_player_seen, 'erin')
     # existing on-disk player memory
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
       store.write_player('frank', 'frank likes trains')
       agent.instance_variable_set(:@memory_store, store)
       seen = agent.send(:players_seen)
-      %w[alice bob carol dave erin frank zoe].each do |name|
+      # zoe is online but silent — deliberately NOT a target (never
+      # appeared in the LLM session); frank comes from his on-disk blob.
+      %w[alice bob carol dave erin frank].each do |name|
         assert_includes seen, name, "expected #{name} to be seen"
       end
+      refute_includes seen, 'zoe', 'silent online players are not targets'
       # the agent's OWN replies are queued under player 'hivemind' — it is
       # not a player and must never become a compaction target
       agent.send(:append_history, 'hivemind', 'the factory watches')
@@ -149,6 +152,7 @@ class TestHivemindCompaction < Minitest::Test
       store.write_player('hivemind', 'stray blob from older build')
       live = agent.instance_variable_get(:@chat)
       live.add_message(role: :user, content: 'turn: alice says hi')
+      agent.send(:append_history, 'alice', 'hi hivemind')   # marks alice seen
       asked = []
       agent.define_singleton_method(:build_compaction_chat) do
         fork = super()
@@ -162,7 +166,7 @@ class TestHivemindCompaction < Minitest::Test
       end
 
       assert agent.compact_memory!
-      assert_equal %w[soul knowledge alice], asked
+      assert_equal %w[alice knowledge soul].sort, asked.sort, 'no hivemind fork'
       assert_equal 'stray blob from older build', store.player('hivemind'), 'agent blob untouched'
     end
   end

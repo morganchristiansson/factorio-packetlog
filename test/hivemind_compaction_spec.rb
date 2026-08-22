@@ -196,19 +196,22 @@ class TestHivemindCompaction < Minitest::Test
       assert_equal pre_size, live.messages.size
 
       # /compact's post-success step: TRIM, not wipe. Seed enough history
-      # (as if more turns had happened BEFORE compaction) to exercise the
-      # keep-last window, mark the whole thread as "seen by the pass",
-      # then trim like the sniffer handler does.
-      20.times { |i| live.add_message(role: :user, content: "filler #{i}")
-                   live.add_message(role: :assistant, content: "ack #{i}") }
+      # (as if more turns had happened BEFORE compaction) to exceed the
+      # char budget, mark the whole thread as "seen by the pass", then
+      # trim like the sniffer handler does. Fillers are ~500 chars each:
+      # message sizes vary, and the tail budget is size-based.
+      20.times { |i| live.add_message(role: :user, content: "filler #{i} #{'x' * 500}")
+                   live.add_message(role: :assistant, content: "ack #{i} #{'y' * 500}") }
       agent.instance_variable_set(:@compaction_included_count, live.messages.size)
       agent.trim_session_after_compaction!
       kept = live.messages
-      # refreshed system prompt (memories were rewritten on disk) + the
-      # TRIM_KEEP_LAST tail kept for conversational flow
-      assert_equal 1 + HiveMindAgent::TRIM_KEEP_LAST, kept.size
+      # refreshed system prompt (memories were rewritten on disk) + a tail
+      # of newest messages that fits TRIM_TAIL_CHARS (plus at least one)
       assert_equal :system, kept.first.role
-      assert_equal :assistant, kept.last.role
+      assert_operator kept.size, :>, 2, 'kept a real tail, not just the system prompt'
+      body = kept[1..]
+      assert_operator body.sum { |m| m.content.to_s.length }, :<=,
+                      HiveMindAgent::TRIM_TAIL_CHARS + 600, 'tail fits the char budget (+1 overshoot msg)'
       kept.each { |m| refute_includes m.content.to_s, 'alice wants to build' } # compacted range gone
       assert kept.any? { |m| m.content.to_s.include?('filler') }, 'recent tail kept for flow'
     end

@@ -57,12 +57,13 @@ class HiveMindAgent
   # the next prompt's context. 1000 ≈ ~40k tokens, far beyond any real
   # gap; older lines are dropped with a warning if ever exceeded.
   HISTORY_SIZE = 1000
-  # Messages kept AFTER a successful compaction: the pass drops everything
-  # it saw EXCEPT this newest stretch, retained so the session keeps
-  # recent conversational flow and context instead of starting cold.
-  # Generous on purpose — recent chat context is worth more than the
-  # tokens cost.
-  TRIM_KEEP_LAST = 40
+  # Recent-context budget (in content characters) kept AFTER a successful
+  # compaction: the pass drops everything it saw EXCEPT the newest
+  # stretch that fits this budget, so the session keeps recent
+  # conversational flow instead of starting cold. Size-based, not count-
+  # based: message sizes vary wildly (a turn can be one short line or a
+  # multi-KB prompt dump).
+  TRIM_TAIL_CHARS = 20_000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;
@@ -108,27 +109,36 @@ class HiveMindAgent
 
   # Post-compaction history trim (the /compact path — replaces the old
   # full wipe): drop exactly the messages the pass included, MINUS the
-  # newest TRIM_KEEP_LAST, which stay so the session keeps recent
-  # conversational flow and context. Console lines that arrived mid-pass
-  # are untouched (the pass drained everything older into its material;
-  # these were never seen). memories_sent is cleared so player memories
+  # newest stretch that fits TRIM_TAIL_CHARS, which stays so the session
+  # keeps recent conversational flow and context. Size-based, not count-
+  # based: message sizes vary wildly (a turn can be one short line or a
+  # multi-KB prompt dump). Console lines that arrived mid-pass are
+  # untouched (the pass drained everything older into its material; these
+  # were never seen). memories_sent is cleared so player memories
   # re-inject into the trimmed thread, and the system prompt IS refreshed:
   # the pass rewrote memory blobs on disk, and a trimmed thread is the one
   # sanctioned "fresh start" case for a prompt change (one bounded cache
   # rebuild). clear_session! remains for full resets.
-  def trim_session_after_compaction!(keep_last: TRIM_KEEP_LAST)
+  def trim_session_after_compaction!
     @mutex.synchronize do
       return false unless @chat
-      included = [@compaction_included_count || 0, @chat.messages.size].min
-      cut = included - keep_last
-      cut = 0 if cut.negative?
       msgs = @chat.messages
+      floor = msgs.first&.role == :system ? 1 : 0   # system refreshed below
+      included = [@compaction_included_count || 0, msgs.size].min
+      # Walk backwards from the included boundary keeping the newest
+      # messages that fit the char budget (always keep at least one).
+      cut = included
+      budget = TRIM_TAIL_CHARS
+      while cut > floor && !(cut < included && budget.negative?)
+        budget -= msgs[cut - 1].content.to_s.length + 1
+        cut -= 1
+      end
       # Never leave a kept :tool result dangling under a cut-away call —
       # the provider rejects the whole request. Advance past orphans.
       cut += 1 while cut < msgs.size && msgs[cut].role == :tool
-      return true if cut <= 0
-      msgs.slice!(0...cut)
-      log "session trimmed after compaction: dropped #{cut} compacted messages, #{msgs.size} kept"
+      return true if cut <= floor
+      msgs.slice!(floor...cut)
+      log "session trimmed after compaction: dropped #{cut - floor} compacted messages, #{msgs.size - floor} kept"
       @memories_sent.clear
       @chat.with_instructions(system_prompt_with_memories)
       @persisted_messages = nil   # force re-serialization of the trimmed thread

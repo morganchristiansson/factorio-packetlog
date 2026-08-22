@@ -175,17 +175,20 @@ class TestHivemindCompaction < Minitest::Test
       # message under the LIVE system prompt (cache-prefix friendly)
       forks.each do |fork|
         roles = fork.messages.map(&:role)
-        assert_equal %i[system user assistant user assistant], roles
+        # system + replayed live thread + material message + per-key turn
+        assert_equal %i[system user assistant user user assistant], roles
         assert_includes fork.messages.first.content, 'Persistent memories'
-        assert_includes fork.messages[3].content, 'MEMORY COMPACTION pass'
-        assert_includes fork.messages[3].content, 'Current memories:'
-        assert_includes fork.messages[3].content, 'Now write the memory for key'
+        # session material is its OWN message, byte-identical in every fork
+        assert_includes fork.messages[-3].content, 'MEMORY COMPACTION pass'
+        assert_includes fork.messages[-3].content, 'Current memories:'
+        assert_includes fork.messages[-3].content, 'alice: i will build the mall'
+        assert_includes fork.messages[-3].content, 'Players encountered this session'
       end
-      # keys are asked in a stable order and named at the very END of the
+      # keys are asked in a stable order and named in the small divergent
       # turn (longest shared cache prefix across consecutive forks)
-      assert_includes forks[0].messages[3].content, 'key "soul"'
-      assert_includes forks[1].messages[3].content, 'key "knowledge"'
-      assert_includes forks[2].messages[3].content, 'key "alice"'
+      assert_includes forks[0].messages[-2].content, 'key "soul"'
+      assert_includes forks[1].messages[-2].content, 'key "knowledge"'
+      assert_includes forks[2].messages[-2].content, 'key "alice"'
 
       # applied to the memory store; UNCHANGED left knowledge alone
       store = agent.instance_variable_get(:@memory_store)

@@ -80,9 +80,14 @@ module HiveMindCompaction
               @mutex.synchronize { pass = build_compaction_chat if @chat }
               next unless pass
               current = @memory_store.read_key(key).to_s.strip
-              turn = format(HiveMindPrompts::COMPACTION_TURN, key,
-                            current.empty? ? '(none yet)' : current)
-              ask_with_retry(pass, "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}\n\n#{turn}")
+              # Session material rides in its OWN user message, identical
+              # in every fork (shared cache prefix); only the small
+              # per-key turn below diverges. On a retry, ask_with_retry
+              # strips just the turn — the material message stays.
+              pass.add_message(role: :user,
+                               content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
+              ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, key,
+                                          current.empty? ? '(none yet)' : current))
               content = extract_memory_content(pass.messages)
               unchanged = content && content.match?(/\AUNCHANGED\z/i)
               has_blob = !current.empty?

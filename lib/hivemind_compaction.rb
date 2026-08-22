@@ -111,26 +111,16 @@ module HiveMindCompaction
 
   private
 
-  # Build the THROWAWAY chat for one compaction fork: a verbatim
-  # DUPLICATE of @chat's entire state — every message, including the live
-  # chat's own :system message (byte-identical system prompt, NEVER
-  # regenerated: any byte difference kills the entire cached prefix at
-  # token 0). This is exactly the request shape of a working bot reply —
-  # same full thread, warm cached prefix, tiny generation — which is why
-  # it survives gateways that kill anything unusual. No tools: the fork
-  # speaks plain text only. Observers are hooked so the console keeps
-  # showing reasoning/usage during the fork.
+  # Build the THROWAWAY chat for one compaction fork: wholesale alias of
+  # @chat's entire state via messages.replace — the exact request shape
+  # of a working bot reply (same bytes including the live :system
+  # message, warm cached prefix, small generation). Sharing the Message
+  # instances is safe: the fork only ever APPENDS its own turn, it never
+  # mutates existing entries. No tools: the fork speaks plain text only.
+  # Observers are hooked so the console keeps showing reasoning/usage.
   def build_compaction_chat
     pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
-    @chat.messages.each do |m|
-      if m.tool_calls && !m.tool_calls.empty?
-        pass.add_message(role: m.role, content: m.content, tool_calls: m.tool_calls)
-      elsif m.role == :tool
-        pass.add_message(role: :tool, content: m.content, tool_call_id: m.tool_call_id)
-      else
-        pass.add_message(role: m.role, content: m.content)
-      end
-    end
+    pass.messages.replace(@chat.messages)
     observe_chat(pass)
     pass
   end

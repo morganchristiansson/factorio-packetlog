@@ -2,21 +2,18 @@
 
 require 'json'
 
-# Long-term memory compaction for the Hivemind agent: the one-shot LLM pass
-# behind /compact that reviews the session and overwrites the keyed memory
-# blobs (soul / knowledge / <player>). Mixin on HiveMindAgent.
+# Long-term memory compaction for the Hivemind agent: the FORKED passes
+# behind /compact that review the session and overwrite the keyed memory
+# blobs (soul / knowledge / <player>). One throwaway chat per key, all
+# sharing the same replayed prefix. Mixin on HiveMindAgent.
 module HiveMindCompaction
-  # Long-term memory compaction: a one-shot LLM pass that reviews the
-  # session (the conversation thread + current memories + console) and
-  # overwrites the keyed memory blobs (soul / knowledge / <player>).
+  # Long-term memory compaction: FORKED per-key passes that review the
+  # session (bounded thread tail + current memories + console) and
+  # overwrite the keyed memory blobs (soul / knowledge / <player>).
   #
-  # Long-term memory compaction: a one-shot LLM pass that reviews the
-  # session (the conversation thread + current memories + console) and
-  # overwrites the keyed memory blobs (soul / knowledge / <player>).
-  #
-  # Runs on a THROWAWAY chat (build_compaction_chat) that replays the
-  # live thread under the LIVE system prompt — NOT inside the live chat,
-  # and NOT with a swapped system prompt. Two reasons:
+  # Each key gets its own THROWAWAY chat (build_compaction_chat) replaying
+  # the live thread under the LIVE system prompt — NOT inside the live
+  # chat, and NOT with a swapped system prompt. Two reasons:
   #   • Robustness: the live conversation is never touched, so there is
   #     no strip step to skip — a Ctrl-C mid-pass cannot leak pass
   #     messages into the session anymore (that leak poisoned every
@@ -26,65 +23,71 @@ module HiveMindCompaction
   #     thread; keeping the live system prompt makes everything up to
   #     the last live turn a prefix match, so only the pass prompt tail
   #     is uncached.
-  # The pass uses NO tools — this gateway drops tool-call arguments in
+  # The forks use NO tools — this gateway drops tool-call arguments in
   # transport (tried batched, per-call, strict, flat: {} arrived every
-  # time), while plain text always survives. The compaction instructions
-  # ride in the user turn; the model ends its reply with a fenced JSON
-  # array of {key, content}; we parse and apply it. Runs under the mutex
-  # so it can't interleave with a live ask. Manual only: triggered by
-  # /compact — never on quit (no auto compaction). The /compact command
-  # wipes the session after a SUCCESSFUL pass ("distill then start
-  # fresh", keeping console lines that arrived mid-pass); on failure —
-  # including an un-parsable reply — the session is kept. clear_session!
-  # stays callable standalone so the wipe can be scripted/tested without
-  # the LLM call.
+  # time), while plain text always survives. Each fork asks for ONE key's
+  # memory; the reply is the content itself (or UNCHANGED). Runs under
+  # the mutex so it can't interleave with a live ask. Manual only:
+  # triggered by /compact — never on quit (no auto compaction). On
+  # SUCCESS /compact trims the compacted history (trim_session_after_
+  # compaction!, keeping mid-pass console lines); on failure — any key
+  # with no usable reply — the session is kept. clear_session! stays
+  # callable standalone so a full wipe can be scripted/tested.
   def compact_memory!(reason = nil)
     return false if @disabled || !memory_enabled?
     return false unless compactable?
     log "memory compaction #{reason ? "(#{reason}) " : ''}— #{session_summary}"
     @mutex.synchronize do
       return false unless @chat
-      seen = players_seen   # snapshot BEFORE the pass (console may grow during it)
-      # How much of the thread the pass will see — trim_session_after_compaction!
-      # drops exactly this range (minus a recent tail) on success.
+      seen = players_seen   # snapshot BEFORE the passes (console may grow during it)
+      # How much of the thread the forks will see — trim_session_after_
+      # compaction! drops exactly this range (minus a recent tail) on success.
       @compaction_included_count = @chat.messages.size
-      pass = build_compaction_chat
-      begin
-        prompt = "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{compaction_material(seen)}"
-        ask_with_retry(pass, prompt)
-        writes = extract_memory_writes(pass.messages)
-        if writes.nil?
-          # No parsable JSON block ⇒ nothing usable was produced. MUST NOT
-          # count as a successful no-op: /compact wipes the session on
-          # success, and a mangled reply means an un-distilled session.
-          log 'memory compaction — FAILED: no parsable memory JSON in the reply — session kept'
-          return false
-        end
-        if writes.empty?
-          log 'memory compaction — no memory changes (model decided nothing worth updating)'
-        else
-          writes.each do |entry|
-            key = entry['key'].to_s.strip
-            content = entry['content'].to_s
-            if key.empty?
-              log 'memory compaction — skipped entry with empty key'
-            elsif @memory_store.write_key(key, content)
-              log "memory compaction — #{key}: #{content.length} chars"
-            else
-              log "memory compaction — #{key} FAILED to write"
-            end
+      material = compaction_material(seen)
+      written = 0
+      failures = []
+      # One fork per key, sequential: each shares the cached prefix of the
+      # last (byte-identical up to the trailing key name), failures stay
+      # contained to their own context, and every generation is small
+      # enough to finish inside the gateway's request window.
+      (%w[soul knowledge] + seen.sort).each do |key|
+        pass = build_compaction_chat
+        begin
+          turn = format(HiveMindPrompts::COMPACTION_TURN, key)
+          ask_with_retry(pass, "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}\n\n#{turn}")
+          content = extract_memory_content(pass.messages)
+          unchanged = content && content.match?(/\AUNCHANGED\z/i)
+          has_blob = !@memory_store.read_key(key).to_s.strip.empty?
+          if content.nil? || (unchanged && !has_blob)
+            # No usable reply — or UNCHANGED for a key with no current
+            # blob (a coverage gap). MUST NOT count as success: the trim
+            # would drop an un-distilled range.
+            failures << key
+            next
           end
+          next if unchanged   # legit no-op
+          if @memory_store.write_key(key, content)
+            written += 1
+            log "memory compaction — #{key}: #{content.length} chars"
+          else
+            failures << key
+          end
+        ensure
+          # Nothing to strip: the live conversation was never touched.
+          # Drop the throwaway chat's reference and let GC take it.
+          pass = nil
         end
-        # Coverage diagnostic: any player the session touched who still has
-        # no memory blob? (The prompt requires one per player, but the
-        # model may not comply — better to log it than to wonder.)
-        missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
-        log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
-      ensure
-        # Nothing to strip: the live conversation was never touched. Drop
-        # the throwaway chat's reference and let GC take it.
-        pass = nil
       end
+      unless failures.empty?
+        log "memory compaction — FAILED: no usable reply for #{failures.join(', ')} — session kept"
+        return false
+      end
+      log 'memory compaction — no memory changes (model decided nothing worth updating)' if written.zero?
+      # Coverage diagnostic: any player the session touched who still has
+      # no memory blob? (The per-key forks require one each, but the model
+      # may have answered UNCHANGED wrongly — better to log than wonder.)
+      missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
+      log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
     end
     true
   rescue StandardError => e
@@ -124,31 +127,18 @@ module HiveMindCompaction
     pass
   end
 
-  # Pull [{"key","content"}] out of the compaction reply: the LAST
-  # non-empty assistant message of the pass, its fenced ```json block if
-  # present (else the whole text), parsed leniently — a JSON::ParserError
-  # falls back to the outermost [..] span. Returns [] for a legit "nothing
-  # changed", nil when nothing parsable was found (caller fails the pass).
-  def extract_memory_writes(pass_messages)
+  # The memory content from a per-key fork: the LAST non-empty assistant
+  # message, fences stripped. Returns nil when the fork produced no text
+  # at all; 'UNCHANGED' (checked by the caller) means keep the current
+  # blob. Anything else IS the new blob — plain text in, plain text out.
+  def extract_memory_content(pass_messages)
     text = pass_messages.select { |m| m.role == :assistant }
                         .filter_map { |m| c = m.content.to_s; c.empty? ? nil : c }
                         .last
     return nil if text.nil?
-    blocks = text.scan(/```(?:json)?\s*(.*?)```/m).flatten
-    candidate = (blocks.last || text).strip
-    parsed = begin
-      JSON.parse(candidate)
-    rescue JSON::ParserError
-      l = candidate.index('[')
-      r = candidate.rindex(']')
-      begin
-        l && r && r > l ? JSON.parse(candidate[l..r]) : nil
-      rescue JSON::ParserError
-        nil
-      end
-    end
-    return nil unless parsed.is_a?(Array)
-    parsed.select { |e| e.is_a?(Hash) && e.key?('key') && e.key?('content') }
+    t = text.strip
+    t = t.sub(/\A```[a-z]*\n?/i, '').sub(/```\s*\z/, '').strip
+    t.empty? ? nil : t
   end
 
   # Is there anything worth compacting? A session with no conversation and

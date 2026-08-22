@@ -50,7 +50,7 @@ class TestHivemindTools < Minitest::Test
     # write_memories was removed entirely: this gateway drops tool-call
     # arguments for compaction-scale payloads, so compaction parses a
     # fenced JSON block from the model's plain-text reply instead
-    # (see compact_memory! / extract_memory_writes).
+    # (see compact_memory! / extract_memory_content).
     assert !defined?(WriteMemories), 'WriteMemories must stay removed'
   end
 

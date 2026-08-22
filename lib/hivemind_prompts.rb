@@ -104,24 +104,26 @@ module HiveMindPrompts
       follow-up id; cancel_followup cancels a pending one (like clearTimeout).
   PROMPT
 
-  # System prompt for a MEMORY COMPACTION pass. NOT sent as a system
-  # instruction — swapping the system prompt would diverge the request
-  # prefix at token 0 and forfeit the cached thread. Instead these
-  # instructions ride at the TOP of the user turn (compact_memory!
-  # prepends them to the session material), on a throwaway chat replaying
-  # the live thread under the LIVE system prompt. The model ends its
-  # reply with a fenced JSON block that compact_memory! parses. Plain
-  # text is the ONLY channel this gateway delivers reliably — tool-call
-  # arguments are dropped in transport (write_memories was tried batched,
-  # per-call, strict, and flat: {} arrived every time).
+  # Compaction rules opening EACH per-key pass. Compaction is FORKED:
+  # one throwaway chat per key (soul / knowledge / each seen player), all
+  # replaying the same bounded thread under the LIVE system prompt. Keys
+  # are isolated — none builds on another — so forks lose nothing and
+  # contain failures. The per-key turn appends the key name AFTER the
+  # shared material (COMPACTION_TURN), so consecutive forks are
+  # byte-identical up to the final line: the longest possible shared
+  # provider-cache prefix. Plain text is the ONLY channel this gateway
+  # delivers reliably — tool-call arguments are dropped in transport
+  # (write_memories died batched, per-call, strict, and flat), and giant
+  # single-shot replies get killed by the gateway's request window
+  # (HTTP 500 at ~60-90s). Small forks dodge both.
   COMPACTION_PROMPT = <<~PROMPT
     You are "Hivemind", the collective consciousness of this Factorio
     factory. This is a MEMORY COMPACTION pass, not a conversation — no
     players are listening and there is nothing to chat about.
 
-    Your task: review the conversation history above (the message thread:
-    your past exchanges, queries, and replies) plus the session material
-    below, and update your long-term memories. Memories are keyed blobs of
+    Your task: review the conversation history above (your past exchanges,
+    queries, and replies) plus the session material below, and maintain
+    your long-term memories. Memories are keyed blobs of
     text:
       soul      — who you ARE: your voice, your personality, how you
                   relate to players. Keep what defines you; evolve it
@@ -135,9 +137,8 @@ module HiveMindPrompts
                   factory).
 
     Rules:
-    - Overwrite each memory with its COMPLETE new content — each entry
-      replaces the whole blob; it does not merge. Anything you leave out
-      is lost.
+    - Overwrite the memory with its COMPLETE new content — it replaces
+      the whole blob; it does not merge. Anything you leave out is lost.
     - EVERY player named in "Players encountered this session" must have
       a memory blob when you finish: keep an existing one (extend it with
       anything new from this session) or write a fresh one for a player
@@ -153,26 +154,22 @@ module HiveMindPrompts
       the model reads these as long-term memory, not as a transcript.
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
-    - The current content of each memory is shown below — start from it;
-      do not discard knowledge that is still true.
 
-    OUTPUT FORMAT (critical):
-    Think freely first if you need to — but your reply MUST end with ONE
-    fenced code block containing a JSON array of {"key","content"}
-    objects, one object per memory you want to write:
+    - The current content of this key is shown in the material above —
+      start from it; do not discard knowledge that is still true.
 
-      ```json
-      [{"key": "soul", "content": "...complete new soul..."},
-       {"key": "alice", "content": "...complete new alice memory..."}]
-      ```
+    You will be given ONE key per pass and asked to write that memory.
+  PROMPT
 
-    - Include only genuinely-changed memories plus one entry for EVERY
-      player in "Players encountered this session" lacking a current
-      memory. Use [] only if truly nothing changed.
-    - This JSON block is the ONLY mechanism that writes memories —
-      anything outside the block is discarded. Never use tools: they are
-      not available in this pass.
-    - Keep the WHOLE reply under ~1200 words total (reasoning included).
-      Long replies get killed by the server before they finish.
+  # Appended AFTER the shared material in every per-key fork, so forks
+  # stay byte-identical up to the final line — the longest possible
+  # shared cache prefix across consecutive passes.
+  COMPACTION_TURN = <<~PROMPT
+    Now write the memory for key "%s".
+
+    Reply with the COMPLETE new content ONLY — plain text, no quotes, no
+    code fences, no commentary before or after. If (and only if) this key
+    already HAS a current memory above and nothing needs updating, reply
+    with exactly: UNCHANGED
   PROMPT
 end

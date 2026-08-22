@@ -39,6 +39,18 @@ module HiveMindCompaction
         chat.with_instructions(HiveMindPrompts::COMPACTION_PROMPT)  # swaps the system prompt in place
         ask_with_retry(chat, compaction_material(seen))
         if tool.written.empty?
+          # Distinguish "model decided nothing was worth saving" from
+          # "the model TRIED to write and every call bounced" (gateway
+          # mangling tool arguments). The latter used to fall through to a
+          # successful no-op compaction — and /compact then wiped an
+          # un-distilled session. Any rejected write ⇒ treat as failure.
+          rejected = chat.messages[start..].count do |m|
+            m.role == :tool && m.content.to_s.include?('Invalid tool arguments')
+          end
+          if rejected.positive?
+            log "memory compaction — FAILED: #{rejected} write_memories call(s) rejected (bad/empty arguments) — session kept"
+            return false
+          end
           log 'memory compaction — no memory changes (model decided nothing worth updating)'
         else
           tool.written.each { |key, content| log "memory compaction — #{key}: #{content.length} chars" }

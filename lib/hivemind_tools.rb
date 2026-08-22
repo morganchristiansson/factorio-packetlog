@@ -120,10 +120,16 @@ class WriteMemories < RubyLLM::Tool
         }
       }
     },
-    required: ['memories'],
-    additionalProperties: false,
-    strict: true
+    required: %w[memories],
+    additionalProperties: false
   }
+  # NOTE: deliberately NO strict:true. This is the only strict tool, and
+  # on the current gateway strict mode + this nested array-of-objects
+  # schema makes the model emit EMPTY arguments ({}) on every attempt
+  # (7-token completions — the payload is never generated; broken
+  # constrained decoding, not lost transport). Compaction then spins on
+  # "Invalid tool arguments: missing keyword: memories". Every other
+  # (non-strict) tool works fine on the same endpoint.
 
   # What was actually written, as [key, content] pairs (for logging).
   attr_reader :written

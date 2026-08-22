@@ -135,7 +135,7 @@ class TestHivemindCompaction < Minitest::Test
   end
 
 
-  def test_compact_memory_runs_inside_live_chat_with_per_call_tool
+  def test_compact_memory_parses_json_reply_and_strips_itself
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       chat = agent.instance_variable_get(:@chat)
@@ -145,25 +145,24 @@ class TestHivemindCompaction < Minitest::Test
       pre_size = chat.messages.size
 
       # Compaction reuses the LIVE chat (input-token cache); stub only the
-      # parts that would hit the network, and simulate the tool-call + result
-      # messages the real ask would append (which compaction must strip).
+      # parts that would hit the network, and simulate the reply the real
+      # ask would append (which compaction must strip afterwards).
       seen = { instructions: [], tools: [], material: nil }
       chat.define_singleton_method(:with_instructions) { |t| seen[:instructions] << t; self }
-      chat.define_singleton_method(:with_tool) { |t| seen[:tools] << t; self }
       chat.define_singleton_method(:ask) do |material|
         seen[:material] = material
         add_message(role: :user, content: material)         # compaction material
-        add_message(role: :assistant, content: nil, tool_calls: {}) # tool-call turn
-        add_message(role: :tool, content: 'soul updated', tool_call_id: 'c1')
+        add_message(role: :assistant, content:
+          "Reviewed the session.\n\n```json\n" \
+          '[{"key": "soul", "content": "new soul from json"}, ' \
+          '{"key": "alice", "content": "alice built the mall"}]\n```')
       end
 
       assert agent.compact_memory!('quit'), 'compaction runs'
 
-      assert_equal 1, seen[:tools].size, 'only write_memories — never say/rcon_query'
-      assert_kind_of WriteMemories, seen[:tools].first
+      assert_empty seen[:tools], 'compaction registers NO tools — JSON in plain text only'
       # compaction swapped its own system prompt in, then restored the live one
-      assert_includes seen[:instructions].first, 'write_memories'
-      assert_includes seen[:instructions].first, "ONE write_memories call per memory"
+      assert_includes seen[:instructions].first, 'fenced code block'
       assert_includes seen[:instructions].last, 'Persistent memories'  # restored live prompt
       # material = current memories + console + context; the conversation
       # thread itself is already in the chat (not duplicated in the material)
@@ -174,12 +173,37 @@ class TestHivemindCompaction < Minitest::Test
       assert_includes seen[:material], 'Players encountered this session'
       assert_includes seen[:material], 'alice'          # from the console line
       refute_includes seen[:material], 'Session conversation:'
+      # the parsed block was APPLIED to the memory store
+      store = agent.instance_variable_get(:@memory_store)
+      assert_equal 'new soul from json', store.soul
+      assert_equal 'alice built the mall', store.player('alice')
       # compaction stripped its own messages: the live thread is unchanged
       assert_equal pre_size, chat.messages.size
-      # and write_memories is gone from the live toolset
-      refute_includes chat.tools.keys, :write_memories
+      # live toolset untouched (no write_memories was ever added)
       assert chat.tools.key?(:reply)
       assert chat.tools.key?(:rcon_query)
+    end
+  end
+
+  def test_compact_memory_fails_on_unparsable_reply_and_keeps_session
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      chat = agent.instance_variable_get(:@chat)
+      chat.add_message(role: :user, content: 'turn: alice says hi')
+      agent.send(:append_history, 'alice', 'hivemind hello')
+      pre_size = chat.messages.size
+      chat.define_singleton_method(:ask) do |material|
+        add_message(role: :user, content: material)
+        add_message(role: :assistant, content: 'I could not decide what to write.')
+      end
+
+      refute agent.compact_memory!, 'unparsable reply ⇒ failure'
+      store = agent.instance_variable_get(:@memory_store)
+      soul_before = store.soul
+      refute agent.compact_memory!, 'still a failure'
+      assert_equal soul_before, store.soul, 'nothing written on failure'
+      assert_nil store.player('alice'), 'no player memory written on failure'
+      assert_equal pre_size, chat.messages.size, 'pass messages stripped even on failure'
     end
   end
 

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'json'
+
 # Long-term memory compaction for the Hivemind agent: the one-shot LLM pass
 # behind /compact that reviews the session and overwrites the keyed memory
 # blobs (soul / knowledge / <player>). Mixin on HiveMindAgent.
@@ -15,16 +17,16 @@ module HiveMindCompaction
   # the system prompt + tool set restored, so a session that continues is
   # exactly as it was (minus whatever the model chose to remember).
   #
-  # The compaction visibility exposes ONLY the write_memories tool — never
-  # say/rcon_query — and the prompt demands one call per memory (flat
-  # scalar args; the gateway loses nested/batched payloads). Runs under
-  # the mutex so it can't interleave with a live
-  # ask. Manual only: triggered by /compact — never on quit (no auto
-  # compaction). The /compact command wipes the session after a SUCCESSFUL
-  # pass ("distill then start fresh"); on failure the session is kept
-  # (the error is logged, never silently swallowed into a clear).
-  # clear_session! stays callable standalone so the wipe can be
-  # scripted/tested without the LLM call.
+  # The pass uses NO tools — this gateway drops tool-call arguments in
+  # transport (tried batched, per-call, strict, flat: {} arrived every
+  # time), while plain text always survives. The model ends its reply
+  # with a fenced JSON array of {key, content}; we parse and apply it.
+  # Runs under the mutex so it can't interleave with a live ask. Manual
+  # only: triggered by /compact — never on quit (no auto compaction). The
+  # /compact command wipes the session after a SUCCESSFUL pass ("distill
+  # then start fresh"); on failure — including an un-parsable reply — the
+  # session is kept. clear_session! stays callable standalone so the wipe
+  # can be scripted/tested without the LLM call.
   def compact_memory!(reason = nil)
     return false if @disabled || !memory_enabled?
     return false unless compactable?
@@ -32,29 +34,33 @@ module HiveMindCompaction
     @mutex.synchronize do
       chat = @chat
       return false unless chat
-      tool = WriteMemories.new(store: @memory_store)
-      chat.with_tool(tool)
       start = chat.messages.size
       seen = players_seen   # snapshot BEFORE the pass (console may grow during it)
       begin
         chat.with_instructions(HiveMindPrompts::COMPACTION_PROMPT)  # swaps the system prompt in place
         ask_with_retry(chat, compaction_material(seen))
-        if tool.written.empty?
-          # Distinguish "model decided nothing was worth saving" from
-          # "the model TRIED to write and every call bounced" (gateway
-          # mangling tool arguments). The latter used to fall through to a
-          # successful no-op compaction — and /compact then wiped an
-          # un-distilled session. Any rejected write ⇒ treat as failure.
-          rejected = chat.messages[start..].count do |m|
-            m.role == :tool && m.content.to_s.include?('Invalid tool arguments')
-          end
-          if rejected.positive?
-            log "memory compaction — FAILED: #{rejected} write_memories call(s) rejected (bad/empty arguments) — session kept"
-            return false
-          end
+        writes = extract_memory_writes(chat.messages[start..])
+        if writes.nil?
+          # No parsable JSON block ⇒ nothing usable was produced. MUST NOT
+          # count as a successful no-op: /compact wipes the session on
+          # success, and a mangled reply means an un-distilled session.
+          log 'memory compaction — FAILED: no parsable memory JSON in the reply — session kept'
+          return false
+        end
+        if writes.empty?
           log 'memory compaction — no memory changes (model decided nothing worth updating)'
         else
-          tool.written.each { |key, content| log "memory compaction — #{key}: #{content.length} chars" }
+          writes.each do |entry|
+            key = entry['key'].to_s.strip
+            content = entry['content'].to_s
+            if key.empty?
+              log 'memory compaction — skipped entry with empty key'
+            elsif @memory_store.write_key(key, content)
+              log "memory compaction — #{key}: #{content.length} chars"
+            else
+              log "memory compaction — #{key} FAILED to write"
+            end
+          end
         end
         # Coverage diagnostic: any player the session touched who still has
         # no memory blob? (The prompt requires one per player, but the
@@ -63,11 +69,9 @@ module HiveMindCompaction
         log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
       ensure
         # Strip the pass from the live conversation and restore the live
-        # system prompt + tool set (so the session that continues is
-        # unchanged, and write_memories stays compaction-only).
+        # system prompt (so the session that continues is unchanged).
         removed = chat.messages.slice!(start..) || []
         chat.with_instructions(system_prompt_with_memories)
-        chat.tools.delete(:write_memories)
         # Drop the persisted-conversation cache: the next persist must
         # re-serialize WITHOUT the stripped compaction messages.
         @persisted_messages = nil
@@ -82,6 +86,33 @@ module HiveMindCompaction
   # ── Long-term memory (compaction) ─────────────────────────────
 
   private
+
+  # Pull [{"key","content"}] out of the compaction reply: the LAST
+  # non-empty assistant message of the pass, its fenced ```json block if
+  # present (else the whole text), parsed leniently — a JSON::ParserError
+  # falls back to the outermost [..] span. Returns [] for a legit "nothing
+  # changed", nil when nothing parsable was found (caller fails the pass).
+  def extract_memory_writes(pass_messages)
+    text = pass_messages.select { |m| m.role == :assistant }
+                        .filter_map { |m| c = m.content.to_s; c.empty? ? nil : c }
+                        .last
+    return nil if text.nil?
+    blocks = text.scan(/```(?:json)?\s*(.*?)```/m).flatten
+    candidate = (blocks.last || text).strip
+    parsed = begin
+      JSON.parse(candidate)
+    rescue JSON::ParserError
+      l = candidate.index('[')
+      r = candidate.rindex(']')
+      begin
+        l && r && r > l ? JSON.parse(candidate[l..r]) : nil
+      rescue JSON::ParserError
+        nil
+      end
+    end
+    return nil unless parsed.is_a?(Array)
+    parsed.select { |e| e.is_a?(Hash) && e.key?('key') && e.key?('content') }
+  end
 
   # Is there anything worth compacting? A session with no conversation and
   # no console lines has nothing to distill — skip the wasted LLM call.

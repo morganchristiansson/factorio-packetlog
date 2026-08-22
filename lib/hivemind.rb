@@ -4,7 +4,7 @@ require 'set'
 require 'time'
 require 'ruby_llm'
 require_relative 'memory_store'
-# RubyLLM tool classes (HivemindReply, RconQuery, WriteMemories,
+# RubyLLM tool classes (HivemindReply, RconQuery,
 # ScheduleFollowUp, CancelFollowUp) live in hivemind_tools.rb.
 require_relative 'hivemind_tools'
 require_relative 'hivemind_prompts'

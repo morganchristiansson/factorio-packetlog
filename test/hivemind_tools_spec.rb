@@ -46,39 +46,12 @@ class TestHivemindTools < Minitest::Test
   end
 
 
-  def test_write_memories_tool_writes_one_memory_per_call
-    Dir.mktmpdir do |dir|
-      store = MemoryStore.new(dir)
-      tool = WriteMemories.new(store: store)
-      result = tool.call('key' => 'soul', 'content' => 'new soul')
-      assert_equal 'soul updated', result
-      tool.call('key' => 'knowledge', 'content' => 'the mall was built')
-      tool.call('key' => 'alice', 'content' => 'alice built the mall')
-      tool.call('key' => 'bob', 'content' => 'bob stomped the belts')
-      assert_equal 'new soul', store.soul
-      assert_equal 'the mall was built', store.knowledge
-      assert_equal 'alice built the mall', store.player('alice')
-      assert_equal 'bob stomped the belts', store.player('bob')
-      assert_equal [['soul', 'new soul'], ['knowledge', 'the mall was built'],
-                    ['alice', 'alice built the mall'], ['bob', 'bob stomped the belts']],
-                   tool.written
-    end
-  end
-
-
-  def test_write_memories_tool_skips_empty_key
-    Dir.mktmpdir do |dir|
-      store = MemoryStore.new(dir)
-      tool = WriteMemories.new(store: store)
-      result = tool.call('key' => '', 'content' => 'no key')
-      assert_includes result.to_s, 'SKIPPED'
-      assert_empty tool.written
-      tool.call('key' => 'soul', 'content' => 'fine')
-      tool.call('key' => 'alice', 'content' => 'player fine')
-      assert_equal [['soul', 'fine'], ['alice', 'player fine']], tool.written
-      assert_equal 'fine', store.soul
-      assert_equal 'player fine', store.player('alice')
-    end
+  def test_write_memories_tool_removed
+    # write_memories was removed entirely: this gateway drops tool-call
+    # arguments for compaction-scale payloads, so compaction parses a
+    # fenced JSON block from the model's plain-text reply instead
+    # (see compact_memory! / extract_memory_writes).
+    assert !defined?(WriteMemories), 'WriteMemories must stay removed'
   end
 
 end

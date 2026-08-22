@@ -104,10 +104,13 @@ module HiveMindPrompts
       follow-up id; cancel_followup cancels a pending one (like clearTimeout).
   PROMPT
 
-  # System prompt for a MEMORY COMPACTION pass — a separate one-shot chat
-  # (never the live conversation) with ONLY the write_memories tool. The
-  # model reviews the session material and overwrites the keyed memory
-  # blobs, one write_memories call per memory. See compact_memory!.
+  # System prompt for a MEMORY COMPACTION pass — a one-shot pass inside
+  # the live chat (cache reuse) with NO tools. The model reviews the
+  # session material and emits the memory updates as a fenced JSON block
+  # at the END of its reply; compact_memory! parses and applies it. Plain
+  # text is the ONLY channel this gateway delivers reliably — tool-call
+  # arguments are dropped in transport (write_memories was tried batched,
+  # per-call, strict, and flat: {} arrived every time). See compact_memory!.
   COMPACTION_PROMPT = <<~PROMPT
     You are "Hivemind", the collective consciousness of this Factorio
     factory. This is a MEMORY COMPACTION pass, not a conversation — no
@@ -129,7 +132,7 @@ module HiveMindPrompts
                   factory).
 
     Rules:
-    - Overwrite each memory with its COMPLETE new content — the tool
+    - Overwrite each memory with its COMPLETE new content — each entry
       replaces the whole blob; it does not merge. Anything you leave out
       is lost.
     - EVERY player named in "Players encountered this session" must have
@@ -146,10 +149,24 @@ module HiveMindPrompts
       transcript.
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
-    - Make ONE write_memories call per memory you want to update —
-      multiple sequential calls are expected and fine. Never skip a
-      memory that needs updating to save a call.
     - The current content of each memory is shown below — start from it;
       do not discard knowledge that is still true.
+
+    OUTPUT FORMAT (critical):
+    Think freely first if you need to — but your reply MUST end with ONE
+    fenced code block containing a JSON array of {"key","content"}
+    objects, one object per memory you want to write:
+
+      ```json
+      [{"key": "soul", "content": "...complete new soul..."},
+       {"key": "alice", "content": "...complete new alice memory..."}]
+      ```
+
+    - Include only genuinely-changed memories plus one entry for EVERY
+      player in "Players encountered this session" lacking a current
+      memory. Use [] only if truly nothing changed.
+    - This JSON block is the ONLY mechanism that writes memories —
+      anything outside the block is discarded. Never use tools: they are
+      not available in this pass.
   PROMPT
 end

@@ -48,6 +48,41 @@ class TestHivemindPersistence < Minitest::Test
     end
   end
 
+  # Compaction passes hard-killed by Ctrl-C never ran their strip step,
+  # so their failed write_memories rounds got persisted. Restoring them
+  # poisons the next compaction (the model imitates its own {} failures).
+  # The restore path must scrub the calls, their results, and the
+  # orphaned compaction-material user prompts — but keep everything else.
+  def test_restore_scrubs_dead_write_memories_debris
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      File.write(sess, JSON.pretty_generate({
+        'console_queue' => [['alice', 'hello']],
+        'followups' => [],
+        'messages' => [
+          { 'role' => 'user', 'content' => 'turn: hi' },
+          { 'role' => 'assistant', 'content' => 'hello yourself' },
+          # orphaned compaction material (always starts with this prefix)
+          { 'role' => 'user', 'content' => "Current memories:\n=== soul ===\nold" },
+          { 'role' => 'assistant', 'content' => nil, 'tool_calls' => [
+            { 'id' => 'wm1', 'name' => 'write_memories', 'arguments' => '{}' } ] },
+          { 'role' => 'tool', 'tool_call_id' => 'wm1',
+            'content' => { error: 'Invalid tool arguments: missing keyword: key' }.inspect },
+          # a legit tool round-trip must survive the scrub untouched
+          { 'role' => 'assistant', 'content' => nil, 'tool_calls' => [
+            { 'id' => 'rp1', 'name' => 'reply', 'arguments' => '{"text":"hi"}' } ] },
+          { 'role' => 'tool', 'tool_call_id' => 'rp1', 'content' => 'sent' }
+        ]
+      }))
+      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      msgs = a.instance_variable_get(:@chat).messages.reject { |m| m.role == :system }
+      roles = msgs.map(&:role)
+      assert_equal %i[user assistant assistant tool], roles, 'debris dropped, good round-trip kept'
+      refute_includes msgs.map(&:content), /Current memories:/
+      assert a.instance_variable_get(:@chat).tools.key?(:reply)
+    end
+  end
+
 
   # Regression: tool messages persisted without their link to the assistant
   # tool_calls message were restored bare, and the provider rejected the

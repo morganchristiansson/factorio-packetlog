@@ -61,6 +61,35 @@ module HiveMindPersistence
         tc['name'] = legacy if legacy
       end
     end
+    # Pass 0: scrub DEAD write_memories exchanges. Compaction passes that
+    # were hard-killed (Ctrl-C) never ran their strip step, so their
+    # failed tool-call rounds got persisted — dozens of "write_memories({})
+    # → Invalid tool arguments" pairs that poison the next compaction
+    # (the model reads its own failures and imitates them). Drop the
+    # calls, their results, and the orphaned compaction-material user
+    # prompts (they always start with "Current memories:"; live turn
+    # prompts start with "Current context:").
+    wm_ids = Set.new
+    messages.each do |m|
+      next unless m.is_a?(Hash) && m['tool_calls'].is_a?(Array)
+      m['tool_calls'].each { |tc| wm_ids << tc['id'] if tc['name'] == 'write_memories' }
+    end
+    scrubbed = 0
+    messages.reject! do |m|
+      drop =
+        if m['role'] == 'assistant' && m['tool_calls'].is_a?(Array)
+          m['tool_calls'].any? { |tc| tc['name'] == 'write_memories' }
+        elsif m['role'] == 'tool'
+          wm_ids.include?(m['tool_call_id']) || m['content'].to_s.include?('Invalid tool arguments')
+        elsif m['role'] == 'user'
+          m['content'].to_s.start_with?('Current memories:')
+        else
+          false
+        end
+      scrubbed += 1 if drop
+      drop
+    end
+
     # Pass 1: tool_call ids declared by assistant messages, so tool results
     # can be re-linked (a restored tool message whose call is missing would
     # dangle → provider rejects the whole request).
@@ -90,7 +119,8 @@ module HiveMindPersistence
     end
     puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, " \
          "#{messages.size} conversation messages" \
-         "#{n_rearmed.positive? ? ", #{n_rearmed} follow-ups re-armed" : ''}"
+         "#{n_rearmed.positive? ? ", #{n_rearmed} follow-ups re-armed" : ''}" \
+         "#{scrubbed.positive? ? " (scrubbed #{scrubbed} dead write_memories messages)" : ''}"
   rescue JSON::ParserError, StandardError => e
     log_error('session load failed — starting fresh', e)
     @console_queue = []

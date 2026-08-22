@@ -82,69 +82,6 @@ class RconQuery < RubyLLM::Tool
   end
 end
 
-# RubyLLM tool: overwrite Hivemind's long-term memory blobs (one per
-# call). ONLY
-# registered on the compaction chat (never on the live conversation) —
-# the compaction prompt tells the model to use it to update memories keyed
-# by soul / knowledge / <player>. FLAT arguments (key + content scalars,
-# one memory per call) — deliberately shaped like the reply/rcon_query
-# tools that demonstrably traverse this gateway: the previous nested
-# array-of-objects schema lost its arguments in transport entirely (the
-# only tool on this endpoint that ever failed). Each call replaces its
-# whole blob — the model must provide the COMPLETE new content (nothing
-# is merged). The model only ever sees keys; file paths are MemoryStore's
-# business.
-class WriteMemories < RubyLLM::Tool
-  desc 'Overwrite ONE Hivemind long-term memory. Call once per memory you '
-       'want to update — multiple calls in a row are fine and expected. '
-       'key is "soul" (who you are), "knowledge" (durable facts), or a '
-       'player name (what you know about that player). content is the '
-       'COMPLETE new memory — it replaces the whole blob, it is not merged. '
-       'Only write memories that genuinely changed.'
-
-  params schema: {
-    type: 'object',
-    properties: {
-      key: {
-        type: 'string',
-        description: 'Memory key: "soul", "knowledge", or a player name.'
-      },
-      content: {
-        type: 'string',
-        description: 'COMPLETE new content for this memory — it replaces the whole blob.'
-      }
-    },
-    required: %w[key content],
-    additionalProperties: false
-  }
-  # NOTE: flat scalar args, NO strict:true, NO nesting. History: the
-  # original schema was a nested array-of-objects with strict:true, then
-  # non-strict — both variants lost their arguments in transport ({}) on
-  # every attempt, while every flat tool (reply/rcon_query/...) worked on
-  # the same endpoint. Keep this tool flat.
-
-  # What was actually written, as [key, content] pairs (for logging).
-  attr_reader :written
-
-  def initialize(store:)
-    @store = store
-    @written = []
-  end
-
-  def execute(key:, content:)
-    key = key.to_s.strip
-    content = content.to_s
-    if key.empty?
-      'Error: empty key SKIPPED'
-    elsif @store.write_key(key, content)
-      @written << [key, content]
-      "#{key} updated"
-    else
-      "#{key} FAILED"
-    end
-  end
-end
-
 # RubyLLM tool: schedule a follow-up turn after a delay (like JavaScript
 # setTimeout). The model uses it when a plan or request needs a later
 # check/reminder — e.g. "rally the players to defend spawn" →

@@ -16,8 +16,9 @@ module HiveMindCompaction
   # exactly as it was (minus whatever the model chose to remember).
   #
   # The compaction visibility exposes ONLY the write_memories tool — never
-  # say/rcon_query — and the prompt demands all updates in a single
-  # batched call. Runs under the mutex so it can't interleave with a live
+  # say/rcon_query — and the prompt demands one call per memory (flat
+  # scalar args; the gateway loses nested/batched payloads). Runs under
+  # the mutex so it can't interleave with a live
   # ask. Manual only: triggered by /compact — never on quit (no auto
   # compaction). The /compact command wipes the session after a SUCCESSFUL
   # pass ("distill then start fresh"); on failure the session is kept

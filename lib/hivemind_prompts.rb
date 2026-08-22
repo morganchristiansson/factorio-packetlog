@@ -107,7 +107,7 @@ module HiveMindPrompts
   # System prompt for a MEMORY COMPACTION pass — a separate one-shot chat
   # (never the live conversation) with ONLY the write_memories tool. The
   # model reviews the session material and overwrites the keyed memory
-  # blobs, batching every update into one call. See compact_memory!.
+  # blobs, one write_memories call per memory. See compact_memory!.
   COMPACTION_PROMPT = <<~PROMPT
     You are "Hivemind", the collective consciousness of this Factorio
     factory. This is a MEMORY COMPACTION pass, not a conversation — no
@@ -146,8 +146,9 @@ module HiveMindPrompts
       transcript.
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
-    - Batch ALL updates into ONE write_memories call. Never make one call
-      per memory.
+    - Make ONE write_memories call per memory you want to update —
+      multiple sequential calls are expected and fine. Never skip a
+      memory that needs updating to save a call.
     - The current content of each memory is shown below — start from it;
       do not discard knowledge that is still true.
   PROMPT

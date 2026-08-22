@@ -82,54 +82,46 @@ class RconQuery < RubyLLM::Tool
   end
 end
 
-# RubyLLM tool: batch-overwrite Hivemind's long-term memory blobs. ONLY
+# RubyLLM tool: overwrite Hivemind's long-term memory blobs (one per
+# call). ONLY
 # registered on the compaction chat (never on the live conversation) —
 # the compaction prompt tells the model to use it to update memories keyed
-# by soul / knowledge / <player>. One call carries ALL updates as an
-# array, so a compaction pass is a single API round trip instead of one
-# call per memory. Each entry replaces its whole blob — the model must
-# provide the COMPLETE new content (nothing is merged). The model only
-# ever sees keys; file paths are MemoryStore's business.
+# by soul / knowledge / <player>. FLAT arguments (key + content scalars,
+# one memory per call) — deliberately shaped like the reply/rcon_query
+# tools that demonstrably traverse this gateway: the previous nested
+# array-of-objects schema lost its arguments in transport entirely (the
+# only tool on this endpoint that ever failed). Each call replaces its
+# whole blob — the model must provide the COMPLETE new content (nothing
+# is merged). The model only ever sees keys; file paths are MemoryStore's
+# business.
 class WriteMemories < RubyLLM::Tool
-  desc 'Overwrite Hivemind long-term memories (batch). Pass ALL updates in ONE call. ' \
-       'Each entry has a key and content: key is "soul" (who you are), "knowledge" ' \
-       '(durable facts), or a player name (what you know about that player). Content ' \
-       'is the COMPLETE new memory — it replaces the whole blob, it is not merged. ' \
-       'Only include memories that genuinely changed.'
+  desc 'Overwrite ONE Hivemind long-term memory. Call once per memory you '
+       'want to update — multiple calls in a row are fine and expected. '
+       'key is "soul" (who you are), "knowledge" (durable facts), or a '
+       'player name (what you know about that player). content is the '
+       'COMPLETE new memory — it replaces the whole blob, it is not merged. '
+       'Only write memories that genuinely changed.'
 
   params schema: {
     type: 'object',
     properties: {
-      memories: {
-        type: 'array',
-        description: 'All memory updates, batched into this one call.',
-        items: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description: 'Memory key: "soul", "knowledge", or a player name.'
-            },
-            content: {
-              type: 'string',
-              description: 'COMPLETE new content for this memory (replaces the whole blob).'
-            }
-          },
-          required: %w[key content],
-          additionalProperties: false
-        }
+      key: {
+        type: 'string',
+        description: 'Memory key: "soul", "knowledge", or a player name.'
+      },
+      content: {
+        type: 'string',
+        description: 'COMPLETE new content for this memory — it replaces the whole blob.'
       }
     },
-    required: %w[memories],
+    required: %w[key content],
     additionalProperties: false
   }
-  # NOTE: deliberately NO strict:true. This is the only strict tool, and
-  # on the current gateway strict mode + this nested array-of-objects
-  # schema makes the model emit EMPTY arguments ({}) on every attempt
-  # (7-token completions — the payload is never generated; broken
-  # constrained decoding, not lost transport). Compaction then spins on
-  # "Invalid tool arguments: missing keyword: memories". Every other
-  # (non-strict) tool works fine on the same endpoint.
+  # NOTE: flat scalar args, NO strict:true, NO nesting. History: the
+  # original schema was a nested array-of-objects with strict:true, then
+  # non-strict — both variants lost their arguments in transport ({}) on
+  # every attempt, while every flat tool (reply/rcon_query/...) worked on
+  # the same endpoint. Keep this tool flat.
 
   # What was actually written, as [key, content] pairs (for logging).
   attr_reader :written
@@ -139,23 +131,17 @@ class WriteMemories < RubyLLM::Tool
     @written = []
   end
 
-  def execute(memories:)
-    memories = memories.is_a?(Array) ? memories : []
-    return 'Error: memories must be an array of {key, content} objects.' if memories.empty?
-    results = memories.map do |entry|
-      entry = entry.is_a?(Hash) ? entry : {}
-      key = entry['key'].to_s.strip
-      content = entry['content'].to_s
-      if key.empty?
-        'missing key SKIPPED'
-      elsif @store.write_key(key, content)
-        @written << [key, content]
-        "#{key} updated"
-      else
-        "#{key} FAILED"
-      end
+  def execute(key:, content:)
+    key = key.to_s.strip
+    content = content.to_s
+    if key.empty?
+      'Error: empty key SKIPPED'
+    elsif @store.write_key(key, content)
+      @written << [key, content]
+      "#{key} updated"
+    else
+      "#{key} FAILED"
     end
-    halt(results.join('; '))
   end
 end
 

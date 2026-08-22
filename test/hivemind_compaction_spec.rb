@@ -135,7 +135,7 @@ class TestHivemindCompaction < Minitest::Test
   end
 
 
-  def test_compact_memory_runs_inside_live_chat_with_batched_tool
+  def test_compact_memory_runs_inside_live_chat_with_per_call_tool
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       chat = agent.instance_variable_get(:@chat)
@@ -163,7 +163,7 @@ class TestHivemindCompaction < Minitest::Test
       assert_kind_of WriteMemories, seen[:tools].first
       # compaction swapped its own system prompt in, then restored the live one
       assert_includes seen[:instructions].first, 'write_memories'
-      assert_includes seen[:instructions].first, 'Batch ALL updates into ONE'
+      assert_includes seen[:instructions].first, "ONE write_memories call per memory"
       assert_includes seen[:instructions].last, 'Persistent memories'  # restored live prompt
       # material = current memories + console + context; the conversation
       # thread itself is already in the chat (not duplicated in the material)

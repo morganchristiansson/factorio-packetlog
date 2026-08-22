@@ -46,17 +46,15 @@ class TestHivemindTools < Minitest::Test
   end
 
 
-  def test_write_memories_tool_batches_all_keys
+  def test_write_memories_tool_writes_one_memory_per_call
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
       tool = WriteMemories.new(store: store)
-      result = tool.call('memories' => [
-        { 'key' => 'soul', 'content' => 'new soul' },
-        { 'key' => 'knowledge', 'content' => 'the mall was built' },
-        { 'key' => 'alice', 'content' => 'alice built the mall' },
-        { 'key' => 'bob', 'content' => 'bob stomped the belts' }
-      ])
-      assert_kind_of RubyLLM::Tool::Halt, result
+      result = tool.call('key' => 'soul', 'content' => 'new soul')
+      assert_equal 'soul updated', result
+      tool.call('key' => 'knowledge', 'content' => 'the mall was built')
+      tool.call('key' => 'alice', 'content' => 'alice built the mall')
+      tool.call('key' => 'bob', 'content' => 'bob stomped the belts')
       assert_equal 'new soul', store.soul
       assert_equal 'the mall was built', store.knowledge
       assert_equal 'alice built the mall', store.player('alice')
@@ -68,15 +66,15 @@ class TestHivemindTools < Minitest::Test
   end
 
 
-  def test_write_memories_tool_skips_bad_entries
+  def test_write_memories_tool_skips_empty_key
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
       tool = WriteMemories.new(store: store)
-      result = tool.call('memories' => [
-        { 'key' => '', 'content' => 'no key' },
-        { 'key' => 'soul', 'content' => 'fine' },
-        { 'key' => 'alice', 'content' => 'player fine' }
-      ])
+      result = tool.call('key' => '', 'content' => 'no key')
+      assert_includes result.to_s, 'SKIPPED'
+      assert_empty tool.written
+      tool.call('key' => 'soul', 'content' => 'fine')
+      tool.call('key' => 'alice', 'content' => 'player fine')
       assert_equal [['soul', 'fine'], ['alice', 'player fine']], tool.written
       assert_equal 'fine', store.soul
       assert_equal 'player fine', store.player('alice')

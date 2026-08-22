@@ -52,6 +52,6 @@ fast_entity_transfer), 262 was misnamed instantly_create_space_platform
 
 ## Fixtures
 
-- `spec/fixtures/selected_entity_cleared.bin` (client packet)
-- `spec/fixtures/selected_entity_changed_very_close.bin` (type 265 — now
+- `test/fixtures/selected_entity_cleared.bin` (client packet)
+- `test/fixtures/selected_entity_changed_very_close.bin` (type 265 — now
   known to be change_picking_state; renamed `265-change_picking_state.bin`)

@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for scheduled follow-ups (hivemind_followups.rb): registry, scheduler thread, restart persistence.
-# Run: ruby -Ilib spec/hivemind_followups_spec.rb
+# Run: ruby -Ilib test/hivemind_followups_spec.rb
 
 require_relative 'hivemind_helper'
 
@@ -80,16 +80,12 @@ class TestHivemindFollowUps < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.online_provider = -> { [] }
-      a1.player_stats_provider = -> { [] }
       a1.schedule_followup(delay_seconds: 60, task: 'remind spawn defense')
       a1.send(:persist!)
       data = JSON.parse(File.read(sess))
       assert_equal 1, data['followups'].size, 'follow-up persisted with its deadline'
 
       a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a2.online_provider = -> { [] }
-      a2.player_stats_provider = -> { [] }
       a2.define_singleton_method(:complete) { |_p| '' }
       fups = a2.instance_variable_get(:@followups)
       assert_equal 1, fups.size
@@ -104,8 +100,6 @@ class TestHivemindFollowUps < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.online_provider = -> { [] }
-      a1.player_stats_provider = -> { [] }
       a1.schedule_followup(delay_seconds: 60, task: 'ping')
       # Rewrite the persisted deadline to the near future (simulates downtime)
       data = JSON.parse(File.read(sess))
@@ -113,8 +107,6 @@ class TestHivemindFollowUps < Minitest::Test
       File.write(sess, JSON.generate(data))
 
       a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a2.online_provider = -> { [] }
-      a2.player_stats_provider = -> { [] }
       a2.define_singleton_method(:complete) { |_p| '' }
       deadline = Time.now + 3
       sleep 0.05 until a2.instance_variable_get(:@followups).empty? || Time.now > deadline

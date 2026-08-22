@@ -2,11 +2,11 @@
 # frozen_string_literal: true
 
 # Fixture-driven regression tests.
-# Run: ruby -Ilib spec/packet_fixtures_spec.rb
+# Run: ruby -Ilib test/packet_fixtures_spec.rb
 #
 # Tests the REAL FactorioProtocol implementation against:
-#  1. REAL packets captured from live sessions (spec/fixtures/packets.rb)
-#  2. Synthetic variations of write_to_console payloads (spec/fixtures/chat_variations.rb)
+#  1. REAL packets captured from live sessions (test/fixtures/packets.rb)
+#  2. Synthetic variations of write_to_console payloads (test/fixtures/chat_variations.rb)
 
 require 'minitest/autorun'
 require 'factorio_protocol'

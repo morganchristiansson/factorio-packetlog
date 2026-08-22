@@ -164,21 +164,6 @@ class PlayerAttrs
     end
   end
 
-  # Snapshot for context / AI queries, sorted by name:
-  # [{name:, index:, connected:, admin:, online_time_ticks:, afk_time_ticks:}]
-  def snapshot(current_tick)
-    @players.map do |name, p|
-      {
-        name: name,
-        index: p[:index],
-        connected: !!p[:connected],
-        admin: !!p[:admin],
-        online_time_ticks: online_time_ticks(name, current_tick),
-        afk_time_ticks: afk_time_ticks(name, current_tick),
-      }
-    end.sort_by { |p| p[:name] }
-  end
-
   # ── Live roster / liveness (drives the server-mode timeout watchdog) ──
 
   # Liveness stamp by name — ANY incoming C→S packet from the player proves

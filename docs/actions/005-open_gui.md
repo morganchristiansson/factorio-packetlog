@@ -69,5 +69,5 @@ are available, else 2 (bare echo).
 
 ## Fixtures
 
-- `spec/fixtures/packets.rb`: `client_open_gui_8b`, `client_open_gui_8b_2`,
+- `test/fixtures/packets.rb`: `client_open_gui_8b`, `client_open_gui_8b_2`,
   `client_open_gui_8b_3`, `server_open_gui_echo_14b`, `server_open_gui_echo_2b`

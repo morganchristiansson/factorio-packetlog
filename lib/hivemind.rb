@@ -59,17 +59,6 @@ class HiveMindAgent
   HISTORY_SIZE = 1000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
-  # Callable returning the names of players currently online (the sniffer
-  # sets this to its packet-derived list each construction — see
-  # FactorioSniffer#online_players). Falls back to an RCON roster query.
-  attr_accessor :online_provider
-
-  # Callable returning mirrored player attributes (see
-  # FactorioSniffer#player_stats — [{name:, index:, connected:, admin:,
-  # online_time_ticks:}] with online_time computed lazily from the game
-  # tick). Falls back to an RCON player_attributes query.
-  attr_accessor :player_stats_provider
-
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;
   # the sniffer prints the startup warning and messages are ignored.
   def disabled?
@@ -582,18 +571,12 @@ class HiveMindAgent
     persist_queue! if @session_path
   end
 
-  # Names of players currently in-game. Primary source: the sniffer's
-  # packet-derived online tracking (FactorioSniffer#online_players); if no
-  # provider is wired (agent used standalone), query RCON directly. Names
-  # are force-cleaned: packet-derived names are binary-flagged and must not
+  # Names of players currently in-game, queried live from RCON. There is
+  # deliberately no other source: every reply is DELIVERED via RCON too,
+  # so if these queries fail nothing could be sent regardless. Names are
+  # force-cleaned: wire-derived names may be binary-flagged and must not
   # taint the UTF-8 context snapshot.
   def online_player_list
-    if @online_provider
-      list = @online_provider.call
-      return [] if list.nil?
-      return list.map { |p| clean_text(p[:name]) } if list.first.is_a?(Hash)
-      return list.map { |n| clean_text(n) }
-    end
     @rcon&.connected_players&.map { |p| clean_text(p[:name]) } || []
   rescue StandardError => e
     log_error('online-player query failed', e)
@@ -601,24 +584,10 @@ class HiveMindAgent
   end
 
   # Attribute snapshot for a specific player ({name:, admin:, connected:,
-  # online_time:} from RCON, or the mirrored provider's online_time_ticks
-  # form), or nil when unknown. Primary source: RCON (LuaPlayer attrs,
-  # includes the live session); falls back to the mirrored provider
-  # snapshot when RCON is unavailable or the player isn't in its attrs yet.
+  # online_time:} — LuaPlayer attrs via RCON), or nil when unknown.
   def player_attrs_for(name)
-    if @rcon
-      attrs = @rcon.player_attributes
-      if attrs
-        hit = attrs.find { |p| p[:name] == name }
-        return hit if hit
-      end
-    end
-    if @player_stats_provider
-      list = @player_stats_provider.call || []
-      hit = list.find { |p| p[:name] == name }
-      return hit if hit
-    end
-    nil
+    return nil unless @rcon
+    @rcon.player_attributes&.find { |p| p[:name] == name }
   rescue StandardError => e
     log_error("player attrs query failed for #{name}", e)
     nil
@@ -639,19 +608,16 @@ class HiveMindAgent
     " — they #{facts.join(' and ')}"
   end
 
-  # Player attribute lines for the system context. Primary source: the
-  # sniffer's mirrored PlayerAttrs (packet-maintained, seeded from RCON);
-  # if the provider yields nothing (attrs not seeded yet / query failed),
-  # fall back to a direct RCON query. Names are force-cleaned (see
-  # online_player_list).
+  # Player attribute lines for the system context, queried live from RCON
+  # (LuaPlayer attrs — same reasoning as online_player_list: replies need
+  # RCON anyway). Names are force-cleaned (see online_player_list).
   # One "Name: total-play-time (flags)" fragment per CONNECTED player.
   # Offline players are omitted entirely — the prompt covers who is online
   # right now; lifetime stats of everyone else are noise (and a growing
   # token cost on long-lived servers). Flags: admin; afk <time> while
   # connected and idle.
   def player_stat_lines
-    list = @player_stats_provider ? (@player_stats_provider.call || []) : []
-    list = @rcon&.player_attributes || [] if list.empty? && @rcon
+    list = @rcon ? (@rcon.player_attributes || []) : []
     list.select { |p| p[:connected] }.map do |p|
       time = format_ticks(p[:online_time_ticks] || p[:online_time])
       flags = []

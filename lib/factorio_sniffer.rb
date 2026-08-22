@@ -10,18 +10,11 @@ require_relative 'rcon_client'
 require_relative 'hivemind'
 require_relative 'player_attrs'
 
-# Mutable session state carried across hot reloads. The entry point keeps
-# one of these; on Ctrl-C it snapshots the running sniffer into it, reloads
-# the code, and rebuilds a sniffer with the same state — so the capture
-# file keeps its position, player names survive, and stats are continuous.
-class SnifferState
-  attr_accessor :player_db, :pcap_writer, :unknown_writer, :stats,
-                :self_ip, :self_name, :self_index, :peer_names,
-                :ip_names, :roster_loaded, :ai_agent, :attrs,
-                :game_tick, :attrs_loaded, :protocol_version, :chat_segments,
-                :show_players, :show_actions, :hide_actions,
-                :debug, :timeout_watchdog
-end
+# Hot reload (Ctrl-C / SIGHUP): the RUNNING instance reloads its own code
+# IN PLACE — no rebuild, no state snapshot, no capture reopen. `load`
+# reopens the class definitions; this object keeps every ivar (and the
+# open capture handle), so new code applies on the next dispatch with
+# zero packet loss. A second interrupt within QUIT_WINDOW quits.
 
 # ─────────────────────────────────────────────────────────────────────
 # Main Application
@@ -41,19 +34,33 @@ class FactorioSniffer
   # positive sticks until rejoin/restart; keep headroom generous.
   HEARTBEAT_TIMEOUT = 60.0
 
-  def initialize(options, state = nil)
+  # Lib files reloaded on Ctrl-C/SIGHUP (relative to lib/). `load` re-reads
+  # each file (redefining classes); `require` would only load once.
+  # Constant-redefinition warnings are expected and silenced during load.
+  RELOADABLE_LIBS = %w[
+    factorio_protocol item_db player_db pcap live_capture rcon_client memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol/packets/factorio_packet
+    factorio_protocol/packets/heartbeat_packet
+    factorio_protocol/packets/connection_packets
+  ].freeze
+
+  # Seconds between two Ctrl-C/SIGHUP presses that count as "quit".
+  # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
+  QUIT_WINDOW = 5
+
+  def initialize(options, pcap_writer: nil)
     @options = options
-    @state = state || SnifferState.new
-    @player_db = @state.player_db || PlayerDatabase.new(options[:player_db])
+    @player_db = PlayerDatabase.new(options[:player_db])
     @grief = nil
-    @stats = @state.stats || { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
+    @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
     # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
     # analysis (-r) doesn't re-capture. Auto-naming uses a STABLE base
     # (captures/server-<port>.pcap) — the writer hangs exactly one rotation
     # timestamp off it, and a restart preserves the previous run via
     # PcapWriter#rotate_on_restart. Client mode defers until the first packet
-    # reveals the server identity. The state's writer (hot reload) is reused.
-    @pcap_writer = @state.pcap_writer
+    # reveals the server identity. Tests inject a fake writer via the
+    # pcap_writer: kwarg (dependency injection, not config).
+    @pcap_writer = pcap_writer
     @pending_capture = nil
     if !options[:pcap] && !@pcap_writer
       dir = default_capture_dir
@@ -66,7 +73,7 @@ class FactorioSniffer
         @pending_capture = dir  # client: resolve the server identity on the first packet
       end
     end
-    @unknown_writer = @state.unknown_writer || (options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil)
+    @unknown_writer = options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
       @item_db = ItemDB.new(options[:item_db])
@@ -80,44 +87,43 @@ class FactorioSniffer
     # outgoing (C→S) heartbeat actions. This lets us correct the peer-id
     # based guesses from ConnectionAcceptOrDeny / NewPeerInfo, which use
     # NETWORK peer ids — those only equal game indexes for new joiners.
-    @self_ip = @state.self_ip
-    @self_name = @state.self_name
-    @self_index = @state.self_index  # 0-indexed game player index of this client
+    @self_ip = nil
+    @self_name = nil
+    @self_index = nil  # 0-indexed game player index of this client
     # peer_id (network) -> name, for join/leave events (peer ids are NOT
     # game indexes; game indexes come from heartbeat actions instead).
-    @peer_names = @state.peer_names || {}
+    @peer_names = {}
     # The live roster + liveness live entirely in @attrs (PlayerAttrs):
     # "online" == record with :connected, whose :hb field drives the timeout
     # watchdog. One structure, one lock — no parallel copies to drift.
-    @timeout_watchdog = @state.timeout_watchdog
+    @timeout_watchdog = nil
     ensure_timeout_watchdog
     # src_ip → [name, confirmed]: every player seen connecting (msg 4
     # username), flipped to confirmed once their first C→S heartbeat action
     # binds a game index. Lets liveness touches and clean-quit signals
     # (C→S PeerDisconnect sync action / msg 14) resolve WHO without S→C
     # analysis. Survives hot reloads via state.
-    @ip_names = @state.ip_names || {}
+    @ip_names = {}
     # Cross-packet chat segment reassembly buffer: [player, total_segs] =>
     # {seg_no => payload}. Split chat messages arrive as separate
-    # input-action segments across packets; merged when complete. Survives
-    # hot reloads via state.
-    @chat_segments = @state.chat_segments || {}
+    # input-action segments across packets; merged when complete.
+    @chat_segments = {}
     # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
     # once from RCON, maintained by packet decoding. See PlayerAttrs.
     # Also owns the live roster (connected records) + liveness (:hb).
-    @attrs = @state.attrs || PlayerAttrs.new
+    @attrs = PlayerAttrs.new
     # Latest game tick observed in heartbeat tick closures — the clock for
     # lazy online_time computation (60 ticks/s, tick is in every closure).
-    @game_tick = @state.game_tick || 0
+    @game_tick = 0
     # Interactive output filters (stdin console, /show /actions /noise /debug).
-    # Survive hot reloads via state. Empty list = no restriction.
-    @show_players = @state.show_players || []
-    @show_actions = @state.show_actions || []
-    @hide_actions = @state.hide_actions || []
+    # Empty list = no restriction.
+    @show_players = []
+    @show_actions = []
+    @hide_actions = []
     # Whether decoded per-action lines print. The runtime /debug toggle wins
-    # over the --debug startup flag (state survives hot reloads). Default is
-    # OFF — the normal operator output is chat + join/leave events + warnings.
-    @debug = @state.debug.nil? ? !!@options[:debug] : @state.debug
+    # over the --debug startup flag. Default is OFF — the normal operator
+    # output is chat + join/leave events + warnings.
+    @debug = !!@options[:debug]
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -170,28 +176,20 @@ class FactorioSniffer
       end
       # Protocol version → input-action SEGMENT-type mapping. Explicit
       # --protocol-version wins; otherwise ask RCON for
-      # helpers.game_version (cached in state so hot reloads keep it). Main
-      # action types are version-stable and need no switch — only segments
-      # follow defines.input_action.
+      # helpers.game_version (cached on @protocol_version — an ivar, so it
+      # survives hot reloads with the instance). Main action types are
+      # version-stable and need no switch — only segments follow
+      # defines.input_action.
       # HiveMind AI agent: reads packet-decoded chat and answers players who
       # say "hivemind". Auto-enabled by the entry point (server mode +
-      # HIVE_API_KEY); survives hot reloads (kept in SnifferState so the
-      # LLM context and rate limiter carry over).
-      @agent = @state.ai_agent
-      # Re-point the agent's online-player source at THIS sniffer instance —
-      # needed on every construction (fresh or hot-reloaded) since the agent
-      # persists while the sniffer object is rebuilt.
-      # NOTE: hot reload swaps CODE, not object shape — the agent keeps its
-      # boot-time ivars. Changes that add/remove instance state need a full
-      # restart; method/tool/prompt changes hot-reload fine.
-      @agent.ensure_followup_scheduler if @agent
-      @agent.online_provider = -> { online_players } if @agent
-      @agent.player_stats_provider = -> { player_stats } if @agent
-      if options[:ai_agent] && !@agent
+      # HIVE_API_KEY). Lives as a plain ivar: hot reload swaps the CODE under
+      # this object, not the object itself, so there is nothing to carry
+      # over or re-point. The agent pulls its roster/stats straight from
+      # RCON.
+      if options[:ai_agent]
         if @rcon
           @agent = HiveMindAgent.new(rcon: @rcon)
-          @agent.online_provider = -> { online_players }
-          @agent.player_stats_provider = -> { player_stats }
+          @agent.ensure_followup_scheduler
           unless @agent.disabled?
             puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
           end
@@ -235,10 +233,14 @@ class FactorioSniffer
     elsif @options[:interface]
       # Seed the roster before capturing so existing players' names are
       # known from the start (RCON is authoritative; later joiners are
-      # learned from the packet stream). One-shot — see load_roster.
+      # learned from the packet stream). Runs again after every in-place
+      # reload — see load_roster for why that re-seed matters.
       load_roster if @rcon
       load_player_attrs if @rcon
-      capturer = LiveCapture.new(
+      # Memoized: a reload must NOT reopen the capture device. Reusing this
+      # handle across reloads is what makes them lossless (and avoids two
+      # BPF listeners duplicating every packet).
+      @capturer ||= LiveCapture.new(
         interface: @options[:interface],
         port: @options[:port],
         transfer_block_sink: (@options[:save_transfer_blocks] || @options[:full_capture] ? @pcap_writer : nil),
@@ -249,8 +251,11 @@ class FactorioSniffer
       if @options[:local_ip]
         puts "Filtering: showing only packets involving #{@options[:local_ip]}"
       end
-      capturer.each_packet { |*args| process_packet(*args) }
+      @capturer.each_packet { |*args| process_packet(*args) }
     end
+  rescue Interrupt
+    handle_interrupt!
+    retry
   end
 
   # Finalize the session: summary, persist player names, close writers.
@@ -262,33 +267,38 @@ class FactorioSniffer
     @unknown_writer&.close
   end
 
-  # Capture the stateful objects so a hot-reloaded instance can pick up
-  # where this one left off (same capture file, same player DB, stats,
-  # learned identities).
-  def snapshot
-    SnifferState.new.tap do |st|
-      st.player_db = @player_db
-      st.pcap_writer = @pcap_writer
-      st.unknown_writer = @unknown_writer
-      st.stats = @stats
-      st.self_ip = @self_ip
-      st.self_name = @self_name
-      st.self_index = @self_index
-      st.peer_names = @peer_names
-      st.ip_names = @ip_names
-      st.chat_segments = @chat_segments
-      st.roster_loaded = @state.roster_loaded
-      st.ai_agent = @agent
-      st.attrs = @attrs
-      st.game_tick = @game_tick
-      st.attrs_loaded = @state.attrs_loaded
-      st.protocol_version = @state.protocol_version
-      st.show_players = @show_players
-      st.show_actions = @show_actions
-      st.hide_actions = @hide_actions
-      st.debug = @debug
-      st.timeout_watchdog = @timeout_watchdog
+  # Ctrl-C / SIGHUP inside #run: FIRST press reloads all sniffer libs IN
+  # PLACE and resumes (same objects, same open capture handle — zero packet
+  # loss); a second press within QUIT_WINDOW re-raises so the entry point
+  # finalizes and quits. Later presses are fresh reloads again.
+  def handle_interrupt!
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise if @last_interrupt && (now - @last_interrupt) <= QUIT_WINDOW
+    @last_interrupt = now
+    reload_code!
+  end
+
+  # Reload the sniffer libs without rebuilding anything: `load` REOPENS
+  # each class definition, so this running instance keeps every ivar (and
+  # the capture handle) while its methods become the new code — dispatch
+  # goes through the class at call time. After loading, revive whatever
+  # depends on post-load state: the protocol-version mapping (reload resets
+  # FactorioProtocol's segment tables to their 2.1 defaults) and the
+  # agent's follow-up scheduler thread (may have died under old code).
+  def reload_code!
+    puts "\nInterrupt — reloading code in place; session preserved."
+    puts "  Press Ctrl+C (or SIGHUP) again within #{QUIT_WINDOW} seconds to quit."
+    @player_db.save
+    old_verbose = $VERBOSE
+    $VERBOSE = nil
+    begin
+      root = File.expand_path('..', __dir__)
+      RELOADABLE_LIBS.each { |lib| load File.expand_path("lib/#{lib}.rb", root) }
+    ensure
+      $VERBOSE = old_verbose
     end
+    select_protocol_version
+    @agent&.ensure_followup_scheduler
   end
 
   private
@@ -991,20 +1001,18 @@ class FactorioSniffer
     true
   end
 
-  # Query the RCON roster once and merge {name -> index} into the player
-  # DB, so players connected at startup are named immediately. Players who
-  # join later are captured from the packet stream (msg 4 username + first
-  # C→S heartbeat game index). A failed query is skipped silently.
+  # Query the RCON roster and merge {name -> index} into the player DB, so
+  # players connected at startup are named immediately. Players who join
+  # later are captured from the packet stream (msg 4 username + first C→S
+  # heartbeat game index). A failed query is skipped silently.
   #
-  # One-shot (state.roster_loaded survives hot reloads): the roster is only
-  # authoritative for the moment we started — joiners/leavers are tracked via
-  # the packet stream from then on, and re-querying on every Ctrl-C just
-  # reprints the same list.
+  # Runs on EVERY run attempt — fresh boot AND each in-place reload. The
+  # reload case is deliberate: it re-anchors the packet-maintained roster
+  # to the server's authoritative view after any interruption. The roster
+  # data itself lives on the persistent @attrs object, so nothing is lost
+  # between runs either way.
   def load_roster
-    return if @state.roster_loaded
-    @state.roster_loaded = true
     return unless @rcon
-    players = @rcon.connected_players
     return if players.nil? || players.empty?
     players.each do |p|
       @player_db.add(p[:index], p[:name])
@@ -1023,16 +1031,9 @@ class FactorioSniffer
   # Names of players currently in-game (online tracking): seeded from the
   # RCON roster at startup, updated from NewPeerInfo / PeerDisconnect and
   # bound to game indexes by C→S heartbeats. Sorted for stable output.
-  # Used by the HiveMind agent to know who is online.
+  # Used by the interactive console status line.
   def online_players
     @attrs.online_names
-  end
-
-  # Snapshot of mirrored player attributes for the AI agent, with
-  # online_time computed lazily against the current game tick:
-  # [{name:, index:, connected:, admin:, online_time_ticks:}]
-  def player_stats
-    @attrs.snapshot(@game_tick)
   end
 
   # Pick the input-action SEGMENT-type mapping for the server's protocol
@@ -1040,10 +1041,10 @@ class FactorioSniffer
   # else query RCON helpers.game_version once and cache in state (survives
   # hot reloads, which reset FactorioProtocol.segment_types to 2.1 default).
   def select_protocol_version
-    version = @options[:protocol_version] || @state.protocol_version
+    version = @options[:protocol_version] || @protocol_version
     if version.nil? && @rcon
       version = @rcon.server_version
-      @state.protocol_version = version if version
+      @protocol_version = version if version
     end
     return unless version
     label = FactorioProtocol.select_version(version)
@@ -1145,8 +1146,8 @@ class FactorioSniffer
   # stream maintains them (PlayerAttrs). A failed/truncated query is
   # non-fatal — attrs are enrichment; the roster/stream keep working.
   def load_player_attrs
-    return if @state.attrs_loaded
-    @state.attrs_loaded = true
+    return if @attrs_loaded
+    @attrs_loaded = true
     return unless @rcon
     attrs = @rcon.player_attributes
     return if attrs.nil? || attrs.empty?
@@ -1247,7 +1248,6 @@ class FactorioSniffer
         warn "#{Time.now.strftime('%H:%M:%S')}  heartbeat watchdog error: #{e.class}: #{e.message}"
       end
     end
-    @state.timeout_watchdog = @timeout_watchdog
   end
 
   # Reassemble a chat message split across input-action segments. The

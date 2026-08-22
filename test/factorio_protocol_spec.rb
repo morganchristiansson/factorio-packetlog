@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for Factorio protocol parsing using known byte sequences.
-# Run: ruby -Ilib spec/factorio_protocol_spec.rb
+# Run: ruby -Ilib test/factorio_protocol_spec.rb
 
 require 'minitest/autorun'
 require 'factorio_protocol'

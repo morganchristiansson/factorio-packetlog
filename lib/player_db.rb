@@ -4,7 +4,8 @@ require 'json'
 
 # Player ID -> name mapping, persisted to a JSON file.
 # IDs are 1-indexed game player indexes (protocol values are 0-indexed;
-# add +1 when decoding). Survives hot reloads via the SnifferState.
+# add +1 when decoding). Persists across restarts and hot reloads via the
+# JSON file.
 class PlayerDatabase
   attr_reader :players
 

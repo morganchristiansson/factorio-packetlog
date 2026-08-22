@@ -32,4 +32,4 @@ Server echo (Player_37, direction 1):
 
 ## Fixtures
 
-- `spec/fixtures/packets.rb`: `server_rotate_entity_echo`
+- `test/fixtures/packets.rb`: `server_rotate_entity_echo`

@@ -4,9 +4,10 @@
 # Captures UDP traffic on the Factorio port, decodes the binary protocol,
 # extracts player actions, and logs them with optional grief detection.
 #
-# Thin entry point: parses args, then runs the sniffer (lib/factorio_sniffer.rb)
-# with a hot-reload loop — Ctrl-C or SIGHUP reloads the code without losing the
-# capture file, player names, or stats; a second Ctrl-C/SIGHUP quits.
+# Thin entry point: parses args, builds the sniffer once, and runs it.
+# Ctrl-C/SIGHUP hot-reloads the lib code IN PLACE (the sniffer keeps its
+# ivars and open capture handle — zero packet loss); a second interrupt
+# within QUIT_WINDOW quits.
 #
 # Usage:
 #   Live capture: sudo ruby factorio-sniffer.rb -i eth0 -p 34197
@@ -193,36 +194,22 @@ if __FILE__ == $PROGRAM_NAME
     puts 'Warning: live capture requires root. Try: sudo ...'
   end
 
-  # ── Hot-reload loop ────────────────────────────────────────────────
-  # Ctrl-C once: snapshot state (capture file stays open, player names and
-  # stats preserved), reload the lib files with `load` (fresh code), rebuild
-  # the sniffer. Ctrl-C again WITHIN 5 SECONDS of the previous one:
-  # finalize (summary, save player db, close capture) and quit. A Ctrl-C
-  # pressed later (more than 5s after the last) is a fresh reload instead —
-  # so you can reload repeatedly while editing code, and double-tap to quit.
-  SNIFFER_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
-    factorio_protocol/packets/factorio_packet
-    factorio_protocol/packets/heartbeat_packet
-    factorio_protocol/packets/connection_packets
-  ].freeze
+  # ── Hot reload (in place) ──────────────────────────────────────────
+  # The sniffer handles Ctrl-C/SIGHUP itself: first press reloads the lib
+  # files IN PLACE (this object keeps every ivar and the open capture
+  # handle — zero packet loss, nothing to re-point) and resumes; a second
+  # press within FactorioSniffer::QUIT_WINDOW bubbles up here → finalize
+  # and quit. See FactorioSniffer#handle_interrupt! / #reload_code!.
 
-  # Seconds between two Ctrl-C presses that count as "quit". Uses monotonic
-  # time so wall-clock changes (NTP, manual) don't affect the window.
-  QUIT_WINDOW = 5
-
-  state = SnifferState.new
-  last_interrupt = nil
+  sniffer = FactorioSniffer.new(options)
 
   # Interactive filter console: reads commands from stdin in a background
-  # thread and dispatches them to the CURRENT sniffer (the loop re-points
-  # it after every hot reload). Commands: /show /actions /noise /debug
-  # /debug /filter /players /stats — see /help. Exits silently when
-  # stdin is closed/not a tty (nohup, systemd, pcap mode).
-  current_sniffer = nil
+  # thread and dispatches them to the sniffer. Commands: /show /actions
+  # /noise /debug /players /stats — see /help. Exits silently when stdin is
+  # closed/not a tty (nohup, systemd, pcap mode).
   filter_console = Thread.new do
     while (line = $stdin.gets)
-      current_sniffer&.handle_command(line)
+      sniffer.handle_command(line)
     end
   rescue IOError, Errno::EIO, Errno::EBADF, SystemCallError
     nil  # stdin unavailable — console disabled
@@ -231,42 +218,17 @@ if __FILE__ == $PROGRAM_NAME
   puts 'Filter console active — type /help for commands' if $stdin.tty?
 
   # Reload on SIGHUP too (systemd ExecReload, shells/tmux send HUP when the
-  # controlling terminal closes, `kill -HUP <pid>` for e.g. a running
-  # nohup/screen session). Raising Interrupt reuses the exact Ctrl-C
-  # semantics below: a single SIGHUP reloads code/state; a second SIGHUP (or
-  # Ctrl-C) within QUIT_WINDOW finalizes and quits. Trap is set once here
-  # (the entry point is not hot-reloaded, so it survives every `load`).
+  # controlling terminal closes, `kill -HUP <pid>`). Raising Interrupt
+  # reuses the exact Ctrl-C semantics inside #run. Trap is set once here —
+  # the entry point is not hot-reloaded, so it survives every `load`.
   Signal.trap('HUP') { raise Interrupt }
 
-  loop do
-    sniffer = FactorioSniffer.new(options, state)
-    current_sniffer = sniffer
-    begin
-      sniffer.run
-      # Natural completion (pcap exhausted or capture loop ended) → finalize.
-      sniffer.finish
-      break
-    rescue Interrupt
-      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      if last_interrupt && (now - last_interrupt) <= QUIT_WINDOW
-        puts "\nInterrupt — shutting down."
-        sniffer.finish
-        break
-      else
-        puts "\nInterrupt — reloading code; capture file and player state preserved."
-        puts "  Press Ctrl+C (or SIGHUP) again within #{QUIT_WINDOW} seconds to quit."
-        state = sniffer.snapshot
-        state.player_db&.save
-        # Reload the library files. `load` re-reads the file (redefining
-        # classes); `require` would only load once. Constant-redefinition
-        # warnings are expected and silenced.
-        old_verbose = $VERBOSE
-        $VERBOSE = nil
-        SNIFFER_LIBS.each { |lib| load File.expand_path("lib/#{lib}.rb", __dir__) }
-        $VERBOSE = old_verbose
-        last_interrupt = now
-        next
-      end
-    end
+  begin
+    sniffer.run
+    # Natural completion (pcap exhausted or capture loop ended) → finalize.
+    sniffer.finish
+  rescue Interrupt
+    puts "\nInterrupt — shutting down."
+    sniffer.finish
   end
 end

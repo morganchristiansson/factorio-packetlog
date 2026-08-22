@@ -114,7 +114,7 @@ is an estimate, and it has hard limits:
 every tool below call it, so they can never disagree (the earlier
 inconsistencies — shoot as i32, drop_item as position, zoom as position —
 came from ad-hoc per-tool decodes; all now fixed + spec'd in
-spec/position_spec.rb).
+test/position_spec.rb).
 
 All take the capture path and `--ver 2.0|2.1` (this server is 2.0 —
 wrong table = garbage names/positions, e.g. build 277 vs the real

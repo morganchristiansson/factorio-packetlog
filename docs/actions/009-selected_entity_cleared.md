@@ -33,5 +33,5 @@ The hover family (types 265-268) and `zoom_around_point` (128) /
 
 ## Fixtures
 
-- `spec/fixtures/selected_entity_cleared.bin` (client packet)
-- `spec/fixtures/packets.rb`: `client_selected_entity_cleared`
+- `test/fixtures/selected_entity_cleared.bin` (client packet)
+- `test/fixtures/packets.rb`: `client_selected_entity_cleared`

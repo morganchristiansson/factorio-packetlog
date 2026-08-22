@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Extract real packet blobs from the pcap for use as test fixtures.
-# Run: ruby -Ilib spec/extract_fixtures.rb
+# Run: ruby -Ilib test/extract_fixtures.rb
 
 require 'fileutils'
 require_relative '../lib/factorio_protocol'

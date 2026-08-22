@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 # Generate a test packet with NewPeerInfo sync action for use as fixture.
-# Run: ruby -Ilib spec/fixtures/gen_join_packet.rb
+# Run: ruby -Ilib test/fixtures/gen_join_packet.rb
 
 require 'fileutils'
 require_relative '../../lib/factorio_protocol'

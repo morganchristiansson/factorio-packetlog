@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests using real packet blobs and synthetic fixtures.
-# Run: ruby -Ilib spec/fixture_tests.rb
+# Run: ruby -Ilib test/fixture_tests.rb
 
 require 'minitest/autorun'
 require 'factorio_protocol'

@@ -415,7 +415,8 @@ ACTIONS = {
   #
   # Main action types and input-action SEGMENT types BOTH follow the
   # server version's enum. select_version picks both maps; defaults to 2.1
-  # (ACTIONS). Survives hot reloads via SnifferState + #select_version.
+  # (ACTIONS). Survives hot reloads: the sniffer re-applies #select_version
+  # after reloading (its @protocol_version ivar outlives the `load`).
   class << self
     attr_accessor :actions, :segment_types
   end

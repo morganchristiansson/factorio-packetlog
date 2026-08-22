@@ -29,4 +29,4 @@ Client (Player_12, entering state):
 
 ## Fixtures
 
-- `spec/fixtures/packets.rb`: `client_change_riding_state`
+- `test/fixtures/packets.rb`: `client_change_riding_state`

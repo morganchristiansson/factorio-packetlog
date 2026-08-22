@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for long-term memory (hivemind_compaction.rb + MemoryStore seeding): SOUL/knowledge prompts, compaction pass.
-# Run: ruby -Ilib spec/hivemind_compaction_spec.rb
+# Run: ruby -Ilib test/hivemind_compaction_spec.rb
 
 require_relative 'hivemind_helper'
 
@@ -54,8 +54,6 @@ class TestHivemindCompaction < Minitest::Test
   def test_turn_prompt_injects_player_memory_with_dedup
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       store = agent.instance_variable_get(:@memory_store)
       store.write_player('alice', 'alice is building the mall')
 
@@ -84,9 +82,8 @@ class TestHivemindCompaction < Minitest::Test
   # seed their memories from the roster — otherwise they'd be unreachable.
   def test_fresh_session_seeds_online_players_memories
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { ['alice', 'carol'] }
-      agent.player_stats_provider = -> { [] }
+      agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice', 'carol']),
+                                api_key: 'sk-test', session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
       store.write_player('alice', 'alice builds malls')
       store.write_player('carol', 'carol hoards circuits')
@@ -107,8 +104,6 @@ class TestHivemindCompaction < Minitest::Test
   def test_ask_llm_injects_triggering_players_memory
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       agent.instance_variable_get(:@memory_store).write_player('alice', 'alice owes the factory a rocket')
       prompt = capture_prompt(agent) { agent.send(:ask_llm, 'alice', 'hivemind whats my build plan?') }
       assert_includes prompt, '=== memory of alice ==='
@@ -118,9 +113,7 @@ class TestHivemindCompaction < Minitest::Test
 
 
   def test_players_seen_covers_every_source_including_join_leave_only
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [{ name: 'zoe' }] }
-    agent.player_stats_provider = -> { [] }
+    agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['zoe']), api_key: 'sk-test', session_path: false, memory_dir: false)
     # chat lines (player field set)
     agent.send(:append_history, 'alice', 'hello')
     agent.send(:append_history, 'bob', 'i will build a mall')
@@ -145,8 +138,6 @@ class TestHivemindCompaction < Minitest::Test
   def test_compact_memory_runs_inside_live_chat_with_batched_tool
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       chat = agent.instance_variable_get(:@chat)
       chat.add_message(role: :user, content: 'turn: alice wants to build a mall')
       chat.add_message(role: :assistant, content: 'the mall will feed the factory')
@@ -205,8 +196,6 @@ class TestHivemindCompaction < Minitest::Test
   def test_compaction_material_lists_pending_followups
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       agent.schedule_followup(delay_seconds: 60, task: 'check the mall')
       material = agent.send(:compaction_material)
       assert_includes material, 'Pending scheduled follow-ups:'

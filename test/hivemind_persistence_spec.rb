@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for session persistence (hivemind_persistence.rb): save/restore, corrupt files, tool-call round-trips.
-# Run: ruby -Ilib spec/hivemind_persistence_spec.rb
+# Run: ruby -Ilib test/hivemind_persistence_spec.rb
 
 require_relative 'hivemind_helper'
 
@@ -20,8 +20,6 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.online_provider = -> { [] }
-      a1.player_stats_provider = -> { [] }
       a1.on_chat('alice', 'goals: build the bus first')
       a1.on_player_event(:joined, 'bob')
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
@@ -98,8 +96,6 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       store = agent.instance_variable_get(:@memory_store)
       store.write_player('alice', 'alice loves belts')
       agent.send(:append_history, 'alice', 'hello hivemind')
@@ -124,8 +120,6 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.online_provider = -> { [] }
-      a1.player_stats_provider = -> { [] }
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
       a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
       a1.send(:persist!)

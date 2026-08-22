@@ -1,3 +1,3 @@
 Action: open_gui type=5 player=6
 Data: 300054fffaffef588f3af5454a01
-Source UDP packet: /workspace/spec/fixtures/open_gui.bin
+Source UDP packet: /workspace/test/fixtures/open_gui.bin

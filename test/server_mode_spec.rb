@@ -12,7 +12,7 @@ $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 require 'tmpdir'
 require 'stringio'
 require_relative '../factorio-sniffer'
-require_relative '../spec/fixtures/packets'
+require_relative 'fixtures/packets'
 
 SERVER_IP = '192.168.1.10'
 CLIENT_IP = '192.168.1.50'
@@ -82,11 +82,11 @@ def run_sniffer(opts)
   $stdout = out
   # Tests must not write capture artifacts into the repo's captures/ — the
   # sniffer's always-on auto-named capture is stubbed with an in-memory
-  # FakePcapWriter via the state's pcap_writer (the exact hot-reload reuse
-  # path). The one exception is Test 11 (opts[:autoname]), which asserts the
-  # auto-naming itself and runs inside its own tmpdir chdir.
-  state = opts[:autoname] ? SnifferState.new : spec_state_with_capture
-  sniffer = FactorioSniffer.new(opts, state)
+  # FakePcapWriter injected after construction. The one exception is Test 11
+  # (opts[:autoname]), which asserts the auto-naming itself and runs inside
+  # its own tmpdir chdir.
+  sniffer = FactorioSniffer.new(opts)
+  sniffer.instance_variable_set(:@pcap_writer, FakePcapWriter.new) unless opts[:autoname] || opts[:pcap_writer]
   begin
     yield sniffer
   ensure
@@ -95,13 +95,11 @@ def run_sniffer(opts)
   [out.string, sniffer]
 end
 
-# SnifferState whose pcap_writer is a FakePcapWriter — constructing a
-# FactorioSniffer with it reuses the writer (skips auto-naming entirely), so
-# no test ever touches the repo's captures/ or spawns a real flusher thread.
-def spec_state_with_capture
-  st = SnifferState.new
-  st.pcap_writer = FakePcapWriter.new
-  st
+# Build a sniffer for tests with the auto-named capture replaced by an
+# in-memory FakePcapWriter — no test ever touches the repo's captures/ or
+# spawns a real flusher thread.
+def make_test_sniffer(opts = {})
+  FactorioSniffer.new(opts.merge(pcap_writer: FakePcapWriter.new))
 end
 
 $pass = 0
@@ -189,7 +187,7 @@ puts "\nTest 5: server mode banner via run()"
 run_pcap = File.join(Dir.tmpdir, 'srv_banner.pcap')
 File.delete(run_pcap) if File.exist?(run_pcap)
 w = PcapWriter.new(run_pcap)
-builder = FactorioSniffer.new({ player_db: nil }, spec_state_with_capture)
+builder = make_test_sniffer(player_db: nil)
 frame = builder.send(:build_fake_ip_udp, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
 w.write_frame(frame)
 w.close
@@ -253,54 +251,38 @@ else
   puts "  INFO: #{non_lo.size} non-loopback interfaces; skipping single-iface assertion"
 end
 
-# ── Test 7: hot reload — state survives code reload ──────────────────
-puts "\nTest 7: hot reload state preservation"
-reload_cap = File.join(Dir.tmpdir, 'srv_reload.pcap')
-File.delete(reload_cap) if File.exist?(reload_cap)
+  # ── Test 7: hot reload — in-place, same objects ──────────────────────────────
+  puts "\nTest 7: hot reload state preservation"
+  s1 = make_test_sniffer(server: true, server_ip: SERVER_IP)
+  s1.instance_variable_set(:@player_db, PlayerDatabase.new(nil))
+  s1.instance_variable_get(:@player_db).add(7, 'hotreload_user')
+  s1.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_pipette'))
+  stats = s1.instance_variable_get(:@stats)
+  db = s1.instance_variable_get(:@player_db)
+  check(stats[:packets] == 1, 'packet counted before reload')
 
-st = SnifferState.new
-st.pcap_writer = PcapWriter.new(reload_cap)
-st.player_db = PlayerDatabase.new(nil)
-st.player_db.add(7, 'hotreload_user')
-st.stats = { packets: 10, factorio_packets: 5, actions: 3, outgoing_skipped: 0 }
+  # In-place reload: handle_interrupt! is exactly what Ctrl-C triggers
+  # inside #run. The SAME object must keep its ivars while the libs reload.
+  begin
+    s1.handle_interrupt!
+    check(true, 'in-place reload runs cleanly')
+  rescue StandardError, ScriptError => e
+    check(false, "in-place reload failed: #{e.class}: #{e.message}")
+  end
+  check(s1.instance_variable_get(:@stats).equal?(stats), 'same instance keeps the SAME stats object')
+  check(s1.instance_variable_get(:@player_db).equal?(db), 'same instance keeps the SAME player DB object')
+  check(s1.instance_variable_get(:@player_db).lookup(7) == 'hotreload_user',
+        'player names survive reload')
+  s1.send(:process_packet, 2, 1_700_000_001.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
+  check(s1.instance_variable_get(:@stats)[:packets] == 2, 'packets keep counting after reload')
 
-s1 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st)
-check(s1.instance_variable_get(:@pcap_writer).equal?(st.pcap_writer),
-      'reloaded sniffer reuses the SAME capture writer (file keeps its position)')
-check(s1.instance_variable_get(:@player_db).lookup(7) == 'hotreload_user',
-      'player names survive reload')
-check(s1.instance_variable_get(:@stats)[:packets] == 10, 'stats survive reload')
-
-# snapshot round-trip: process a packet, snapshot, rebuild, verify continuity
-s1.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_pipette'))
-st2 = s1.snapshot
-s2 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st2)
-check(s2.instance_variable_get(:@stats)[:packets] == 11, 'snapshot carries incremented stats')
-check(s2.instance_variable_get(:@stats)[:actions] >= 4, 'snapshot carries action count')
-check(s2.instance_variable_get(:@pcap_writer).equal?(st.pcap_writer), 'snapshot reuses capture writer')
-check(s2.instance_variable_get(:@player_db).equal?(s1.instance_variable_get(:@player_db)),
-      'snapshot shares the player DB object')
-
-# simulate the entry-point reload: `load` all lib files again (fresh code)
-libs = %w[factorio_protocol item_db player_db pcap live_capture factorio_sniffer]
-begin
-  old_verbose = $VERBOSE
-  $VERBOSE = nil
-  libs.each { |lib| load File.expand_path("lib/#{lib}.rb", File.expand_path('..', __dir__)) }
-  $VERBOSE = old_verbose
-  check(true, 'libs reload cleanly with load()')
-rescue => e
-  check(false, "libs reload failed: #{e.class}: #{e.message}")
-end
-
-# after reload, a fresh sniffer from the old state still works
-s3 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st2)
-check(s3.instance_variable_get(:@player_db).lookup(7) == 'hotreload_user',
-      'post-reload sniffer still has the player names')
-s3.send(:process_packet, 2, 1_700_000_001.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
-check(s3.instance_variable_get(:@stats)[:packets] == 12, 'post-reload sniffer continues counting')
-s3.instance_variable_get(:@pcap_writer).close
-s2.instance_variable_get(:@pcap_writer).close
+  # double-tap quit: a second interrupt within QUIT_WINDOW re-raises
+  begin
+    s1.handle_interrupt!
+    check(false, 'second interrupt within QUIT_WINDOW must raise Interrupt')
+  rescue Interrupt
+    check(true, 'second interrupt within QUIT_WINDOW raises Interrupt')
+  end
 
 # ── Test 8: RCON roster parsing + refresh diff ───────────────────────
 puts "\nTest 8: RCON roster sync"
@@ -350,7 +332,7 @@ end
 
 # refresh_roster → load_roster: initial load only (new players come from
 # the packet stream, no periodic refresh)
-sr = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
+sr = make_test_sniffer(server: true, server_ip: SERVER_IP)
 fake = Object.new
 fake.define_singleton_method(:connected_players) do
   [{ index: 1, name: 'morganc' }, { index: 2, name: 'bob' }]
@@ -368,7 +350,7 @@ check(sr.instance_variable_get(:@player_db).lookup(1) == 'morganc' &&
 # empty server / failed query: no crash, no output
 fake2 = Object.new
 fake2.define_singleton_method(:connected_players) { nil }
-sr2 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
+sr2 = make_test_sniffer(server: true, server_ip: SERVER_IP)
 sr2.instance_variable_set(:@rcon, fake2)
 out = StringIO.new
 old = $stdout; $stdout = out
@@ -384,14 +366,12 @@ fake3.define_singleton_method(:connected_players) do
   queries += 1
   [{ index: 1, name: 'morganc' }]
 end
-sr3 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, spec_state_with_capture)
+sr3 = make_test_sniffer(server: true, server_ip: SERVER_IP)
 sr3.instance_variable_set(:@rcon, fake3)
 sr3.send(:load_roster)              # startup query
-st = sr3.snapshot                   # Ctrl-C reload: state carried over
-sr4 = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st)
-sr4.instance_variable_set(:@rcon, fake3)
-sr4.send(:load_roster)              # reload — must NOT query again
-check(queries == 1, 'roster queried exactly once across hot reload')
+sr3.handle_interrupt!               # in-place reload (loads libs)
+sr3.send(:load_roster)              # run() resumes → re-seeds
+check(queries == 2, 'roster re-queried after reload (re-seed heals drift)')
 
 # ── Test 7: capture filters (keepalives, directions, full-capture) ────
 puts "\nTest 7: capture filters"
@@ -584,11 +564,10 @@ puts "\nHeartbeat watchdog"
 # removed from the live roster (attrs connected records) after
 # HEARTBEAT_TIMEOUT and reported to the agent console queue, instead of
 # lingering undefinedly (prevents the stale-roster forever problem).
-st_wd = spec_state_with_capture
 wd_events = []
 # NOTE: no :interface in opts → ensure_timeout_watchdog must NOT start a
 # thread in tests (guarded). We drive check_heartbeat_timeouts directly.
-s_wd = FactorioSniffer.new({ server: true, server_ip: SERVER_IP, player_db: nil }, st_wd)
+s_wd = make_test_sniffer(server: true, server_ip: SERVER_IP)
 check(s_wd.instance_variable_get(:@timeout_watchdog).nil?,
       'no watchdog thread in tests (no :interface)')
 agent = Object.new

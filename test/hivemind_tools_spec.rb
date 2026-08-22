@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for the RubyLLM tool classes (hivemind_tools.rb): reply, rcon query, memory writes, registration.
-# Run: ruby -Ilib spec/hivemind_tools_spec.rb
+# Run: ruby -Ilib test/hivemind_tools_spec.rb
 
 require_relative 'hivemind_helper'
 

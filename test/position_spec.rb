@@ -7,7 +7,7 @@
 #   * change_shooting_state = [flag(1)][V x][V y] (unsigned /256)
 #   * drop_item = direction double, NOT a position
 #   * zoom_around_point deliberately NOT decoded as a position
-# Run: ruby -Ilib spec/position_spec.rb
+# Run: ruby -Ilib test/position_spec.rb
 
 require 'minitest/autorun'
 require 'factorio_protocol'

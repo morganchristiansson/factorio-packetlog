@@ -50,6 +50,6 @@ Server echo of "molten supply not stable" inside a segment (packet header
 
 ## Fixtures
 
-- `spec/fixtures/packets.rb`: `client_chat_message_0x0b`, `server_chat_echo_segment`,
+- `test/fixtures/packets.rb`: `client_chat_message_0x0b`, `server_chat_echo_segment`,
   `server_empty_chat_echo`, `server_chat_echo_random_flag_packet`
-- `spec/fixtures/chat_variations.rb`: all marker formats + edge cases
+- `test/fixtures/chat_variations.rb`: all marker formats + edge cases

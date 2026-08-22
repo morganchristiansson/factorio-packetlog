@@ -145,31 +145,38 @@ Ctrl-C needed) to filter the console output:
 - Chat (`write_to_console`) is **always printed and exempt from all
   filters** — including the agent's decoded chat feed.
 - Player/action matching is case-insensitive; filters survive Ctrl-C hot
-  reloads (carried in SnifferState).
-- The console reads stdin in a background thread and re-points at the
-  current sniffer after every reload, so it works across hot reloads. It
-  exits silently when stdin isn't available (nohup/systemd/pcap mode).
+  reloads (they're plain ivars on the persistent sniffer instance).
+- The console reads stdin in a background thread and dispatches to the one
+  long-lived sniffer instance. It exits silently when stdin isn't
+  available (nohup/systemd/pcap mode).
 
 ## Hot Reload
 
 Ctrl-C reloads the code; Ctrl-C again **within 5 seconds** of the previous
 press quits. A single Ctrl-C pressed later is another reload — so you can
-reload repeatedly while editing code, and double-tap to shut down. State
-carried across reloads (via `SnifferState`): the open capture writer (file
-keeps its position — never truncated), the player DB, stats, and learned
-identities. Player names are persisted to `players.json` on reload and at
-shutdown.
+reload repeatedly while editing code, and double-tap to shut down.
+Player names are persisted to `players.json` on reload and at shutdown.
 
-Implementation: `factorio-sniffer.rb` is a thin entry point; the reloadable
-classes live in `lib/` (`factorio_protocol`, `item_db`, `player_db`, `pcap`,
-`live_capture`, `rcon_client`, `factorio_sniffer`). On reload the entry
-snapshots state, `load`s the lib files (fresh code), and rebuilds the
-sniffer with the same state. `LiveCapture` re-raises `Interrupt` so the
-entry loop decides reload vs quit.
+Reloads are IN PLACE: `FactorioSniffer#run` rescues `Interrupt`, calls
+`reload_code!` (which `load`s every lib file), and `retry`s. Nothing is
+torn down — the running instance keeps ALL its ivars (player DB, stats,
+online map, agent, filters, learned identities) AND the open capture
+handle (`@capturer` is memoized), so a reload loses ZERO packets. New code
+applies on the next method dispatch because Ruby dispatches through the
+class object at call time, and `load` reopens those class definitions in
+place. After loading, `reload_code!` re-applies the protocol-version
+mapping (the reload resets segment tables to 2.1) and revives the agent's
+follow-up scheduler thread; `run`'s retry also re-runs `load_roster`, re-
+anchoring the packet-maintained roster to RCON's authoritative view.
+
+Implementation: `factorio-sniffer.rb` is a thin entry point (CLI, traps,
+one construction); the reloadable classes live in `lib/` and are listed in
+`FactorioSniffer::RELOADABLE_LIBS`. Caveat: reload swaps CODE, not object
+shape — new ivars need lazy init (`@x ||=`) or a full restart.
 
 ## Tests
 
-- `ruby -Ilib spec/server_mode_spec.rb` — server mode, auto-detect,
+- `ruby -Ilib test/server_mode_spec.rb` — server mode, auto-detect,
   dedicated detection, hot-reload state, RCON roster parsing.
-- `ruby -Ilib spec/packet_fixtures_spec.rb` — real captured packet fixtures.
-- `ruby -Ilib spec/factorio_protocol_spec.rb` — protocol unit tests.
+- `ruby -Ilib test/packet_fixtures_spec.rb` — real captured packet fixtures.
+- `ruby -Ilib test/factorio_protocol_spec.rb` — protocol unit tests.

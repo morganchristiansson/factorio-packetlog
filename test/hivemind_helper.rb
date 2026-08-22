@@ -12,14 +12,18 @@ require 'hivemind'
 
 class FakeRcon
   attr_reader :sent
-  def initialize
+  # connected: player names (or {name:} hashes) for connected_players;
+  # attrs: rows for player_attributes (LuaPlayer attr shape).
+  def initialize(connected: [], attrs: [])
     @sent = []
+    @connected = connected
+    @attrs = attrs
   end
   def say(text)
     @sent << text
   end
-  def player_attributes = []
-  def connected_players = []
+  def player_attributes = @attrs
+  def connected_players = @connected.map { |p| p.is_a?(Hash) ? p : { name: p } }
 end
 
 module HivemindSpecHelpers
@@ -28,8 +32,6 @@ module HivemindSpecHelpers
   def make_agent(**overrides)
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test',
                               session_path: false, memory_dir: false, **overrides)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     agent.define_singleton_method(:complete) { |_prompt| '' }
     agent
   end

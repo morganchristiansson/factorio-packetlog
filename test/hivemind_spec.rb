@@ -4,7 +4,7 @@
 # Tests for the HiveMindAgent core (lib/hivemind.rb): triggers, chat
 # history/context assembly, player events and greetings.
 # Tool, persistence, compaction, and follow-up specs are separate files.
-# Run: ruby -Ilib spec/hivemind_spec.rb
+# Run: ruby -Ilib test/hivemind_spec.rb
 
 require_relative 'hivemind_helper'
 class TestHiveMindAgent < Minitest::Test
@@ -59,10 +59,10 @@ class TestHiveMindAgent < Minitest::Test
   # UTF-8 instruction at prompt assembly (`prompt << instruction`) →
   # Encoding::CompatibilityError, agent aborts mid-ask.
   def test_turn_prompt_survives_binary_flagged_unicode_names
-    @agent.player_stats_provider = -> { [
-      { name: "sévérin".b, online_time_ticks: 60, connected: true },
-      { name: "émoji".b, online_time_ticks: 3600, connected: true },
-    ] }
+    @agent = make_agent(rcon: FakeRcon.new(attrs: [
+      { name: "sévérin".b, online_time: 60, connected: true },
+      { name: "émoji".b, online_time: 3600, connected: true },
+    ]))
     @agent.send(:append_history, "sévérin".b, "talking to the other machine".b)
     @agent.send(:append_history, 'alice', 'another line')
 
@@ -102,8 +102,6 @@ class TestHiveMindAgent < Minitest::Test
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
     agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
     queue = agent.instance_variable_get(:@console_queue)
@@ -146,11 +144,13 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_context_snapshot_includes_online_and_stats
-    @agent.online_provider = -> { ['alice'] }
-    @agent.player_stats_provider = -> { [
-      { name: 'alice', index: 1, connected: true, admin: true, online_time_ticks: 5_040_000 },
-      { name: 'offlineguy', index: 2, connected: false, online_time_ticks: 99_999 },
-    ] }
+    @agent = make_agent(rcon: FakeRcon.new(
+      connected: ['alice'],
+      attrs: [
+        { name: 'alice', index: 1, connected: true, admin: true, online_time: 5_040_000 },
+        { name: 'offlineguy', index: 2, connected: false, online_time: 99_999 },
+      ]
+    ))
     snap = @agent.send(:context_snapshot)
     # Merged section: names + play time for ONLINE players only —
     # offline players must not appear at all.
@@ -185,8 +185,6 @@ class TestHiveMindAgent < Minitest::Test
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
     agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     agent.define_singleton_method(:complete) { |_p| '' }
     agent.on_player_event(:joined, 'alice')
     assert_equal [nil, 'alice joined the game (2d3h played)'],
@@ -194,15 +192,13 @@ class TestHiveMindAgent < Minitest::Test
   end
 
 
-  # No RCON attrs for the player (fresh server / query miss): fall back to
-  # the mirrored provider snapshot.
-  def test_on_player_event_playtime_falls_back_to_provider
+  # No RCON attrs for the player (fresh server / query miss): no playtime
+  # is known, so the join line carries no "(... played)" suffix.
+  def test_on_player_event_playtime_absent_without_rcon_attrs
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [{ name: 'bob', index: 3, connected: true, admin: false, online_time_ticks: 5_184_000 }] }
     agent.define_singleton_method(:complete) { |_p| '' }
     agent.on_player_event(:joined, 'bob')
-    assert_equal [nil, 'bob joined the game (1d0h played)'],
+    assert_equal [nil, 'bob joined the game'],
                  agent.instance_variable_get(:@console_queue)[0]
   end
 
@@ -396,8 +392,6 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_good_bot_triggers_reply
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     asked = nil
     agent.define_singleton_method(:complete) { |p| asked = p; '' }
     agent.on_chat('alice', 'good bot')
@@ -409,8 +403,6 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_good_bot_variants_are_triggers
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     asks = 0
     agent.define_singleton_method(:complete) { |_p| asks += 1; '' }
     ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
@@ -424,8 +416,6 @@ class TestHiveMindAgent < Minitest::Test
     # sequential and seeing the prior Q&A) — never dropped just because
     # someone else asked recently.
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     asked = []
     agent.define_singleton_method(:complete) do |p|
       asked << p
@@ -480,8 +470,6 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_hm_trigger_reaches_llm
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     asked = nil
     agent.define_singleton_method(:complete) { |p| asked = p; '' }
     agent.on_chat('alice', 'wdyt? hm')
@@ -492,8 +480,6 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_shmoose_does_not_trigger
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.online_provider = -> { [] }
-    agent.player_stats_provider = -> { [] }
     called = false
     agent.define_singleton_method(:complete) { |_p| called = true; '' }
     agent.on_chat('alice', 'shmoose is back')
@@ -505,8 +491,6 @@ class TestHiveMindAgent < Minitest::Test
   def test_join_greeting_includes_player_memory
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.online_provider = -> { [] }
-      agent.player_stats_provider = -> { [] }
       agent.instance_variable_get(:@memory_store).write_player('alice', 'alice once nuked the bus on purpose')
       seen_prompt = nil
       agent.define_singleton_method(:complete) do |prompt|

@@ -261,12 +261,14 @@ server mode — client/pcap runs never auto-enable (the agent needs RCON).
 
 ## Hot reload
 
-The agent survives Ctrl-C code reloads (kept in `SnifferState.ai_agent`),
-so LLM context, the rate limiter, and the RubyLLM connection carry over.
-Only a second Ctrl-C (quit) ends it. The only thread it owns is the
-follow-up scheduler — a plain sleep-on-condition-variable thread with no
-shared state beyond the pending list, which keeps running across reloads
-(methods resolve against the reloaded classes) and needs no cleanup.
+The agent survives Ctrl-C code reloads as a plain ivar on the persistent
+sniffer instance (reloads are IN PLACE — same objects, new code), so LLM
+context, the rate limiter, and the RubyLLM connection carry over. Only a
+second Ctrl-C (quit) ends it. The only thread it owns is the follow-up
+scheduler — a plain sleep-on-condition-variable thread with no shared
+state beyond the pending list, which keeps running across reloads (methods
+resolve against the reloaded classes; `reload_code!` revives it if it died)
+and needs no cleanup.
 
 On hot reload the sniffer re-points the agent's providers and calls `@agent.ensure_followup_scheduler`. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars. Changes that add/remove instance state need a full restart; method/tool/prompt changes hot-reload fine.
 

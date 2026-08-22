@@ -104,12 +104,12 @@ See [actions.md](actions.md) for the complete list of input action types.
 
 Documentation must be grounded in real captured packets, not mirror the
 implementation. Every documented format should cite a fixture in
-[`spec/fixtures/packets.rb`](../spec/fixtures/packets.rb) (real packets from
+[`test/fixtures/packets.rb`](../test/fixtures/packets.rb) (real packets from
 live sessions, with expected parse output) or
-[`spec/fixtures/chat_variations.rb`](../spec/fixtures/chat_variations.rb)
+[`test/fixtures/chat_variations.rb`](../test/fixtures/chat_variations.rb)
 (synthetic variations of `write_to_console` payloads).
 
-The fixture specs (`spec/packet_fixtures_spec.rb`) parse each real packet
+The fixture specs (`test/packet_fixtures_spec.rb`) parse each real packet
 through `FactorioProtocol.parse_udp_payload` and assert the exact actions,
 so changing the decoder requires updating the fixtures — preventing
 silent regressions (e.g. the repeated chat truncation bugs).
@@ -118,8 +118,8 @@ To add a fixture from a live capture:
 
 1. Extract the raw UDP payload hex (e.g. from `factorio_capture.pcap`).
 2. Verify the expected parse output manually.
-3. Add it to `spec/fixtures/packets.rb` with the expected actions.
-4. Run `ruby -Ilib spec/packet_fixtures_spec.rb`.
+3. Add it to `test/fixtures/packets.rb` with the expected actions.
+4. Run `ruby -Ilib test/packet_fixtures_spec.rb`.
 
 ## Additional Notes
 

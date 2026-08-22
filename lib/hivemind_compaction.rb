@@ -111,23 +111,18 @@ module HiveMindCompaction
 
   private
 
-  # Build the THROWAWAY chat for one compaction fork: a near-verbatim
-  # DUPLICATE of @chat's current state — the live chat's own :system
-  # message (byte-identical system prompt, NEVER regenerated:
-  # system_prompt_with_memories drifts as memory blobs/online players
-  # change, and any byte difference kills the entire cached prefix at
-  # token 0), plus a bounded tail of the remaining messages
-  # (REPLAY_LAST_MESSAGES, never starting mid-tool-round-trip). No tools:
-  # the fork speaks plain text only. Observers are hooked so the console
-  # keeps showing reasoning/usage during the fork.
+  # Build the THROWAWAY chat for one compaction fork: a verbatim
+  # DUPLICATE of @chat's entire state — every message, including the live
+  # chat's own :system message (byte-identical system prompt, NEVER
+  # regenerated: any byte difference kills the entire cached prefix at
+  # token 0). This is exactly the request shape of a working bot reply —
+  # same full thread, warm cached prefix, tiny generation — which is why
+  # it survives gateways that kill anything unusual. No tools: the fork
+  # speaks plain text only. Observers are hooked so the console keeps
+  # showing reasoning/usage during the fork.
   def build_compaction_chat
     pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
-    msgs = @chat.messages
-    return pass if msgs.empty?
-    sys = msgs.first.role == :system ? msgs.first : nil
-    start = [msgs.size - HiveMindAgent::REPLAY_LAST_MESSAGES, sys ? 1 : 0].max
-    start += 1 while start < msgs.size && msgs[start].role == :tool
-    copy = lambda do |m|
+    @chat.messages.each do |m|
       if m.tool_calls && !m.tool_calls.empty?
         pass.add_message(role: m.role, content: m.content, tool_calls: m.tool_calls)
       elsif m.role == :tool
@@ -136,8 +131,6 @@ module HiveMindCompaction
         pass.add_message(role: m.role, content: m.content)
       end
     end
-    copy.call(sys) if sys
-    msgs[start..].each { |m| copy.call(m) }
     observe_chat(pass)
     pass
   end

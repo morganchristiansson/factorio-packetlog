@@ -203,6 +203,10 @@ module HiveMindCompaction
       @followups.map { |f| "##{f[:id]} (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
     end
     parts << "Pending scheduled follow-ups:\n#{followups.join("\n")}" unless followups.empty?
+    # Read-ONLY on purpose: the console queue belongs to the LIVE bot's
+    # delivery cycle (unread_console drains it into the next live turn).
+    # Compaction only peeks — lines are included in the shared fork
+    # prefix AND stay queued for normal consumption afterwards.
     console = @console_mutex.synchronize do
       @console_queue.uniq.map { |p, m| p ? "#{p}: #{m}" : m }
     end

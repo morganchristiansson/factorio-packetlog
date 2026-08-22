@@ -499,8 +499,8 @@ class HiveMindAgent
     Faraday::TimeoutError,
     Faraday::ConnectionFailed
   ].freeze
-  ASK_ATTEMPTS = 3
-  ASK_RETRY_DELAYS = [5, 15].freeze # seconds before retry 1 / retry 2
+  ASK_ATTEMPTS = 5
+  ASK_RETRY_DELAYS = [5, 15, 30, 60].freeze # seconds before retries 1-4
 
   # Run one chat.ask with retries on transient provider failures. On a
   # failure the half-appended turn is sliced off first — chat.ask adds

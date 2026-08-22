@@ -29,7 +29,6 @@ RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
 
 # ── npm global packages ─────────────────────────────────────────────────────
 RUN npm install -g @earendil-works/pi-coding-agent@0.84.2 && \
-    pi install npm:@narumitw/pi-retry && \
     pi --version
 
 # ── Ruby gems ──────────────────────────────────────────────

@@ -7,6 +7,10 @@ require 'json'
 # blobs (soul / knowledge / <player>). One throwaway chat per key, all
 # sharing the same replayed prefix. Mixin on HiveMindAgent.
 module HiveMindCompaction
+  # Forks run this many at a time. Keys are isolated (separate chats,
+  # separate memory files), so parallelism is safe; keep it modest — the
+  # provider is overloaded and live replies share it.
+  COMPACTION_CONCURRENCY = 2
   # Long-term memory compaction: FORKED per-key passes that review the
   # session (bounded thread tail + current memories + console) and
   # overwrite the keyed memory blobs (soul / knowledge / <player>).
@@ -55,40 +59,57 @@ module HiveMindCompaction
     written = 0
     failures = []
     begin
-      # One fork per key, sequential: each shares the cached prefix of the
-      # last (byte-identical up to the trailing key name), failures stay
-      # contained to their own context, and every generation is small
-      # enough to finish inside the gateway's request window.
-      (%w[soul knowledge] + seen.sort).each do |key|
-        pass = nil
-        @mutex.synchronize do
-          return false unless @chat        # session cleared mid-run
-          pass = build_compaction_chat     # replays CURRENT thread state
-          turn = format(HiveMindPrompts::COMPACTION_TURN, key)
-          ask_with_retry(pass, "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}\n\n#{turn}")
-          content = extract_memory_content(pass.messages)
-          unchanged = content && content.match?(/\AUNCHANGED\z/i)
-          has_blob = !@memory_store.read_key(key).to_s.strip.empty?
-          if content.nil? || (unchanged && !has_blob)
-            # No usable reply — or UNCHANGED for a key with no current
-            # blob (a coverage gap). Counts as failure: the trim must not
-            # drop an un-distilled range.
-            failures << key
-            next
+      # One fork per key, TWO workers in parallel: keys are isolated, each
+      # writes its own memory file (atomic whole-blob), and the provider
+      # already tolerates concurrency (compaction + live replies
+      # interleave). Queue preserves soul/knowledge-first ordering so
+      # concurrent forks still share the longest cached prefix.
+      work = Queue.new
+      (%w[soul knowledge] + seen.sort).each { |k| work << k }
+      results = Mutex.new
+      workers = Array.new(COMPACTION_CONCURRENCY) do
+        Thread.new do
+          loop do
+            key = begin
+              work.pop(true)
+            rescue ThreadError
+              break
+            end
+            pass = nil
+            begin
+              @mutex.synchronize { pass = build_compaction_chat if @chat }
+              next unless pass
+              current = @memory_store.read_key(key).to_s.strip
+              turn = format(HiveMindPrompts::COMPACTION_TURN, key,
+                            current.empty? ? '(none yet)' : current)
+              ask_with_retry(pass, "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}\n\n#{turn}")
+              content = extract_memory_content(pass.messages)
+              unchanged = content && content.match?(/\AUNCHANGED\z/i)
+              has_blob = !current.empty?
+              results.synchronize do
+                if content.nil? || (unchanged && !has_blob)
+                  # No usable reply — or UNCHANGED for a key with no current
+                  # blob (a coverage gap). Counts as failure: the trim must not
+                  # drop an un-distilled range.
+                  failures << key
+                elsif unchanged
+                  # legit no-op
+                elsif @memory_store.write_key(key, content)
+                  written += 1
+                  log "memory compaction — #{key}: #{content.length} chars"
+                else
+                  failures << key
+                end
+              end
+            ensure
+              # Nothing to strip: the live conversation was never touched.
+              # Drop the throwaway chat's reference and let GC take it.
+              pass = nil
+            end
           end
-          next if unchanged   # legit no-op
-          if @memory_store.write_key(key, content)
-            written += 1
-            log "memory compaction — #{key}: #{content.length} chars"
-          else
-            failures << key
-          end
-        ensure
-          # Nothing to strip: the live conversation was never touched.
-          # Drop the throwaway chat's reference and let GC take it.
-          pass = nil
         end
       end
+      workers.each(&:join)
     ensure
       @mutex.synchronize { @compacting = false }
     end

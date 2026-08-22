@@ -149,8 +149,8 @@ module HiveMindPrompts
     - soul and knowledge: only rewrite what genuinely changed; do not
       rewrite unchanged ones.
     - Keep each memory SHORT and information-dense. Hard budgets (they
-      keep this pass fast enough to finish): a player memory ≤ 80 words,
-      knowledge ≤ 250 words, soul ≤ 150 words. Density beats length —
+      keep each pass fast enough to finish): a player memory ≤ 250 words,
+      knowledge ≤ 400 words, soul ≤ 150 words. Density beats length —
       the model reads these as long-term memory, not as a transcript.
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
@@ -163,13 +163,19 @@ module HiveMindPrompts
 
   # Appended AFTER the shared material in every per-key fork, so forks
   # stay byte-identical up to the final line — the longest possible
-  # shared cache prefix across consecutive passes.
+  # shared cache prefix across consecutive passes. Formatted with the
+  # key and the key's CURRENT blob (re-sent right next to the question:
+  # the model decides UNCHANGED against it without hunting through the
+  # material).
   COMPACTION_TURN = <<~PROMPT
     Now write the memory for key "%s".
 
+    Current content of this key:
+    %s
+
     Reply with the COMPLETE new content ONLY — plain text, no quotes, no
     code fences, no commentary before or after. If (and only if) this key
-    already HAS a current memory above and nothing needs updating, reply
-    with exactly: UNCHANGED
+    already HAS a current memory and nothing needs updating, reply with
+    exactly: UNCHANGED
   PROMPT
 end

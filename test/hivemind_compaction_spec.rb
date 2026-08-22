@@ -131,6 +131,39 @@ class TestHivemindCompaction < Minitest::Test
       %w[alice bob carol dave erin frank zoe].each do |name|
         assert_includes seen, name, "expected #{name} to be seen"
       end
+      # the agent's OWN replies are queued under player 'hivemind' — it is
+      # not a player and must never become a compaction target
+      agent.send(:append_history, 'hivemind', 'the factory watches')
+      refute_includes agent.send(:players_seen), 'hivemind'
+    end
+  end
+
+  # Regression: agent replies are queued with player 'hivemind'; before
+  # the AGENT_NAME filter they made compaction write a memories/hivemind
+  # blob (and even an on-disk stray from older builds must be ignored,
+  # not rewritten).
+  def test_compaction_never_writes_agent_self_memory
+    Dir.mktmpdir do |dir|
+      agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice']), api_key: 'sk-test', session_path: false, memory_dir: dir)
+      store = agent.instance_variable_get(:@memory_store)
+      store.write_player('hivemind', 'stray blob from older build')
+      live = agent.instance_variable_get(:@chat)
+      live.add_message(role: :user, content: 'turn: alice says hi')
+      asked = []
+      agent.define_singleton_method(:build_compaction_chat) do
+        fork = super()
+        fork.define_singleton_method(:ask) do |prompt|
+          asked << prompt[/key "([^"]+)"/, 1]
+          add_message(role: :user, content: prompt)
+          add_message(role: :assistant,
+                      content: prompt.include?('key "soul"') ? 'UNCHANGED' : "memory for #{prompt[/key \"([^\"]+)\"/, 1]}")
+        end
+        fork
+      end
+
+      assert agent.compact_memory!
+      assert_equal %w[soul knowledge alice], asked
+      assert_equal 'stray blob from older build', store.player('hivemind'), 'agent blob untouched'
     end
   end
 

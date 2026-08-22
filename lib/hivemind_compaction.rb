@@ -63,9 +63,11 @@ module HiveMindCompaction
       # writes its own memory file (atomic whole-blob), and the provider
       # already tolerates concurrency (compaction + live replies
       # interleave). Queue preserves soul/knowledge-first ordering so
-      # concurrent forks still share the longest cached prefix.
+      # concurrent forks still share the longest cached prefix. The agent
+      # itself is never a target (stray blobs from older builds are
+      # ignored, not rewritten).
       work = Queue.new
-      (%w[soul knowledge] + seen.sort).each { |k| work << k }
+      (%w[soul knowledge] + seen.sort).reject { |k| k == HiveMindAgent::AGENT_NAME }.each { |k| work << k }
       results = Mutex.new
       workers = Array.new(COMPACTION_CONCURRENCY) do
         Thread.new do
@@ -232,7 +234,7 @@ module HiveMindCompaction
       @console_queue.each do |p, msg|
         if p
           name = clean_text(p)
-          players << name unless name.empty?
+          players << name unless name.empty? || name == HiveMindAgent::AGENT_NAME
         elsif msg =~ /\A(\S+) (?:joined|left) the game/
           name = clean_text(Regexp.last_match(1))
           players << name unless name.empty?
@@ -242,6 +244,7 @@ module HiveMindCompaction
     @memories_sent.each { |p| players << clean_text(p) }
     @memory_store.player_names.each { |p| players << clean_text(p) }
     online_player_list.each { |p| players << clean_text(p) }
+    players.delete(HiveMindAgent::AGENT_NAME)  # e.g. a stray blob from older builds
     players
   end
 

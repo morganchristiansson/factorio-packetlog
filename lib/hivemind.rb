@@ -48,6 +48,10 @@ class HiveMindAgent
   # "good bot"/"goodbot" keep the conversation alive after a reply
   # (players who get an answer often say thanks — reply in character).
   TRIGGERS = ['hivemind', 'good bot', 'goodbot', 'hm']
+  # The agent's OWN name — its replies are queued with this as the player
+  # and filtered from live prompts (they live in the conversation). Must
+  # never become a compaction target: the agent is not a player.
+  AGENT_NAME = 'hivemind'
   MIN_INTERVAL = 5.0            # min seconds between LLM calls from the SAME player (anti-spam)
   MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
   # Max UNREAD console lines kept between prompts. NOT a limit on what the

@@ -147,9 +147,10 @@ module HiveMindPrompts
       player from memory because they had little to say.
     - soul and knowledge: only rewrite what genuinely changed; do not
       rewrite unchanged ones.
-    - Keep each memory concise and information-dense — a few paragraphs
-      at most. The model reads these as long-term memory, not as a
-      transcript.
+    - Keep each memory SHORT and information-dense. Hard budgets (they
+      keep this pass fast enough to finish): a player memory ≤ 80 words,
+      knowledge ≤ 250 words, soul ≤ 150 words. Density beats length —
+      the model reads these as long-term memory, not as a transcript.
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
     - The current content of each memory is shown below — start from it;
@@ -171,5 +172,7 @@ module HiveMindPrompts
     - This JSON block is the ONLY mechanism that writes memories —
       anything outside the block is discarded. Never use tools: they are
       not available in this pass.
+    - Keep the WHOLE reply under ~1200 words total (reasoning included).
+      Long replies get killed by the server before they finish.
   PROMPT
 end

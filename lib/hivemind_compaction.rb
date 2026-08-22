@@ -97,15 +97,20 @@ module HiveMindCompaction
 
   # Build the THROWAWAY chat for one compaction pass: same model, the
   # LIVE system prompt (identical bytes ⇒ the replayed thread stays a
-  # cache-prefix match), and a deep-enough replay of the live message
-  # thread minus its system entry (tool round-trips keep their links —
-  # the provider rejects dangling tool_call_ids). No tools: the pass
-  # speaks plain text only. Observers are hooked so the console keeps
-  # showing reasoning/usage during the pass.
+  # cache-prefix match), and a bounded tail of the live message thread
+  # (REPLAY_LAST_MESSAGES, never starting mid-tool-round-trip — the
+  # provider rejects dangling tool_call_ids). No tools: the pass speaks
+  # plain text only. Observers are hooked so the console keeps showing
+  # reasoning/usage during the pass. Bounded input + tight output budgets
+  # (see COMPACTION_PROMPT) keep generation inside the gateway's request
+  # window — full-thread passes were killed with HTTP 500 every time.
   def build_compaction_chat
     pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
     pass.with_instructions(system_prompt_with_memories)
-    @chat.messages.each do |m|
+    msgs = @chat.messages
+    start = [msgs.size - HiveMindAgent::REPLAY_LAST_MESSAGES, 1].max
+    start += 1 while start < msgs.size && msgs[start].role == :tool
+    msgs[start..].each do |m|
       next if m.role == :system
       if m.tool_calls && !m.tool_calls.empty?
         pass.add_message(role: m.role, content: m.content, tool_calls: m.tool_calls)

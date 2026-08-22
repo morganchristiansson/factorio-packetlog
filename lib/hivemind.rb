@@ -61,6 +61,13 @@ class HiveMindAgent
   # it saw EXCEPT this newest stretch, retained so the session keeps
   # recent conversational flow and context instead of starting cold.
   TRIM_KEEP_LAST = 12
+  # Messages replayed into a compaction pass (from the thread's END). The
+  # gateway kills long-running completions (~60-90s ⇒ HTTP 500): full-
+  # thread passes generate for minutes and die every time, while live
+  # chats (≤400-char replies) never come close. Older context still
+  # reaches the pass via the console lines + material in the user turn.
+  # Must not start mid-tool-round-trip — see build_compaction_chat.
+  REPLAY_LAST_MESSAGES = 80
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;

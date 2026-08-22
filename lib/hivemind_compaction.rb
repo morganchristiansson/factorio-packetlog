@@ -37,7 +37,7 @@ module HiveMindCompaction
       seen = players_seen   # snapshot BEFORE the pass (console may grow during it)
       begin
         chat.with_instructions(HiveMindPrompts::COMPACTION_PROMPT)  # swaps the system prompt in place
-        chat.ask(compaction_material(seen))
+        ask_with_retry(chat, compaction_material(seen))
         if tool.written.empty?
           log 'memory compaction — no memory changes (model decided nothing worth updating)'
         else

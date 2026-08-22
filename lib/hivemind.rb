@@ -429,12 +429,51 @@ class HiveMindAgent
       # Dynamic context (online players, stats, new console lines) rides
       # in the per-turn user prompt (see turn_prompt).
       register_tools
-      response = @chat.ask(prompt)
+      response = ask_with_retry(@chat, prompt)
       text = response.respond_to?(:content) ? response.content.to_s : ''
       clean_reply(text)
     end
   ensure
     persist! if @session_path  # conversation changed — save for restart
+  end
+
+  # Provider failures worth an application-level retry. NOTE: RubyLLM's
+  # built-in faraday-retry does NOT cover these: it only sees exceptions
+  # raised inside its own middleware (network errors), while HTTP-status
+  # failures are converted to RubyLLM errors by ErrorMiddleware, which
+  # sits OUTSIDE the retry middleware in the stack — so they propagate
+  # unretried (a single 503 kills the call even with max_retries set).
+  RETRYABLE_LLM_ERRORS = [
+    RubyLLM::ServiceUnavailableError,
+    RubyLLM::ServerError,
+    RubyLLM::OverloadedError,
+    RubyLLM::RateLimitError,
+    Faraday::TimeoutError,
+    Faraday::ConnectionFailed
+  ].freeze
+  ASK_ATTEMPTS = 3
+  ASK_RETRY_DELAYS = [5, 15].freeze # seconds before retry 1 / retry 2
+
+  # Run one chat.ask with retries on transient provider failures. On a
+  # failure the half-appended turn is sliced off first — chat.ask adds
+  # the user message to the thread BEFORE the request goes out, so a raw
+  # retry would duplicate the prompt and a final failure would persist
+  # the orphan into the session file. Used by BOTH live asks (complete)
+  # and memory compaction (whose ensure then strips nothing extra).
+  def ask_with_retry(chat, prompt)
+    attempt = 0
+    begin
+      start = chat.messages.size
+      chat.ask(prompt)
+    rescue *RETRYABLE_LLM_ERRORS => e
+      attempt += 1
+      chat.messages.slice!(start..)
+      raise if attempt >= ASK_ATTEMPTS
+      delay = ASK_RETRY_DELAYS[attempt - 1]
+      log "LLM call failed (#{e.class.name.split('::').last}) — retrying #{attempt}/#{ASK_ATTEMPTS - 1} in #{delay}s"
+      sleep delay
+      retry
+    end
   end
 
   # Build the per-turn USER prompt: fresh context snapshot (online

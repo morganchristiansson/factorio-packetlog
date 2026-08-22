@@ -37,22 +37,33 @@ module HiveMindCompaction
     return false if @disabled || !memory_enabled?
     return false unless compactable?
     log "memory compaction #{reason ? "(#{reason}) " : ''}— #{session_summary}"
+    # Snapshot under the mutex, then RELEASE it for the forks: live asks
+    # (greetings, replies) interleave between keys instead of queueing
+    # behind minutes of compaction. Forks never touch @chat, so the only
+    # shared state is the snapshot.
+    seen = nil
     @mutex.synchronize do
       return false unless @chat
+      return false if @compacting          # no overlapping /compact runs
+      @compacting = true
       seen = players_seen   # snapshot BEFORE the passes (console may grow during it)
       # How much of the thread the forks will see — trim_session_after_
       # compaction! drops exactly this range (minus a recent tail) on success.
       @compaction_included_count = @chat.messages.size
-      material = compaction_material(seen)
-      written = 0
-      failures = []
+    end
+    material = compaction_material(seen)
+    written = 0
+    failures = []
+    begin
       # One fork per key, sequential: each shares the cached prefix of the
       # last (byte-identical up to the trailing key name), failures stay
       # contained to their own context, and every generation is small
       # enough to finish inside the gateway's request window.
       (%w[soul knowledge] + seen.sort).each do |key|
-        pass = build_compaction_chat
-        begin
+        pass = nil
+        @mutex.synchronize do
+          return false unless @chat        # session cleared mid-run
+          pass = build_compaction_chat     # replays CURRENT thread state
           turn = format(HiveMindPrompts::COMPACTION_TURN, key)
           ask_with_retry(pass, "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}\n\n#{turn}")
           content = extract_memory_content(pass.messages)
@@ -60,8 +71,8 @@ module HiveMindCompaction
           has_blob = !@memory_store.read_key(key).to_s.strip.empty?
           if content.nil? || (unchanged && !has_blob)
             # No usable reply — or UNCHANGED for a key with no current
-            # blob (a coverage gap). MUST NOT count as success: the trim
-            # would drop an un-distilled range.
+            # blob (a coverage gap). Counts as failure: the trim must not
+            # drop an un-distilled range.
             failures << key
             next
           end
@@ -78,17 +89,19 @@ module HiveMindCompaction
           pass = nil
         end
       end
-      unless failures.empty?
-        log "memory compaction — FAILED: no usable reply for #{failures.join(', ')} — session kept"
-        return false
-      end
-      log 'memory compaction — no memory changes (model decided nothing worth updating)' if written.zero?
-      # Coverage diagnostic: any player the session touched who still has
-      # no memory blob? (The per-key forks require one each, but the model
-      # may have answered UNCHANGED wrongly — better to log than wonder.)
-      missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
-      log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
+    ensure
+      @mutex.synchronize { @compacting = false }
     end
+    unless failures.empty?
+      log "memory compaction — FAILED: no usable reply for #{failures.join(', ')} — session kept"
+      return false
+    end
+    log 'memory compaction — no memory changes (model decided nothing worth updating)' if written.zero?
+    # Coverage diagnostic: any player the session touched who still has
+    # no memory blob? (The per-key forks require one each, but the model
+    # may have answered UNCHANGED wrongly — better to log than wonder.)
+    missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
+    log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
     true
   rescue StandardError => e
     log_error('memory compaction failed', e)
@@ -98,23 +111,23 @@ module HiveMindCompaction
 
   private
 
-  # Build the THROWAWAY chat for one compaction pass: same model, the
-  # LIVE system prompt (identical bytes ⇒ the replayed thread stays a
-  # cache-prefix match), and a bounded tail of the live message thread
-  # (REPLAY_LAST_MESSAGES, never starting mid-tool-round-trip — the
-  # provider rejects dangling tool_call_ids). No tools: the pass speaks
-  # plain text only. Observers are hooked so the console keeps showing
-  # reasoning/usage during the pass. Bounded input + tight output budgets
-  # (see COMPACTION_PROMPT) keep generation inside the gateway's request
-  # window — full-thread passes were killed with HTTP 500 every time.
+  # Build the THROWAWAY chat for one compaction fork: a near-verbatim
+  # DUPLICATE of @chat's current state — the live chat's own :system
+  # message (byte-identical system prompt, NEVER regenerated:
+  # system_prompt_with_memories drifts as memory blobs/online players
+  # change, and any byte difference kills the entire cached prefix at
+  # token 0), plus a bounded tail of the remaining messages
+  # (REPLAY_LAST_MESSAGES, never starting mid-tool-round-trip). No tools:
+  # the fork speaks plain text only. Observers are hooked so the console
+  # keeps showing reasoning/usage during the fork.
   def build_compaction_chat
     pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
-    pass.with_instructions(system_prompt_with_memories)
     msgs = @chat.messages
-    start = [msgs.size - HiveMindAgent::REPLAY_LAST_MESSAGES, 1].max
+    return pass if msgs.empty?
+    sys = msgs.first.role == :system ? msgs.first : nil
+    start = [msgs.size - HiveMindAgent::REPLAY_LAST_MESSAGES, sys ? 1 : 0].max
     start += 1 while start < msgs.size && msgs[start].role == :tool
-    msgs[start..].each do |m|
-      next if m.role == :system
+    copy = lambda do |m|
       if m.tool_calls && !m.tool_calls.empty?
         pass.add_message(role: m.role, content: m.content, tool_calls: m.tool_calls)
       elsif m.role == :tool
@@ -123,6 +136,8 @@ module HiveMindCompaction
         pass.add_message(role: m.role, content: m.content)
       end
     end
+    copy.call(sys) if sys
+    msgs[start..].each { |m| copy.call(m) }
     observe_chat(pass)
     pass
   end

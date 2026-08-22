@@ -206,7 +206,7 @@ class TestHivemindCompaction < Minitest::Test
       kept = live.messages
       # refreshed system prompt (memories were rewritten on disk) + the
       # TRIM_KEEP_LAST tail kept for conversational flow
-      assert_equal 1 + 12, kept.size
+      assert_equal 1 + HiveMindAgent::TRIM_KEEP_LAST, kept.size
       assert_equal :system, kept.first.role
       assert_equal :assistant, kept.last.role
       kept.each { |m| refute_includes m.content.to_s, 'alice wants to build' } # compacted range gone

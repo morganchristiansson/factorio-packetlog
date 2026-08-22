@@ -60,7 +60,9 @@ class HiveMindAgent
   # Messages kept AFTER a successful compaction: the pass drops everything
   # it saw EXCEPT this newest stretch, retained so the session keeps
   # recent conversational flow and context instead of starting cold.
-  TRIM_KEEP_LAST = 12
+  # Generous on purpose — recent chat context is worth more than the
+  # tokens cost.
+  TRIM_KEEP_LAST = 40
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;

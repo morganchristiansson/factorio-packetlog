@@ -10,36 +10,49 @@ module HiveMindCompaction
   # session (the conversation thread + current memories + console) and
   # overwrites the keyed memory blobs (soul / knowledge / <player>).
   #
-  # Runs INSIDE the live conversation (same chat object) so the provider
-  # reuses its input-token cache for the whole thread — the only new
-  # tokens are the compaction prompt itself. The pass is NOT allowed to
-  # become part of the session: its messages are stripped afterwards and
-  # the system prompt + tool set restored, so a session that continues is
-  # exactly as it was (minus whatever the model chose to remember).
+  # Long-term memory compaction: a one-shot LLM pass that reviews the
+  # session (the conversation thread + current memories + console) and
+  # overwrites the keyed memory blobs (soul / knowledge / <player>).
   #
+  # Runs on a THROWAWAY chat (build_compaction_chat) that replays the
+  # live thread under the LIVE system prompt — NOT inside the live chat,
+  # and NOT with a swapped system prompt. Two reasons:
+  #   • Robustness: the live conversation is never touched, so there is
+  #     no strip step to skip — a Ctrl-C mid-pass cannot leak pass
+  #     messages into the session anymore (that leak poisoned every
+  #     restart for a day).
+  #   • Cache: prompt caching matches request PREFIXES. Swapping the
+  #     system prompt diverges at token 0 and forfeits the whole cached
+  #     thread; keeping the live system prompt makes everything up to
+  #     the last live turn a prefix match, so only the pass prompt tail
+  #     is uncached.
   # The pass uses NO tools — this gateway drops tool-call arguments in
   # transport (tried batched, per-call, strict, flat: {} arrived every
-  # time), while plain text always survives. The model ends its reply
-  # with a fenced JSON array of {key, content}; we parse and apply it.
-  # Runs under the mutex so it can't interleave with a live ask. Manual
-  # only: triggered by /compact — never on quit (no auto compaction). The
-  # /compact command wipes the session after a SUCCESSFUL pass ("distill
-  # then start fresh"); on failure — including an un-parsable reply — the
-  # session is kept. clear_session! stays callable standalone so the wipe
-  # can be scripted/tested without the LLM call.
+  # time), while plain text always survives. The compaction instructions
+  # ride in the user turn; the model ends its reply with a fenced JSON
+  # array of {key, content}; we parse and apply it. Runs under the mutex
+  # so it can't interleave with a live ask. Manual only: triggered by
+  # /compact — never on quit (no auto compaction). The /compact command
+  # wipes the session after a SUCCESSFUL pass ("distill then start
+  # fresh", keeping console lines that arrived mid-pass); on failure —
+  # including an un-parsable reply — the session is kept. clear_session!
+  # stays callable standalone so the wipe can be scripted/tested without
+  # the LLM call.
   def compact_memory!(reason = nil)
     return false if @disabled || !memory_enabled?
     return false unless compactable?
     log "memory compaction #{reason ? "(#{reason}) " : ''}— #{session_summary}"
     @mutex.synchronize do
-      chat = @chat
-      return false unless chat
-      start = chat.messages.size
+      return false unless @chat
       seen = players_seen   # snapshot BEFORE the pass (console may grow during it)
+      # How much of the thread the pass will see — trim_session_after_compaction!
+      # drops exactly this range (minus a recent tail) on success.
+      @compaction_included_count = @chat.messages.size
+      pass = build_compaction_chat
       begin
-        chat.with_instructions(HiveMindPrompts::COMPACTION_PROMPT)  # swaps the system prompt in place
-        ask_with_retry(chat, compaction_material(seen))
-        writes = extract_memory_writes(chat.messages[start..])
+        prompt = "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{compaction_material(seen)}"
+        ask_with_retry(pass, prompt)
+        writes = extract_memory_writes(pass.messages)
         if writes.nil?
           # No parsable JSON block ⇒ nothing usable was produced. MUST NOT
           # count as a successful no-op: /compact wipes the session on
@@ -68,14 +81,9 @@ module HiveMindCompaction
         missing = seen.map { |n| @memory_store.sanitize_key(n) } - @memory_store.player_names
         log "memory compaction — NO memory for: #{missing.join(', ')}" unless missing.empty?
       ensure
-        # Strip the pass from the live conversation and restore the live
-        # system prompt (so the session that continues is unchanged).
-        removed = chat.messages.slice!(start..) || []
-        chat.with_instructions(system_prompt_with_memories)
-        # Drop the persisted-conversation cache: the next persist must
-        # re-serialize WITHOUT the stripped compaction messages.
-        @persisted_messages = nil
-        log "memory compaction — stripped #{removed.size} temp messages from the live conversation" if removed.any?
+        # Nothing to strip: the live conversation was never touched. Drop
+        # the throwaway chat's reference and let GC take it.
+        pass = nil
       end
     end
     true
@@ -86,6 +94,30 @@ module HiveMindCompaction
   # ── Long-term memory (compaction) ─────────────────────────────
 
   private
+
+  # Build the THROWAWAY chat for one compaction pass: same model, the
+  # LIVE system prompt (identical bytes ⇒ the replayed thread stays a
+  # cache-prefix match), and a deep-enough replay of the live message
+  # thread minus its system entry (tool round-trips keep their links —
+  # the provider rejects dangling tool_call_ids). No tools: the pass
+  # speaks plain text only. Observers are hooked so the console keeps
+  # showing reasoning/usage during the pass.
+  def build_compaction_chat
+    pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
+    pass.with_instructions(system_prompt_with_memories)
+    @chat.messages.each do |m|
+      next if m.role == :system
+      if m.tool_calls && !m.tool_calls.empty?
+        pass.add_message(role: m.role, content: m.content, tool_calls: m.tool_calls)
+      elsif m.role == :tool
+        pass.add_message(role: :tool, content: m.content, tool_call_id: m.tool_call_id)
+      else
+        pass.add_message(role: m.role, content: m.content)
+      end
+    end
+    observe_chat(pass)
+    pass
+  end
 
   # Pull [{"key","content"}] out of the compaction reply: the LAST
   # non-empty assistant message of the pass, its fenced ```json block if

@@ -135,65 +135,83 @@ class TestHivemindCompaction < Minitest::Test
   end
 
 
-  def test_compact_memory_parses_json_reply_and_strips_itself
+  def test_compact_memory_parses_json_reply_and_leaves_live_chat_alone
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      chat = agent.instance_variable_get(:@chat)
-      chat.add_message(role: :user, content: 'turn: alice wants to build a mall')
-      chat.add_message(role: :assistant, content: 'the mall will feed the factory')
+      live = agent.instance_variable_get(:@chat)
+      live.add_message(role: :user, content: 'turn: alice wants to build a mall')
+      live.add_message(role: :assistant, content: 'the mall will feed the factory')
       agent.send(:append_history, 'alice', 'i will build the mall')
-      pre_size = chat.messages.size
+      pre_size = live.messages.size
+      seen = { prompt: nil }
 
-      # Compaction reuses the LIVE chat (input-token cache); stub only the
-      # parts that would hit the network, and simulate the reply the real
-      # ask would append (which compaction must strip afterwards).
-      seen = { instructions: [], tools: [], material: nil }
-      chat.define_singleton_method(:with_instructions) { |t| seen[:instructions] << t; self }
-      chat.define_singleton_method(:ask) do |material|
-        seen[:material] = material
-        add_message(role: :user, content: material)         # compaction material
-        add_message(role: :assistant, content:
-          "Reviewed the session.\n\n```json\n" \
-          '[{"key": "soul", "content": "new soul from json"}, ' \
-          '{"key": "alice", "content": "alice built the mall"}]\n```')
+      # The pass runs on a THROWAWAY chat (build_compaction_chat) that
+      # replays the live thread; stub its ask to simulate the model reply.
+      # Exercise the REAL build_compaction_chat (replay logic under test);
+      # only the network call is stubbed on the resulting throwaway chat.
+      pass = nil
+      agent.define_singleton_method(:build_compaction_chat) do
+        pass = super()
+        pass.define_singleton_method(:ask) do |prompt|
+          seen[:prompt] = prompt
+          add_message(role: :user, content: prompt)
+          add_message(role: :assistant, content:
+            "Reviewed the session.\n\n```json\n" \
+            '[{"key": "soul", "content": "new soul from json"}, ' \
+            '{"key": "alice", "content": "alice built the mall"}]\n```')
+        end
+        pass
       end
 
       assert agent.compact_memory!('quit'), 'compaction runs'
 
-      assert_empty seen[:tools], 'compaction registers NO tools — JSON in plain text only'
-      # compaction swapped its own system prompt in, then restored the live one
-      assert_includes seen[:instructions].first, 'fenced code block'
-      assert_includes seen[:instructions].last, 'Persistent memories'  # restored live prompt
-      # material = current memories + console + context; the conversation
-      # thread itself is already in the chat (not duplicated in the material)
-      assert_includes seen[:material], 'Current memories:'
-      assert_includes seen[:material], '=== soul ==='
-      assert_includes seen[:material], 'Console lines:'
-      assert_includes seen[:material], 'alice: i will build the mall'
-      assert_includes seen[:material], 'Players encountered this session'
-      assert_includes seen[:material], 'alice'          # from the console line
-      refute_includes seen[:material], 'Session conversation:'
+      # prompt = instructions + material on ONE user turn (cache-prefix
+      # friendly: system prompt unchanged, whole replayed thread cached)
+      assert_includes seen[:prompt], 'MEMORY COMPACTION pass'
+      assert_includes seen[:prompt], 'fenced code block'
+      assert_includes seen[:prompt], 'Current memories:'
+      assert_includes seen[:prompt], 'alice: i will build the mall'
+      # the pass chat REPLAYED the live thread under the live system prompt
+      assert_equal %i[system user assistant user assistant], pass.messages.map(&:role)
+      assert_includes pass.messages.first.content, 'Persistent memories'
+
       # the parsed block was APPLIED to the memory store
       store = agent.instance_variable_get(:@memory_store)
       assert_equal 'new soul from json', store.soul
       assert_equal 'alice built the mall', store.player('alice')
-      # compaction stripped its own messages: the live thread is unchanged
-      assert_equal pre_size, chat.messages.size
-      # live toolset untouched (no write_memories was ever added)
-      assert chat.tools.key?(:reply)
-      assert chat.tools.key?(:rcon_query)
+      # the LIVE conversation was never touched by the pass itself
+      assert_equal pre_size, live.messages.size
+
+      # /compact's post-success step: TRIM, not wipe. Seed enough history
+      # (as if more turns had happened BEFORE compaction) to exercise the
+      # keep-last window, mark the whole thread as "seen by the pass",
+      # then trim like the sniffer handler does.
+      20.times { |i| live.add_message(role: :user, content: "filler #{i}")
+                   live.add_message(role: :assistant, content: "ack #{i}") }
+      agent.instance_variable_set(:@compaction_included_count, live.messages.size)
+      agent.trim_session_after_compaction!
+      kept = live.messages
+      # refreshed system prompt (memories were rewritten on disk) + the
+      # TRIM_KEEP_LAST tail kept for conversational flow
+      assert_equal 1 + 12, kept.size
+      assert_equal :system, kept.first.role
+      assert_equal :assistant, kept.last.role
+      kept.each { |m| refute_includes m.content.to_s, 'alice wants to build' } # compacted range gone
+      assert kept.any? { |m| m.content.to_s.include?('filler') }, 'recent tail kept for flow'
     end
   end
 
   def test_compact_memory_fails_on_unparsable_reply_and_keeps_session
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      chat = agent.instance_variable_get(:@chat)
-      chat.add_message(role: :user, content: 'turn: alice says hi')
+      live = agent.instance_variable_get(:@chat)
+      live.add_message(role: :user, content: 'turn: alice says hi')
       agent.send(:append_history, 'alice', 'hivemind hello')
-      pre_size = chat.messages.size
-      chat.define_singleton_method(:ask) do |material|
-        add_message(role: :user, content: material)
+      pre_size = live.messages.size
+      pass = RubyLLM.chat(model: 'test', provider: :openai, assume_model_exists: true)
+      agent.define_singleton_method(:build_compaction_chat) { pass }
+      pass.define_singleton_method(:ask) do |prompt|
+        add_message(role: :user, content: prompt)
         add_message(role: :assistant, content: 'I could not decide what to write.')
       end
 
@@ -203,7 +221,7 @@ class TestHivemindCompaction < Minitest::Test
       refute agent.compact_memory!, 'still a failure'
       assert_equal soul_before, store.soul, 'nothing written on failure'
       assert_nil store.player('alice'), 'no player memory written on failure'
-      assert_equal pre_size, chat.messages.size, 'pass messages stripped even on failure'
+      assert_equal pre_size, live.messages.size, 'live conversation never touched'
     end
   end
 

@@ -104,13 +104,16 @@ module HiveMindPrompts
       follow-up id; cancel_followup cancels a pending one (like clearTimeout).
   PROMPT
 
-  # System prompt for a MEMORY COMPACTION pass — a one-shot pass inside
-  # the live chat (cache reuse) with NO tools. The model reviews the
-  # session material and emits the memory updates as a fenced JSON block
-  # at the END of its reply; compact_memory! parses and applies it. Plain
+  # System prompt for a MEMORY COMPACTION pass. NOT sent as a system
+  # instruction — swapping the system prompt would diverge the request
+  # prefix at token 0 and forfeit the cached thread. Instead these
+  # instructions ride at the TOP of the user turn (compact_memory!
+  # prepends them to the session material), on a throwaway chat replaying
+  # the live thread under the LIVE system prompt. The model ends its
+  # reply with a fenced JSON block that compact_memory! parses. Plain
   # text is the ONLY channel this gateway delivers reliably — tool-call
   # arguments are dropped in transport (write_memories was tried batched,
-  # per-call, strict, and flat: {} arrived every time). See compact_memory!.
+  # per-call, strict, and flat: {} arrived every time).
   COMPACTION_PROMPT = <<~PROMPT
     You are "Hivemind", the collective consciousness of this Factorio
     factory. This is a MEMORY COMPACTION pass, not a conversation — no

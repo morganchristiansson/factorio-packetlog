@@ -1102,7 +1102,9 @@ class FactorioSniffer
         # the agent mutex.
         Thread.new do
           if @agent.compact_memory!('manual')
-            @agent.clear_session!
+            # Trim, don't wipe: drop the messages the pass saw (minus a
+            # recent tail kept for flow); mid-pass console lines survive.
+            @agent.trim_session_after_compaction!
           else
             puts 'memory compaction FAILED — session kept (see [hivemind] error above)'
           end

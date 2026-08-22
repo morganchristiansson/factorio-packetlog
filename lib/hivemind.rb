@@ -57,6 +57,10 @@ class HiveMindAgent
   # the next prompt's context. 1000 ≈ ~40k tokens, far beyond any real
   # gap; older lines are dropped with a warning if ever exceeded.
   HISTORY_SIZE = 1000
+  # Messages kept AFTER a successful compaction: the pass drops everything
+  # it saw EXCEPT this newest stretch, retained so the session keeps
+  # recent conversational flow and context instead of starting cold.
+  TRIM_KEEP_LAST = 12
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;
@@ -78,17 +82,54 @@ class HiveMindAgent
   # Since /forget and /clear were removed, /compact is the only interactive
   # trigger here — this method also stays callable to clear WITHOUT
   # distilling. Clears the persisted session file too.
-  def clear_session!
+  #
+  # keep_unread_console: used by /compact. By wipe time the queue holds
+  # ONLY lines that arrived mid-pass (the pass's own ask drained
+  # everything older into its material) — wiping them would silently
+  # lose events nobody has seen yet, so they carry into the fresh
+  # session instead.
+  def clear_session!(keep_unread_console: false)
     @mutex.synchronize do
       @chat&.reset_messages!
       @memories_sent.clear
       @console_mutex.synchronize do
-        @console_queue.clear
+        @console_queue.clear unless keep_unread_console
       end
       # Pending follow-ups belong to the session being wiped — drop them so
       # a stale timer can't inject a turn into the fresh session later.
       @followup_mutex.synchronize { @followups.clear }
       @chat&.with_instructions(system_prompt_with_memories)
+    end
+    persist! if @session_path
+    true
+  end
+
+  # Post-compaction history trim (the /compact path — replaces the old
+  # full wipe): drop exactly the messages the pass included, MINUS the
+  # newest TRIM_KEEP_LAST, which stay so the session keeps recent
+  # conversational flow and context. Console lines that arrived mid-pass
+  # are untouched (the pass drained everything older into its material;
+  # these were never seen). memories_sent is cleared so player memories
+  # re-inject into the trimmed thread, and the system prompt IS refreshed:
+  # the pass rewrote memory blobs on disk, and a trimmed thread is the one
+  # sanctioned "fresh start" case for a prompt change (one bounded cache
+  # rebuild). clear_session! remains for full resets.
+  def trim_session_after_compaction!(keep_last: TRIM_KEEP_LAST)
+    @mutex.synchronize do
+      return false unless @chat
+      included = [@compaction_included_count || 0, @chat.messages.size].min
+      cut = included - keep_last
+      cut = 0 if cut.negative?
+      msgs = @chat.messages
+      # Never leave a kept :tool result dangling under a cut-away call —
+      # the provider rejects the whole request. Advance past orphans.
+      cut += 1 while cut < msgs.size && msgs[cut].role == :tool
+      return true if cut <= 0
+      msgs.slice!(0...cut)
+      log "session trimmed after compaction: dropped #{cut} compacted messages, #{msgs.size} kept"
+      @memories_sent.clear
+      @chat.with_instructions(system_prompt_with_memories)
+      @persisted_messages = nil   # force re-serialization of the trimmed thread
     end
     persist! if @session_path
     true
@@ -222,18 +263,25 @@ class HiveMindAgent
     return unless @chat
     return if @observers_hooked
     @observers_hooked = true
-    @chat.before_tool_call do |tool_call|
+    observe_chat(@chat)
+  end
+
+  # Shared observer body: the live chat hooks once at init; every
+  # throwaway compaction chat gets its own registration (fresh object
+  # per pass, so no duplicate-guard needed).
+  def observe_chat(chat)
+    chat.before_tool_call do |tool_call|
       args = trunc(JSON.generate(tool_call.arguments || {}))
       log "tool call: #{tool_call.name}(#{args})"
     end
-    @chat.after_tool_result do |result|
+    chat.after_tool_result do |result|
       # Halt = the reply tool already printed the reply (and callbacks fire
       # for halted tools too); skip to avoid echoing it a second time.
       next if defined?(RubyLLM::Tool::Halt) && result.is_a?(RubyLLM::Tool::Halt)
       content = result.respond_to?(:content) ? result.content : result
       log "tool result: #{trunc(content)}" unless content.to_s.empty?
     end
-    @chat.after_message do |message|
+    chat.after_message do |message|
       next unless message.role == :assistant
       thinking = message.thinking
       if thinking.is_a?(RubyLLM::Thinking) && !thinking.text.to_s.empty?

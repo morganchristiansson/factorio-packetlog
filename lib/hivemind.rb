@@ -185,14 +185,16 @@ class HiveMindAgent
     @chat = nil
     # Pending scheduled follow-ups (schedule_followup tool) + their mutex
     # and condition variable, so a single scheduler thread sleeps until the
-    # next due time instead of polling. Entries carry a MONOTONIC due (used
+    # next due time instead of polling. Entries are NAME-keyed (the model
+    # picks a short stable key, e.g. 'prowl') and carry a MONOTONIC due (used
     # to fire) and an absolute unix due_at (persisted, so a restart re-arms
-    # with the correct remaining delay). Survive hot reloads (agent persists
-    # in state); cleared by clear_session! — they belong to the session.
+    # with the correct remaining delay). Scheduling an existing name again
+    # REPLACES the entry (upsert — no cancel-first dance). Survive hot
+    # reloads (agent persists in state); cleared by clear_session! — they
+    # belong to the session.
     @followups = []
     @followup_mutex = Mutex.new
     @followup_cond = ConditionVariable.new
-    @followup_seq = 0
     # Console lines are a QUEUE drained on each prompt: append_history
     # enqueues (chat lines, join/leave events, the agent's own replies via
     # HivemindReply's on_sent / the fallback send_reply); unread_console drains

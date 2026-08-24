@@ -16,9 +16,9 @@ class TestHivemindFollowUps < Minitest::Test
 
   # ── Scheduled follow-ups (timeout tool) ────────────────────────
 
-  def test_schedule_followup_stores_entry_and_returns_id
-    result = @agent.schedule_followup(delay_seconds: 60, task: 'check spawn defense')
-    assert_match(/Follow-up #\d+ scheduled for \+60s/, result)
+  def test_schedule_followup_stores_entry_and_returns_name
+    result = @agent.schedule_followup(delay_seconds: 60, task: 'check spawn defense', name: 'spawn-check')
+    assert_match(/Follow-up 'spawn-check' scheduled for \+60s/, result)
     entries = @agent.instance_variable_get(:@followups)
     assert_equal 1, entries.size
     assert_equal 'check spawn defense', entries.first[:task]
@@ -27,34 +27,48 @@ class TestHivemindFollowUps < Minitest::Test
   end
 
 
-  def test_schedule_followup_validates_delay_and_task
-    assert_match(/minimum delay/, @agent.schedule_followup(delay_seconds: 1, task: 'too soon'))
-    assert_match(/positive number/, @agent.schedule_followup(delay_seconds: 0, task: 'zero'))
-    assert_match(/empty/, @agent.schedule_followup(delay_seconds: 60, task: '   '))
+  def test_schedule_followup_validates_delay_task_and_name
+    assert_match(/minimum delay/, @agent.schedule_followup(delay_seconds: 1, task: 'too soon', name: 'x'))
+    assert_match(/positive number/, @agent.schedule_followup(delay_seconds: 0, task: 'zero', name: 'x'))
+    assert_match(/empty/, @agent.schedule_followup(delay_seconds: 60, task: '   ', name: 'x'))
+    assert_match(/name is empty/, @agent.schedule_followup(delay_seconds: 60, task: 'check', name: '   '))
     assert_empty @agent.instance_variable_get(:@followups)
+  end
+
+
+  def test_schedule_followup_upserts_same_name
+    @agent.schedule_followup(delay_seconds: 60, task: 'old task', name: 'prowl')
+    result = @agent.schedule_followup(delay_seconds: 25, task: 'new task', name: 'prowl')
+    assert_match(/rescheduled/, result)
+    entries = @agent.instance_variable_get(:@followups)
+    assert_equal 1, entries.size, 'same name replaces the pending entry'
+    assert_equal 'new task', entries.first[:task]
   end
 
 
   def test_schedule_followup_caps_pending
     max = HiveMindAgent::MAX_PENDING_FOLLOWUPS
-    max.times { |i| @agent.schedule_followup(delay_seconds: 60, task: "t#{i}") }
-    result = @agent.schedule_followup(delay_seconds: 60, task: 'overflow')
+    max.times { |i| @agent.schedule_followup(delay_seconds: 60, task: "t#{i}", name: "timer-#{i}") }
+    result = @agent.schedule_followup(delay_seconds: 60, task: 'overflow', name: 'overflow')
     assert_match(/max #{max}/, result)
+    assert_equal max, @agent.instance_variable_get(:@followups).size
+    # Re-scheduling an EXISTING name never counts toward the cap.
+    ok = @agent.schedule_followup(delay_seconds: 30, task: 'refresh', name: 'timer-0')
+    assert_match(/rescheduled/, ok)
     assert_equal max, @agent.instance_variable_get(:@followups).size
   end
 
 
   def test_cancel_followup_removes_entry
-    @agent.schedule_followup(delay_seconds: 60, task: 'check')
-    id = @agent.instance_variable_get(:@followups).first[:id]
-    assert_match(/cancelled/, @agent.cancel_followup(followup_id: id))
+    @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'prowl')
+    assert_match(/cancelled/, @agent.cancel_followup(name: 'prowl'))
     assert_empty @agent.instance_variable_get(:@followups)
-    assert_match(/not found/, @agent.cancel_followup(followup_id: id))
+    assert_match(/no follow-up named/, @agent.cancel_followup(name: 'prowl'))
   end
 
 
   def test_fire_followup_runs_turn_with_task_and_fresh_context
-    @agent.schedule_followup(delay_seconds: 60, task: 'remind spawn defense')
+    @agent.schedule_followup(delay_seconds: 60, task: 'remind spawn defense', name: 'spawn')
     @agent.send(:append_history, 'bob', 'biters at the wall!')  # queued since last prompt
     entry = @agent.instance_variable_get(:@followups).first
     prompts = []
@@ -68,7 +82,7 @@ class TestHivemindFollowUps < Minitest::Test
 
 
   def test_fire_followup_stays_silent_when_model_returns_nothing
-    @agent.schedule_followup(delay_seconds: 60, task: 'check')
+    @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'check')
     entry = @agent.instance_variable_get(:@followups).first
     @agent.define_singleton_method(:complete) { |_p| '' }  # model decides nothing needs doing
     @agent.send(:fire_followup, entry)
@@ -80,7 +94,7 @@ class TestHivemindFollowUps < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.schedule_followup(delay_seconds: 60, task: 'remind spawn defense')
+      a1.schedule_followup(delay_seconds: 60, task: 'remind spawn defense', name: 'spawn')
       a1.send(:persist!)
       data = JSON.parse(File.read(sess))
       assert_equal 1, data['followups'].size, 'follow-up persisted with its deadline'
@@ -90,7 +104,7 @@ class TestHivemindFollowUps < Minitest::Test
       fups = a2.instance_variable_get(:@followups)
       assert_equal 1, fups.size
       assert_equal 'remind spawn defense', fups.first[:task]
-      assert_equal a1.instance_variable_get(:@followups).first[:id], fups.first[:id], 'id preserved'
+      assert_equal 'spawn', fups.first[:name], 'name preserved across restart'
       assert_operator fups.first[:due], :>, Process.clock_gettime(Process::CLOCK_MONOTONIC), 'remaining delay kept'
     end
   end
@@ -100,10 +114,11 @@ class TestHivemindFollowUps < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      a1.schedule_followup(delay_seconds: 60, task: 'ping')
+      a1.schedule_followup(delay_seconds: 60, task: 'ping', name: 'ping-timer')
       # Rewrite the persisted deadline to the near future (simulates downtime)
       data = JSON.parse(File.read(sess))
-      data['followups'] = [[1, Time.now.to_f + 0.4, 'ping']]
+      # New format: object keyed by timer name.
+      data['followups'] = { 'ping-timer' => { 'due_at' => Time.now.to_f + 0.4, 'task' => 'ping' } }
       File.write(sess, JSON.generate(data))
 
       a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
@@ -115,8 +130,23 @@ class TestHivemindFollowUps < Minitest::Test
   end
 
 
+  def test_legacy_followup_formats_are_discarded
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      File.write(sess, JSON.generate(
+        'followups' => [
+          [7, Time.now.to_f + 60, 'integer-id legacy'],
+          ['tuple-name', Time.now.to_f + 60, 'string-tuple legacy']
+        ]
+      ))
+      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      assert_empty agent.instance_variable_get(:@followups), 'non-hash formats are discarded, not migrated'
+    end
+  end
+
+
   def test_clear_session_cancels_pending_followups
-    @agent.schedule_followup(delay_seconds: 60, task: 'remind')
+    @agent.schedule_followup(delay_seconds: 60, task: 'remind', name: 'remind')
     assert @agent.clear_session!
     assert_empty @agent.instance_variable_get(:@followups)
   end
@@ -137,7 +167,7 @@ class TestHivemindFollowUps < Minitest::Test
     class << agent
       def complete(_p) = '' # never hit the network
     end
-    result = agent.schedule_followup(delay_seconds: 30, task: 'post-reload check')
+    result = agent.schedule_followup(delay_seconds: 30, task: 'post-reload check', name: 'reload-check')
     assert_match(/scheduled/, result)
     assert_equal 'post-reload check', agent.instance_variable_get(:@followups).first[:task]
     agent.send(:persist!)  # the exact crash from the live run

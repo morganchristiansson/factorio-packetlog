@@ -35,23 +35,25 @@ module HiveMindPersistence
       @session_players = Set.new(data['session_players'].map { |n| n.to_s })
       @session_players.delete(HiveMindAgent::AGENT_NAME)
     end
-    # Re-arm pending follow-ups their absolute unix deadlines. An entry
-    # that came DUE during downtime gets a past-due monotonic time and the
-    # scheduler fires it on its first tick (correct: the task was already
-    # due). Skipped entries (bad data / empty task) are simply dropped.
+    # Re-arm pending follow-ups from their absolute unix deadlines. Format:
+    #   { "prowl" => { "due_at" => ..., "task" => ... } }
+    # An entry that came DUE during downtime gets a past-due monotonic time
+    # and the scheduler fires it on its first tick (correct: the task was
+    # already due). Anything else (older formats, bad data, empty task) is
+    # simply DISCARDED — no legacy fallbacks.
     n_rearmed = 0
-    if data['followups'].is_a?(Array)
-      data['followups'].each do |id, due_at, task|
-        next unless due_at.is_a?(Numeric)
-        task_text = clean_text(task)
+    if data['followups'].is_a?(Hash)
+      data['followups'].each do |name, e|
+        next unless e.is_a?(Hash) && e['due_at'].is_a?(Numeric)
+        task_text = clean_text(e['task'])
         next if task_text.empty?
-        id = id.to_i
-        next if id <= 0 || @followups.any? { |f| f[:id] == id }
-        @followup_seq = id if id > @followup_seq
+        name = clean_text(name).to_s[0, HiveMindFollowUps::MAX_FOLLOWUP_NAME_LEN]
+        next if name.empty?
         now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @followups << { id: id,
-                        due: now_mono + (due_at.to_f - Time.now.to_f),
-                        due_at: due_at.to_f,
+        @followups.reject! { |f| f[:name] == name }
+        @followups << { name: name,
+                        due: now_mono + (e['due_at'].to_f - Time.now.to_f),
+                        due_at: e['due_at'].to_f,
                         task: task_text }
         n_rearmed += 1
       end
@@ -153,7 +155,10 @@ module HiveMindPersistence
       'version' => 1,
       'console_queue' => @console_queue,
       'session_players' => @session_players.to_a,
-      'followups' => @followup_mutex.synchronize { @followups.map { |f| [f[:id], f[:due_at], f[:task]] } },
+      # JSON object keyed by timer name — entries are name-keyed in memory.
+      'followups' => @followup_mutex.synchronize do
+        @followups.to_h { |f| [f[:name], { 'due_at' => f[:due_at], 'task' => f[:task] }] }
+      end,
       'messages' => (@persisted_messages ||= serialize_messages),
     }
   end

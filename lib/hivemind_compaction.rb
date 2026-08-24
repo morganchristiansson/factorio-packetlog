@@ -207,7 +207,7 @@ module HiveMindCompaction
     parts << "Current server context:\n#{snap}" unless snap.empty?
     followups = @followup_mutex.synchronize do
       now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      @followups.map { |f| "##{f[:id]} (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
+      @followups.map { |f| "'#{f[:name]}' (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
     end
     parts << "Pending scheduled follow-ups:\n#{followups.join("\n")}" unless followups.empty?
     # Read-ONLY on purpose: the console queue belongs to the LIVE bot's

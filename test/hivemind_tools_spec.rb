@@ -37,11 +37,11 @@ class TestHivemindTools < Minitest::Test
 
   def test_schedule_tool_wires_into_agent
     tool = ScheduleFollowUp.new(agent: @agent)
-    result = tool.call('delay_seconds' => 60, 'task' => 'remind players')
-    assert_match(/Follow-up #\d+ scheduled/, result)
+    result = tool.call('delay_seconds' => 60, 'task' => 'remind players', 'name' => 'remind')
+    assert_match(/Follow-up 'remind' scheduled/, result)
     assert_equal 'remind players', @agent.instance_variable_get(:@followups).first[:task]
     # invalid args never reach the agent
-    err = ScheduleFollowUp.new(agent: @agent).call('delay_seconds' => -5, 'task' => 'x')
+    err = ScheduleFollowUp.new(agent: @agent).call('delay_seconds' => -5, 'task' => 'x', 'name' => 'bad')
     assert err.is_a?(Hash) || err.to_s.include?('Error') || err.to_s.include?('Invalid')
   end
 

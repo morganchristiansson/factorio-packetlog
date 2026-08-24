@@ -301,17 +301,17 @@ rebind tool classes immediately — no restart needed for tool changes.
   1500 chars). The tool desc and system prompt instruct read-only use: no
   admin/permission changes, no state mutation. A leading `/` is added if
   missing.
-- **`ScheduleFollowUp`** (`schedule_followup(delay_seconds:, task:)`) — a
-  one-shot timer (like JavaScript `setTimeout`) for a **follow-up turn**.
-  When the delay elapses, the agent runs a fresh LLM turn whose prompt
-  carries the current context (online players, stats, console lines since
-  the last prompt) plus the scheduled task — the model can check on a
-  plan, remind players, run RCON queries, or chain another follow-up.
-  Minimum delay 15s, at most 5 pending (the tool errors beyond that and
-  the model cancels stale ones). Returns a follow-up id. See
-  "Scheduled follow-ups (timers)" below.
-- **`CancelFollowUp`** (`cancel_followup(followup_id:)`) — cancels a
-  pending follow-up (like `clearTimeout`); an id that already fired or
+- **`ScheduleFollowUp`** (`schedule_followup(delay_seconds:, task:, name:)`) — a
+  one-shot timer (like JavaScript `setTimeout` with a named handle) for a
+  **follow-up turn**. When the delay elapses, the agent runs a fresh LLM turn
+  whose prompt carries the current context (online players, stats, console
+  lines since the last prompt) plus the scheduled task — the model can check
+  on a plan, remind players, run RCON queries, or chain another follow-up.
+  Minimum delay 15s, at most 5 pending (the tool errors beyond that; re-
+  scheduling an EXISTING name replaces it — upsert — and never counts toward
+  the cap). See "Scheduled follow-ups (timers)" below.
+- **`CancelFollowUp`** (`cancel_followup(name:)`) — cancels a pending
+  follow-up by its NAME (like `clearTimeout`); a name that already fired or
   was cancelled errors.
 
 Future candidates (same pattern):

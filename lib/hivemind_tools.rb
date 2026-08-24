@@ -94,39 +94,41 @@ end
 # cancels it. Persisted with the session file (absolute deadlines) so a
 # restart re-arms pending follow-ups.
 class ScheduleFollowUp < RubyLLM::Tool
-  desc 'Schedule a follow-up action after a delay — like JavaScript setTimeout. ' \
-       'After delay_seconds, you get a fresh turn with the current context ' \
-       '(online players, new console lines) and this task. Use it to follow up ' \
-       'on plans and requests, e.g. after "rally the players to defend spawn" ' \
-       'schedule a reminder or a status check for later. Returns a follow-up id ' \
-       '— cancel it with cancel_followup. Minimum delay: 15 seconds.'
+  desc 'Schedule a follow-up action after a delay — like JavaScript setTimeout with a named handle. '
+       'After delay_seconds, you get a fresh turn with the current context (online players, new console '
+       'lines) and this task. Use it to follow up on plans and requests, e.g. after "rally the players to '
+       'defend spawn" schedule a reminder or a status check for later. Scheduling the SAME name again '
+       'REPLACES that pending timer (upsert) — use this to change a cadence instead of cancel + schedule. '
+       'Minimum delay: 15 seconds.'
 
   param :delay_seconds, type: 'number',
                         desc: 'How many seconds from now until the follow-up fires (minimum 15).'
   param :task, type: 'string',
                desc: 'What to check or do at that time, written for your future self (which will have fresh context).'
+  param :name, type: 'string',
+               desc: 'Short stable key for this timer (e.g. "prowl", "mall-check"). Re-scheduling the same name replaces the pending timer.'
 
   def initialize(agent:)
     @agent = agent
   end
 
-  def execute(delay_seconds:, task:)
-    @agent.schedule_followup(delay_seconds: delay_seconds, task: task)
+  def execute(delay_seconds:, task:, name:)
+    @agent.schedule_followup(delay_seconds: delay_seconds, task: task, name: name)
   end
 end
 
-# RubyLLM tool: cancel a pending follow-up (like JavaScript clearTimeout).
+# RubyLLM tool: cancel a pending follow-up by NAME (like clearTimeout).
 class CancelFollowUp < RubyLLM::Tool
-  desc 'Cancel a pending follow-up by its id (returned by schedule_followup) — like JavaScript clearTimeout.'
+  desc 'Cancel a pending follow-up by its name (the key given to schedule_followup).'
 
-  param :followup_id, type: 'integer',
-                      desc: 'The id of the follow-up to cancel.'
+  param :name, type: 'string',
+               desc: 'The name of the follow-up to cancel.'
 
   def initialize(agent:)
     @agent = agent
   end
 
-  def execute(followup_id:)
-    @agent.cancel_followup(followup_id: followup_id)
+  def execute(name:)
+    @agent.cancel_followup(name: name)
   end
 end

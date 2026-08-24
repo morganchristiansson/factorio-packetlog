@@ -303,7 +303,7 @@ class TestHivemindCompaction < Minitest::Test
   def test_compaction_material_lists_pending_followups
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.schedule_followup(delay_seconds: 60, task: 'check the mall')
+      agent.schedule_followup(delay_seconds: 60, task: 'check the mall', name: 'mall')
       material = agent.send(:compaction_material)
       assert_includes material, 'Pending scheduled follow-ups:'
       assert_includes material, 'check the mall'

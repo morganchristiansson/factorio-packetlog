@@ -10,58 +10,72 @@ module HiveMindFollowUps
   # Scheduled follow-ups (the schedule_followup tool, JS-setTimeout-like).
   MIN_FOLLOWUP_DELAY = 15.0     # min seconds before a follow-up can fire (anti ping-pong/abuse)
   MAX_PENDING_FOLLOWUPS = 5     # cap on pending follow-ups (the model cancels stale ones)
+  MAX_FOLLOWUP_NAME_LEN = 40    # clamp for user-chosen timer keys ('prowl', 'mall-check')
+  FOLLOWUP_YIELD_DELAY = 15.0   # re-check delay when a conversation turn holds @mutex
+                                # (player triggers get priority over self-churn)
 
-  # Schedule a follow-up turn (like JavaScript setTimeout). delay_seconds:
-  # seconds from now; task: what your future self should check/do (it will
-  # receive fresh context). Returns the tool-result string for the model.
-  # Enforces a minimum delay (anti ping-pong/abuse) and a cap on pending
-  # follow-ups. Callable from the LIVE conversation only (the tool is
-  # registered there) — the compaction chat never sees it.
-  def schedule_followup(delay_seconds:, task:)
+  # Schedule a follow-up turn (like JavaScript setTimeout with a named
+  # handle). delay_seconds: seconds from now; task: what your future self
+  # should check/do; name: short stable key (e.g. 'prowl'). Scheduling the
+  # SAME name again REPLACES the pending entry (upsert) — no cancel-first
+  # dance. Returns the tool-result string for the model. Enforces a minimum
+  # delay (anti ping-pong/abuse) and a cap on pending follow-ups (a re-sched
+  # ule of an existing name never counts toward the cap). Callable from the
+  # LIVE conversation only (the tool is registered there) — the compaction
+  # chat never sees it.
+  def schedule_followup(delay_seconds:, task:, name:)
     return 'Error: the agent is disabled.' if @disabled
     delay = delay_seconds.to_f
     return 'Error: delay_seconds must be a positive number of seconds.' if delay <= 0
     return "Error: minimum delay is #{MIN_FOLLOWUP_DELAY.to_i} seconds." if delay < MIN_FOLLOWUP_DELAY
     task_text = clean_text(task)
     return 'Error: task is empty.' if task_text.empty?
-
-    pending = @followup_mutex.synchronize { @followups.size }
-    if pending >= MAX_PENDING_FOLLOWUPS
-      return "Error: #{pending} follow-ups already pending (max #{MAX_PENDING_FOLLOWUPS}) — cancel one first."
-    end
+    name_text = clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
+    return "Error: name is empty — give this timer a short stable key (e.g. 'prowl')." if name_text.empty?
 
     now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @followup_seq += 1
-    entry = { id: @followup_seq,
+    entry = { name: name_text,
               due: now_mono + delay,              # monotonic — fires this process
               due_at: Time.now.to_f + delay,      # absolute unix — persisted, restart-safe
               task: task_text }
+    replaced = full = false
     @followup_mutex.synchronize do
-      @followups << entry
-      @followup_cond.signal  # wake the scheduler if this became the soonest
+      # Cap counts only OTHER names: replacing your own timer is always ok.
+      matches = @followups.count { |f| f[:name] == name_text }
+      full = (@followups.size - matches) >= MAX_PENDING_FOLLOWUPS
+      unless full
+        @followups.reject! { |f| f[:name] == name_text }
+        replaced = matches.positive?
+        @followups << entry
+        @followup_cond.signal  # wake the scheduler if this became the soonest
+      end
+    end
+    if full
+      return "Error: #{MAX_PENDING_FOLLOWUPS} follow-ups already pending (max #{MAX_PENDING_FOLLOWUPS}) — cancel one first."
     end
     # Task text is NOT echoed here — the tool-call line already logged the
     # full arguments; repeating it just duplicates long lines.
-    log "follow-up ##{entry[:id]} scheduled (in #{delay.round}s)"
+    verb = replaced ? 'rescheduled' : 'scheduled'
+    log "follow-up '#{name_text}' #{verb} (in #{delay.round}s)"
     persist! if @session_path
-    "Follow-up ##{entry[:id]} scheduled for +#{delay.round}s."
+    "Follow-up '#{name_text}' #{verb} for +#{delay.round}s."
   end
 
-  # Cancel a pending follow-up (like JavaScript clearTimeout). A follow-up
-  # the scheduler has already popped for firing can't be cancelled. Returns
-  # the tool-result string for the model.
-  def cancel_followup(followup_id:)
-    id = followup_id.to_i
+  # Cancel a pending follow-up by NAME (the key given to schedule_followup).
+  # A follow-up the scheduler has already popped for firing can't be
+  # cancelled. Returns the tool-result string for the model.
+  def cancel_followup(name:)
+    name_text = clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
     removed = @followup_mutex.synchronize do
       before = @followups.size
-      @followups.reject! { |f| f[:id] == id }
+      @followups.reject! { |f| f[:name] == name_text }
       @followup_cond.signal if @followups.size < before
       before - @followups.size
     end
-    return "Error: follow-up ##{id} not found (already fired or cancelled)." if removed.zero?
-    log "follow-up ##{id} cancelled"
+    return "Error: no follow-up named '#{name_text}' (already fired, cancelled, or never scheduled)." if removed.zero?
+    log "follow-up '#{name_text}' cancelled"
     persist! if @session_path
-    "Follow-up ##{id} cancelled."
+    "Follow-up '#{name_text}' cancelled."
   end
 
   # Start the follow-up scheduler thread unless one is already running.
@@ -96,11 +110,34 @@ module HiveMindFollowUps
   # live conversation — lines queued meanwhile are drained into its prompt.
   def fire_followup(entry)
     return if @disabled
-    log "follow-up ##{entry[:id]} firing"
+    # Persist the pop BEFORE running the turn: the scheduler already deleted
+    # the entry from @followups, so this drops it from the session file —
+    # a crash mid-turn can't resurrect an already-fired follow-up on restart.
+    persist! if @session_path
+    log "follow-up '#{entry[:name]}' firing"
     reply = complete(followup_prompt(entry[:task]))
     send_reply(reply)
   rescue StandardError => e
-    log_error("follow-up ##{entry[:id]} failed", e)
+    log_error("follow-up '#{entry[:name]}' failed", e)
+  end
+
+  # PLAYER PRIORITY: a follow-up that comes due while a conversation turn
+  # (player ask, greeting, or another follow-up) holds @mutex is put back
+  # with a pushed-out due time instead of piling onto the lock — an agentic
+  # turn (tool loops run tens of seconds) must not make players queue
+  # behind self-churned heartbeats, and back-to-back follow-ups must not
+  # monopolize the agent between player messages. Re-checked on the next
+  # wakeup; fires once the agent goes idle. Not persisted (due_at keeps the
+  # original deadline — after a restart it simply fires then). Returns
+  # true when the entry should fire NOW.
+  def yield_to_conversation(entry)
+    return true unless @mutex.locked?
+    @followup_mutex.synchronize do
+      entry[:due] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + FOLLOWUP_YIELD_DELAY
+      @followups << entry
+      @followup_cond.signal
+    end
+    false
   end
 
   # Background thread that fires due follow-ups. Holds @followup_mutex for
@@ -126,7 +163,7 @@ module HiveMindFollowUps
               nil
             end
           end
-          fire_followup(entry) if entry
+          fire_followup(entry) if entry && yield_to_conversation(entry)
         rescue StandardError => e
           log_error('follow-up scheduler error', e)
         end

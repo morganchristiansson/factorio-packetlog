@@ -47,7 +47,7 @@ class HiveMindAgent
   # phrase still matches ("Hivemind?", "hm, hello", "GOOD BOT!").
   # "good bot"/"goodbot" keep the conversation alive after a reply
   # (players who get an answer often say thanks — reply in character).
-  TRIGGERS = ['hivemind', 'good bot', 'goodbot', 'hm']
+  TRIGGERS = ['hivemind', 'good bot', 'goodbot', 'hm', 'hive']
   # The agent's OWN name — its replies are queued with this as the player
   # and filtered from live prompts (they live in the conversation). Must
   # never become a compaction target: the agent is not a player.

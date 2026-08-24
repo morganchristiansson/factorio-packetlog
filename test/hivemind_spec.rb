@@ -471,7 +471,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_triggers_constant_lists_all_phrases
-    %w[hivemind good\ bot goodbot hm].each do |t|
+    %w[hivemind good\ bot goodbot hm hive].each do |t|
       assert_includes HiveMindAgent::TRIGGERS, t
     end
   end
@@ -493,6 +493,20 @@ class TestHiveMindAgent < Minitest::Test
   def test_hm_does_not_trigger_on_substrings
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
     ['shmoose', 'shmoo', 'hmm', 'hmm, hello', 'ahm', 'hmx', 's-h-m-oose'].each do |m|
+      refute agent.send(:trigger_match?, m), "expected #{m.inspect} NOT to trigger"
+    end
+  end
+
+
+  # ── Word-boundary trigger: "hive" ─────────────────────────────
+  def test_hive_trigger_matches_standalone_word_only
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    ['hive', 'hey hive', 'hive?', 'HIVE, hello'].each do |m|
+      assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
+    end
+    # not inside longer words — "hive" alone must not fire on them
+    # (note: "hivemind" still triggers via its own TRIGGERS entry)
+    ['beehive', 'hives', 'archives'].each do |m|
       refute agent.send(:trigger_match?, m), "expected #{m.inspect} NOT to trigger"
     end
   end

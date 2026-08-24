@@ -81,6 +81,11 @@ class PlayerAttrs
       else
         p[:connected] = true
         p[:session_start] ||= tick
+        # Records can be born here (NewPeerInfo) without ever being seeded
+        # via RCON — give time accounting its zero bases so disconnect/afk
+        # math never hits nil.
+        p[:base_ticks] ||= 0
+        p[:afk_seed] ||= 0
         p[:hb] = now
         p
       end
@@ -94,7 +99,13 @@ class PlayerAttrs
       p = @players[name]
       next nil unless p
       if p[:connected] && p[:session_start]
-        p[:base_ticks] += [tick - p[:session_start], 0].max
+        # Defensive defaults: unseeded records and a not-yet-observed game
+        # tick (watchdog fires before the first heartbeat carried one)
+        # must fold as 0, not raise.
+        base = p[:base_ticks] || 0
+        start = p[:session_start]
+        elapsed = start ? [tick.to_i - start, 0].max : 0
+        p[:base_ticks] = base + elapsed
       end
       p[:connected] = false
       p[:session_start] = nil

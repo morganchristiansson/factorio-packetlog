@@ -605,6 +605,25 @@ s_wd.send(:touch_heartbeat_index, 3, '10.0.0.55')   # fresh proof of life by ind
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_attrs.online_names.include?('half'), 'refreshed heartbeat cancels the timeout')
 
+# regression: a record created by connect() (NewPeerInfo join — never
+# RCON-seeded) has no :base_ticks; the watchdog's disconnect fold used to
+# raise `undefined method '+' for nil` BEFORE marking the player offline,
+# so the watchdog re-raised every second. Also covers @game_tick being
+# still nil (no heartbeat carrying a tick observed yet).
+wd_attrs.connect('joiner', 1234)
+check(wd_attrs.instance_variable_get(:@players)['joiner'][:base_ticks] == 0,
+      'connect() gives unseeded records a zero base_ticks')
+s_wd.instance_variable_set(:@game_tick, nil)   # tick never observed
+wd_players['joiner'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
+$stdout = wd_out
+begin
+  s_wd.send(:check_heartbeat_timeouts)
+ensure
+  $stdout = old_stdout
+end
+check(!wd_attrs.online_names.include?('joiner'), 'unseeded joiner timed out without raising')
+check(wd_events.include?([:timeout, 'joiner']), 'agent got on_player_event(:timeout) for joiner')
+
 # touch_heartbeat stamps by src_ip resolution too (the packet-top path)
 s_wd.instance_variable_get(:@ip_names)['10.0.0.77'] = ['ripe', true]
 wd_attrs.roster_online('ripe', 4)

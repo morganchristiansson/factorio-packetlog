@@ -440,6 +440,36 @@ class TestHiveMindAgent < Minitest::Test
   end
 
 
+  # Regression: the whole LLM completion runs under @mutex (incl. retry
+  # sleeps — minutes during an outage), and the per-player rate limiter in
+  # handle used to take that SAME mutex on the packet thread. One hung
+  # provider call blocked every subsequent chat line there — visible as
+  # kernel-buffer drops in the capture. The limiters now use their own
+  # @rate_mutex, so on_chat must return promptly while a completion is
+  # stuck.
+  def test_hung_llm_call_does_not_block_packet_thread
+    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    mutex = agent.instance_variable_get(:@mutex)
+    gate = Queue.new
+    # Emulate production complete(): the ENTIRE LLM call (incl. retry
+    # sleeps) runs under @mutex. Here it stays stuck until released.
+    agent.define_singleton_method(:complete) do |_p|
+      mutex.synchronize { gate.pop }
+      ''
+    end
+    agent.on_chat('alice', 'hivemind hang')
+    sleep 0.3  # let alice's worker thread enter the stuck completion (@mutex held)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    triggered = agent.on_chat('bob', 'hivemind ping')
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert triggered, 'another player still triggers while an LLM call hangs'
+    assert_operator elapsed, :<, 1.0,
+                    'packet-thread on_chat must never queue behind a hung LLM call'
+    2.times { gate << :go }  # release both workers (alice + bob)
+    sleep 0.2
+  end
+
+
   def test_triggers_constant_lists_all_phrases
     %w[hivemind good\ bot goodbot hm].each do |t|
       assert_includes HiveMindAgent::TRIGGERS, t

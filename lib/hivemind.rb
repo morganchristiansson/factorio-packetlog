@@ -162,11 +162,26 @@ class HiveMindAgent
   # Resolved model id (HIVE_MODEL or default) — startup log reads this.
   attr_reader :model
 
+  # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
+  # ivars, so an agent object built by pre-split code lacks these. `||=`
+  # fills them in on first use (benign race: worst case the very first
+  # calls briefly hold different Mutex instances).
+  def rate_mutex = (@rate_mutex ||= Mutex.new)
+  def persist_mutex = (@persist_mutex ||= Mutex.new)
+
   def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil)
     @rcon = rcon
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_greet = 0.0
     @mutex = Mutex.new
+    # Rate-limit state lives on ITS OWN mutex: the limiters run on the
+    # PACKET THREAD (handle/greet_join), while @mutex is held across whole
+    # LLM completions incl. retry sleeps (minutes during an outage). One
+    # slow provider call must never stall packet processing.
+    @rate_mutex = Mutex.new
+    # Serializes session-file writes across persist!/persist_queue!
+    # (worker threads AND the packet thread share one .tmp path).
+    @persist_mutex = Mutex.new
     @chat = nil
     # Pending scheduled follow-ups (schedule_followup tool) + their mutex
     # and condition variable, so a single scheduler thread sleeps until the
@@ -430,7 +445,8 @@ class HiveMindAgent
   def greet_join(name, line, attrs = nil)
     return if @disabled
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @mutex.synchronize do
+    # Packet thread — rate_mutex only, never @mutex (see initialize).
+    rate_mutex.synchronize do
       return if now - @last_greet < GREET_INTERVAL
       @last_greet = now
     end
@@ -804,10 +820,14 @@ class HiveMindAgent
 
     # Per-player rate limiter: only the SAME player is throttled within
     # MIN_INTERVAL (spam collapse). Different players are never dropped —
-    # their threads queue on the complete mutex, so each gets a sequential
+    # their threads queue on the completion path, so each gets a sequential
     # turn whose prompt includes the previous Q&A (the shared chat object).
+    # Runs on the PACKET THREAD: rate_mutex only — @mutex is held across
+    # whole LLM completions (complete) and must never back-pressure packet
+    # processing (regression: a hung provider call used to block every new
+    # chat line here for minutes).
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @mutex.synchronize do
+    rate_mutex.synchronize do
       last = @last_ask_at[player]
       return false if last && now - last < MIN_INTERVAL
       @last_ask_at[player] = now

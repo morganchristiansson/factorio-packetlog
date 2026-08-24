@@ -16,6 +16,18 @@ sessions). The live system prompt (`SYSTEM_PROMPT` + current SOUL/KNOWLEDGE)
 is built by `system_prompt_with_memories` — hot reloads apply code changes,
 and a fresh restart re-seeds it from the current memory files.
 
+## Threading contract (capture must never wait on the LLM)
+
+`on_chat`/`on_player_event` run on the **packet thread**. LLM completions
+serialize on `@mutex`, which is held across a whole call INCLUDING retry
+sleeps (5/15/30/60s — minutes during an outage). Everything the packet
+thread touches therefore lives on separate locks: rate limiters on
+`@rate_mutex`, console history on `@console_mutex`, and the session-file
+disk write happens outside `@console_mutex` (serialized by `@persist_mutex`
+against `persist!`). Asks and greetings themselves run in background
+threads (`Thread.new` in `handle`/`greet_join`) — never inline. Regression:
+`test_hung_llm_call_does_not_block_packet_thread`.
+
 ## Long-term memory (compaction)
 
 Separate from the restart session file (`hivemind-session.json`, the

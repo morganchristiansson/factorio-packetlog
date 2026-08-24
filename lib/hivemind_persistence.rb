@@ -174,16 +174,26 @@ module HiveMindPersistence
   # snapshot; the conversation comes from the cache (@persisted_messages,
   # refreshed by persist!) so serializing messages per chat line costs
   # nothing and the file can never lose messages/followups.
+  # The DISK WRITE happens outside @console_mutex: snapshot under the lock
+  # (queue dup'd — JSON.generate must not race with appends), then write
+  # holding only @persist_mutex. Keeps the lock hold O(µs) on the packet
+  # thread and still serializes actual file ops across persist!/persist_queue!
+  # (they share one .tmp path — interleaved writers would corrupt it).
   def persist_queue!
-    @console_mutex.synchronize do
-      write_session(session_data)
+    data = @console_mutex.synchronize do
+      d = session_data
+      d['console_queue'] = d['console_queue'].dup
+      d
     end
+    write_session(data)
   end
 
   def write_session(data)
-    tmp = "#{@session_path}.tmp"
-    File.write(tmp, JSON.generate(data))
-    File.rename(tmp, @session_path)
+    persist_mutex.synchronize do
+      tmp = "#{@session_path}.tmp"
+      File.write(tmp, JSON.generate(data))
+      File.rename(tmp, @session_path)
+    end
   rescue StandardError => e
     log_error('session persist failed', e)
   end

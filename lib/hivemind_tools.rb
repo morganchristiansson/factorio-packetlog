@@ -127,6 +127,6 @@ class CancelFollowUp < RubyLLM::Tool
   end
 
   def execute(followup_id:)
-    @agent.cancel_followup(followup_id)
+    @agent.cancel_followup(followup_id: followup_id)
   end
 end

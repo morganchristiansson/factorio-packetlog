@@ -40,9 +40,11 @@ module HiveMindFollowUps
       @followups << entry
       @followup_cond.signal  # wake the scheduler if this became the soonest
     end
-    log "follow-up ##{entry[:id]} scheduled (in #{delay.round}s): #{trunc(task_text, 100)}"
+    # Task text is NOT echoed here — the tool-call line already logged the
+    # full arguments; repeating it just duplicates long lines.
+    log "follow-up ##{entry[:id]} scheduled (in #{delay.round}s)"
     persist! if @session_path
-    "Follow-up ##{entry[:id]} scheduled for +#{delay.round}s: #{trunc(task_text, 200)}"
+    "Follow-up ##{entry[:id]} scheduled for +#{delay.round}s."
   end
 
   # Cancel a pending follow-up (like JavaScript clearTimeout). A follow-up
@@ -94,7 +96,7 @@ module HiveMindFollowUps
   # live conversation — lines queued meanwhile are drained into its prompt.
   def fire_followup(entry)
     return if @disabled
-    log "follow-up ##{entry[:id]} firing: #{trunc(entry[:task], 120)}"
+    log "follow-up ##{entry[:id]} firing"
     reply = complete(followup_prompt(entry[:task]))
     send_reply(reply)
   rescue StandardError => e

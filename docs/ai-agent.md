@@ -322,6 +322,28 @@ Future candidates (same pattern):
 
 Not wired up yet, per requirements.
 
+## Game server log watcher
+
+In server mode the agent tails the running server's `factorio-current.log`
+(path auto-detected from `/proc/<pid>/cwd` of the factorio process,
+fallback `~/factorio`; see `ServerDetect.log_path`). Lines carrying a key
+from `LOG_EVENT_KEYS` (currently `map reset:`) reach the agent:
+
+- **Every match is queued** for the next prompt (timestamp and `Script
+  @...lua:NNN:` prefix stripped — the model sees `map reset: victory=false,
+  science=29255, minutes=1025`).
+- **The first match in 5 minutes** additionally fires a dedicated turn so
+  the agent can react in chat right away, then runs an **auto-compaction**
+  (`compact_memory!("map reset")`) — a reset closes a round, so memories
+  are distilled while fresh. The compaction is gated on history size:
+  below `AUTO_COMPACTION_MIN_CHARS` (2x `TRIM_TAIL_CHARS`, what trimming
+  keeps anyway) there is little to distill and the pass is skipped.
+  Manual `/compact` ignores that gate.
+
+Repeats inside the window stay queue-only. The watcher thread lives on the
+agent object (survives hot reloads); `ensure_log_watcher` revives it at the
+sniffer's reload seam if it died.
+
 ## Scheduled follow-ups (timers)
 
 `schedule_followup` gives the model JavaScript-`setTimeout`-style timers:

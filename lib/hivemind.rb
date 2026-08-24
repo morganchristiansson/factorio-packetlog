@@ -11,6 +11,7 @@ require_relative 'hivemind_prompts'
 require_relative 'hivemind_persistence'
 require_relative 'hivemind_compaction'
 require_relative 'hivemind_followups'
+require_relative 'log_tail'
 
 # HiveMind agent — an LLM persona that lives inside the Factorio sniffer.
 #
@@ -70,6 +71,18 @@ class HiveMindAgent
   TRIM_TAIL_CHARS = 20_000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
+  # Game-log watcher (factorio-current.log tail): lines carrying one of
+  # these keys reach the agent. EVERY match is queued for the next prompt;
+  # the first match within LOG_EVENT_INTERVAL additionally fires a dedicated
+  # turn (so the model can react now) followed by an auto-compaction —
+  # repeats inside the window stay queue-only.
+  LOG_EVENT_KEYS = ['map reset:'].freeze
+  LOG_EVENT_INTERVAL = 300.0    # min seconds between log-event turns (5 min)
+  # Auto-compaction gate: only distill when the session holds at least
+  # this many characters of conversation — 2x what post-compaction trim
+  # KEEPS (TRIM_TAIL_CHARS). Below that there is little to compact and
+  # the pass would be a wasted LLM call. Manual /compact ignores this.
+  AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 2
   # LLM init failed (no API key, missing gem, bad model) — agent is inert;
   # the sniffer prints the startup warning and messages are ignored.
   def disabled?
@@ -173,6 +186,8 @@ class HiveMindAgent
     @rcon = rcon
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_greet = 0.0
+    @last_log_event = 0.0       # last log-event turn time (LOG_EVENT_INTERVAL rate limit)
+    @log_watcher = nil          # log-tail thread (survives hot reloads; revived if dead)
     @mutex = Mutex.new
     # Rate-limit state lives on ITS OWN mutex: the limiters run on the
     # PACKET THREAD (handle/greet_join), while @mutex is held across whole
@@ -470,6 +485,80 @@ class HiveMindAgent
         log_error('greeting error', e)
       end
     end
+  end
+
+  # ── Game server log watcher ────────────────────────────────────
+
+  # Tail the server's factorio-current.log (path from ServerDetect.log_path)
+  # and feed interesting lines to the agent. The watcher thread lives on the
+  # agent object, so it survives hot reloads; a dead thread is revived by
+  # calling this again at the sniffer's reload seam. Idempotent.
+  def ensure_log_watcher(path)
+    return false if @disabled || path.nil?
+    return true if @log_watcher&.alive?
+    unless File.file?(path)
+      log "log watcher: #{path} not found — not watching"
+      return false
+    end
+    @log_watcher = Thread.new do
+      LogTail.follow(path) { |line| handle_log_line(line) }
+    rescue StandardError => e
+      log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
+    end
+    log "watching #{path} for /#{LOG_EVENT_KEYS.join('|')}/i"
+    true
+  end
+
+  # One tailed log line. Only lines carrying a LOG_EVENT_KEY reach the
+  # agent; everything else is dropped without parsing. A match is ALWAYS
+  # queued (append_history) so it rides along with whatever prompt comes
+  # next; the FIRST match in LOG_EVENT_INTERVAL additionally fires a
+  # dedicated turn — react in chat if players would care — and then an
+  # auto-compaction (a map reset closes a round: distill memories while
+  # the session is fresh). Rate limit runs on rate_mutex (packet-style
+  # thread — never touches @mutex). async:false runs the turn inline
+  # (tests / synchronous callers).
+  def handle_log_line(line, async: true)
+    text = clean_text(strip_log_prefix(line))
+    return if text.empty? || !LOG_EVENT_KEYS.any? { |k| text.downcase.include?(k) }
+    append_history(nil, text)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    rate_mutex.synchronize do
+      return if now - @last_log_event < LOG_EVENT_INTERVAL
+      @last_log_event = now
+    end
+    return run_log_event_turn(text) unless async
+    Thread.new { run_log_event_turn(text) }
+    nil
+  end
+
+  # The dedicated reaction turn for one log event: build the prompt, get a
+  # reply, then distill the round into long-term memory. Compaction is
+  # skipped when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or
+  # a pass is already running (compact_memory! guards that itself).
+  def run_log_event_turn(text)
+    prompt = turn_prompt(
+      "Game server log event: #{text}\n\n" \
+      'React as fits: this event matters to the factory community — ' \
+      'announce/comment in chat IF players would want to know, otherwise stay silent.',
+      exclude: [nil, text]
+    )
+    begin
+      send_reply(complete(prompt))
+      # After reacting: distill the round into long-term memory. Skipped
+      # when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or a
+      # pass is already running (compact_memory! guards that itself).
+      compact_memory!('map reset') if auto_compaction_worthwhile?
+    rescue StandardError => e
+      log_error('log-event error', e)
+    end
+  end
+
+  # Strip Factorio's log-line decoration so only the content is enqueued:
+  # "   14.511 Script @__level__/reset.lua:284: map reset: …" →
+  # "map reset: …".
+  def strip_log_prefix(line)
+    line.sub(/\A\s*[\d.]+\s+(?:Script\s+\S+:\s*)?/, '')
   end
 
   private

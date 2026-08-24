@@ -8,6 +8,8 @@ require_relative 'pcap'
 require_relative 'live_capture'
 require_relative 'rcon_client'
 require_relative 'hivemind'
+require_relative 'log_tail'
+require_relative 'server_detect'
 require_relative 'player_attrs'
 
 # Hot reload (Ctrl-C / SIGHUP): the RUNNING instance reloads its own code
@@ -38,7 +40,7 @@ class FactorioSniffer
   # each file (redefining classes); `require` would only load once.
   # Constant-redefinition warnings are expected and silenced during load.
   RELOADABLE_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -190,6 +192,7 @@ class FactorioSniffer
         if @rcon
           @agent = HiveMindAgent.new(rcon: @rcon)
           @agent.ensure_followup_scheduler
+          @agent.ensure_log_watcher(ServerDetect.log_path)
           unless @agent.disabled?
             puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
           end
@@ -299,6 +302,7 @@ class FactorioSniffer
     end
     select_protocol_version
     @agent&.ensure_followup_scheduler
+    @agent&.ensure_log_watcher(ServerDetect.log_path)
   end
 
   private

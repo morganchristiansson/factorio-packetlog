@@ -69,6 +69,28 @@ module ServerDetect
     pids.find { |pid| !listen_sockets(pid)[:udp].empty? } || pids.first
   end
 
+  # Path of the server's log file (factorio-current.log), or nil when no
+  # factorio process / readable log is found. Factorio writes the log to
+  # its write-data directory — normally the process's working directory,
+  # so /proc/<pid>/cwd is the primary guess; ~/factorio is the stock
+  # user-data fallback. Used by the Hivemind agent's log watcher.
+  def self.log_path
+    name = 'factorio-current.log'
+    pid = find_pid
+    candidates = []
+    if pid
+      cwd = File.readlink("/proc/#{pid}/cwd") rescue nil
+      candidates << File.join(cwd, name) if cwd
+      # --directory <dir> overrides the write-data dir on some setups.
+      cmd = (File.read("/proc/#{pid}/cmdline") rescue '').tr("\0", ' ')
+      if cmd =~ /--directory\s+(\S+)/
+        candidates << File.join(Regexp.last_match(1), name)
+      end
+    end
+    candidates << File.join(Dir.home, 'factorio', name)
+    candidates.find { |p| p && File.file?(p) }
+  end
+
   # Socket inode numbers owned by pid (targets of /proc/<pid>/fd symlinks).
   def self.socket_inodes(pid)
     Dir["/proc/#{pid}/fd/*"].filter_map do |fd|

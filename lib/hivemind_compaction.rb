@@ -177,6 +177,17 @@ module HiveMindCompaction
     false
   end
 
+  # Gate for AUTOMATIC compaction triggers (map reset): only run a pass
+  # when the session holds at least AUTO_COMPACTION_MIN_CHARS of history —
+  # below that there's little to distill and the pass would mostly echo
+  # the current blobs back. Manual /compact bypasses this gate.
+  def auto_compaction_worthwhile?
+    return false unless @chat
+    chars = @chat.messages.reject { |m| m.role == :system }
+                    .sum { |m| m.content.to_s.length }
+    chars >= HiveMindAgent::AUTO_COMPACTION_MIN_CHARS
+  end
+
   # One-line summary of what the compaction pass is reviewing.
   def session_summary
     n_messages = @chat ? @chat.messages.count { |m| m.role != :system } : 0

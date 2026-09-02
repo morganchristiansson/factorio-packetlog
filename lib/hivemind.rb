@@ -83,17 +83,6 @@ class HiveMindAgent
   # KEEPS (TRIM_TAIL_CHARS). Below that there is little to compact and
   # the pass would be a wasted LLM call. Manual /compact ignores this.
   AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 2
-  # LLM init failed (no API key, missing gem, bad model) — agent is inert;
-  # the sniffer prints the startup warning and messages are ignored.
-  def disabled?
-    !!@disabled
-  end
-
-  # Long-term memory on? (memory dir configured — compaction enabled).
-  def memory_enabled?
-    !@memory_store.nil? && @memory_store.enabled?
-  end
-
   # Forget the CURRENT session (live conversation + queued console lines)
   # but KEEP the long-term memories. The next turn re-seeds the system
   # prompt (SOUL/KNOWLEDGE) and re-injects the online players' memories.
@@ -174,6 +163,8 @@ class HiveMindAgent
   # memory_dir: false disables long-term memory (default memories/).
   # Resolved model id (HIVE_MODEL or default) — startup log reads this.
   attr_reader :model
+  attr_reader :last_trigger
+  attr_reader :memory_store
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
@@ -185,6 +176,7 @@ class HiveMindAgent
   def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil)
     @rcon = rcon
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
+    @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
     @last_greet = 0.0
     @last_log_event = 0.0       # last log-event turn time (LOG_EVENT_INTERVAL rate limit)
     @log_watcher = nil          # log-tail thread (survives hot reloads; revived if dead)
@@ -248,65 +240,51 @@ class HiveMindAgent
     @session_players = Set.new
     @session_players_mutex = Mutex.new
 
-    # ── LLM wiring, inlined. Provider is fixed (:openai — any OpenAI-
-    #    compatible endpoint); model/base/key come from env or defaults.
-    #    The rescues cover THIS block only: a missing gem or a provider
-    #    rejection disables the agent instead of killing the sniffer, while
-    #    any other init bug (memory store, session path) still raises loudly.
+    # ── LLM wiring. Provider is fixed (:openai — any OpenAI-compatible
+    #    endpoint); model/base/key come from env or defaults. Missing key,
+    #    missing gem, or bad provider config now raises — FactorioSniffer
+    #    rescues and leaves @agent=nil (hard fail, no disabled object).
     llm_api_key = api_key || ENV['HIVE_API_KEY']
     @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
     api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
 
-    # THE key-presence decision. Everything downstream (handle, greet_join,
-    # compaction, ...) consults @disabled? — never the key again.
-    if llm_api_key.nil?
-      warn '[hivemind] no API key set (HIVE_API_KEY) — agent disabled'
-      @disabled = true
-    else
-      begin
-        RubyLLM.configure do |config|
-          config.openai_api_base = api_base
-          config.openai_api_key = llm_api_key
-          config.default_model = @model
-          # Read timeout ceiling for EVERY request (faraday). Raised from 60s
-          # because memory compaction sends the WHOLE conversation (hundreds of
-          # messages — the input-token-cache reuse is the point) and the model
-          # can legitimately take 1-2min to answer such a large prompt; 60s
-          # killed it with Net::ReadTimeout (session kept, compaction failed).
-          # Normal chat replies respond in seconds, so 300 only moves the
-          # ceiling, not the latency.
-          config.request_timeout = 300
-          config.max_retries = 1
-          # RubyLLM defaults to sending the system prompt as role `developer`
-          # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
-          # endpoints (e.g. Console Go models) only accept `system` and reject
-          # the request. Use `system` explicitly.
-          config.openai_use_system_role = true
-          config.log_level = Logger::WARN if config.respond_to?(:log_level=)
-        end
+    raise ArgumentError, 'no API key set (HIVE_API_KEY) — agent disabled' if llm_api_key.nil?
 
-        # The endpoint's models (gpt-5.6-luna, glm-5.3, ...) are not in
-        # RubyLLM's registry, so resolve with assume_model_exists: true and an
-        # explicit provider. Fail loudly here (startup) rather than at ask time.
-        @chat = RubyLLM.chat(
-          model: @model,
-          provider: :openai,
-          assume_model_exists: true
-        )
-        @chat.with_instructions(system_prompt_with_memories)
-        register_tools
-      rescue LoadError => e
-        warn "[hivemind] ruby_llm not installed (bundle install) — agent disabled: #{e.message}"
-        @disabled = true
-      rescue StandardError => e
-        log_error('LLM init failed — agent disabled', e)
-        @disabled = true
-      end
+    RubyLLM.configure do |config|
+      config.openai_api_base = api_base
+      config.openai_api_key = llm_api_key
+      config.default_model = @model
+      # Read timeout ceiling for EVERY request (faraday). Raised from 60s
+      # because memory compaction sends the WHOLE conversation (hundreds of
+      # messages — the input-token-cache reuse is the point) and the model
+      # can legitimately take 1-2min to answer such a large prompt; 60s
+      # killed it with Net::ReadTimeout (session kept, compaction failed).
+      # Normal chat replies respond in seconds, so 300 only moves the
+      # ceiling, not the latency.
+      config.request_timeout = 300
+      config.max_retries = 1
+      # RubyLLM defaults to sending the system prompt as role `developer`
+      # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
+      # endpoints (e.g. Console Go models) only accept `system` and reject
+      # the request. Use `system` explicitly.
+      config.openai_use_system_role = true
+      config.log_level = Logger::WARN if config.respond_to?(:log_level=)
     end
 
+    # The endpoint's models (gpt-5.6-luna, glm-5.3, ...) are not in
+    # RubyLLM's registry, so resolve with assume_model_exists: true and an
+    # explicit provider. Fail loudly here (startup) rather than at ask time.
+    @chat = RubyLLM.chat(
+      model: @model,
+      provider: :openai,
+      assume_model_exists: true
+    )
+    @chat.with_instructions(system_prompt_with_memories)
+    register_tools
+
     hook_chat_observers if @chat
-    load_session if @session_path && !@disabled
-    start_scheduler unless @disabled
+    load_session if @session_path
+    start_scheduler
   end
 
   # ── Console logging / LLM-run observation ─────────────────────────
@@ -460,7 +438,6 @@ class HiveMindAgent
   # player's long-term memory is injected into the greeting prompt (once
   # per session) so the welcome is informed by who they are.
   def greet_join(name, line, attrs = nil)
-    return if @disabled
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     # Packet thread — rate_mutex only, never @mutex (see initialize).
     rate_mutex.synchronize do
@@ -494,7 +471,7 @@ class HiveMindAgent
   # agent object, so it survives hot reloads; a dead thread is revived by
   # calling this again at the sniffer's reload seam. Idempotent.
   def ensure_log_watcher(path)
-    return false if @disabled || path.nil?
+    return false if path.nil?
     return true if @log_watcher&.alive?
     unless File.file?(path)
       log "log watcher: #{path} not found — not watching"
@@ -570,12 +547,12 @@ class HiveMindAgent
   # rebind the tool CLASSES, so stale instances would keep running old
   # code and new tools wouldn't appear until restart. with_tool replaces by
   # name, so this is idempotent and cheap.
-  def register_tools
-    return unless @chat
-    @chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
-    @chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
-    @chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp)
-    @chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp)
+  def register_tools(chat = @chat)
+    return unless chat
+    chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
+    chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
+    chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp)
+    chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp)
   end
 
   def ask_llm(player, message)
@@ -695,15 +672,13 @@ class HiveMindAgent
   # memory — see memory_prompt.)
   def system_prompt_with_memories
     parts = [HiveMindPrompts::SYSTEM_PROMPT]
-    if memory_enabled?
-      blobs = []
-      soul = @memory_store.soul
-      blobs << "=== SOUL ===\n#{soul}" if soul && !soul.strip.empty?
-      knowledge = @memory_store.knowledge
-      blobs << "=== KNOWLEDGE ===\n#{knowledge}" if knowledge && !knowledge.strip.empty?
-      unless blobs.empty?
-        parts << "Persistent memories (long-term; updated by memory compaction between sessions):\n#{blobs.join("\n\n")}"
-      end
+    blobs = []
+    soul = @memory_store.soul
+    blobs << "=== SOUL ===\n#{soul}" if soul && !soul.strip.empty?
+    knowledge = @memory_store.knowledge
+    blobs << "=== KNOWLEDGE ===\n#{knowledge}" if knowledge && !knowledge.strip.empty?
+    unless blobs.empty?
+      parts << "Persistent memories (long-term; updated by memory compaction between sessions):\n#{blobs.join("\n\n")}"
     end
     parts.join("\n\n")
   end
@@ -717,7 +692,6 @@ class HiveMindAgent
   # when the session began. Each player is delivered ONCE per session (the
   # dedup set clears on a fresh session, so the next one re-seeds).
   def memory_prompt(player: nil)
-    return '' unless memory_enabled?
     lines = []
     candidates = ([player].compact + online_player_list).reject { |n| @memories_sent.include?(n) }
     candidates.uniq.each do |name|
@@ -903,7 +877,6 @@ class HiveMindAgent
   end
 
   def handle(player, message)
-    return false if @disabled
 
     msg = message.to_s.strip
     return false if msg.empty?
@@ -924,6 +897,8 @@ class HiveMindAgent
       @last_ask_at[player] = now
     end
 
+    @last_trigger = [player, msg]
+
     # LLM calls run off the sniffer's packet loop (seconds of latency).
     Thread.new do
       begin
@@ -934,6 +909,117 @@ class HiveMindAgent
       end
     end
     true
+  end
+
+  public
+
+  # ── Runtime model switching (/model, /try) ───────────────────────
+
+  # Switch the persistent model at runtime (like HIVE_MODEL but live).
+  # Uses RubyLLM::Chat#with_model which mutates the SAME chat in place —
+  # messages, tools, and observers stay, only the model+provider changes.
+  # Survives hot reloads (ivar) but not a full restart (reverts to ENV).
+  def switch_model!(new_model)
+    cleaned = clean_text(new_model.to_s).strip
+    return "Error: model name empty — usage: /model <model-id>" if cleaned.empty?
+    return "Model already #{@model}." if cleaned == @model
+    begin
+      @model = cleaned
+      # Keep RubyLLM's global default in sync so compaction forks and any
+      # future chats pick up the new model.
+      begin
+        RubyLLM.configure { |c| c.default_model = @model if c.respond_to?(:default_model=) }
+      rescue StandardError
+        nil
+      end
+      @mutex.synchronize do
+        if @chat
+          @chat.with_model(@model, provider: :openai, assume_exists: true)
+        else
+          @chat = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
+          @chat.with_instructions(system_prompt_with_memories)
+          register_tools
+          @observers_hooked = false
+          hook_chat_observers
+        end
+      end
+      persist! if @session_path
+      log "model switched to #{@model}"
+      "Model switched to #{@model}. Future replies will use it (persists until restart; reverts to HIVE_MODEL/DEFAULT on restart)."
+    rescue StandardError => e
+      log_error('model switch failed', e)
+      "Error: failed to switch model: #{e.message}"
+    end
+  end
+
+  # One-off dry-run: run a prompt with a different model WITHOUT touching
+  # the real conversation, history, or game chat. Perfect for A/B testing
+  # personality across models. Result is logged to the operator console only.
+  # Pass explicit message or reuse last trigger. Never drains the console
+  # queue or marks memories as sent.
+  def try_model!(model, message = nil, player: 'tester')
+    m = clean_text(model.to_s).strip
+    return "Error: model name empty — usage: /try <model> [message]" if m.empty?
+    if message.nil? || clean_text(message.to_s).strip.empty?
+      trig = @last_trigger
+      return "No previous trigger to try (no hivemind message yet) — pass a message: /try <model> <message>" unless trig
+      player, message = trig
+    end
+    msg = clean_text(message.to_s).strip
+    msg = "hivemind #{msg}" unless trigger_match?(msg)
+    # Build prompt without mutating real state (queue / memories_sent).
+    saved_queue = @console_mutex.synchronize { @console_queue.dup }
+    saved_memories = @memories_sent.dup
+    saved_players = @session_players_mutex.synchronize { @session_players.dup }
+    prompt = nil
+    begin
+      prompt = turn_prompt(
+        "In-game chat from #{player}: #{msg}\n\n" \
+        "Answer the player's question or continue the conversation. " \
+        "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
+        'no markdown, no code blocks, no emoji.',
+        exclude: [player, msg],
+        player: player
+      )
+    ensure
+      @console_mutex.synchronize { @console_queue.replace(saved_queue) }
+      @memories_sent.replace(saved_memories)
+      @session_players_mutex.synchronize { @session_players.replace(saved_players) } if saved_players
+    end
+    snapshot = @mutex.synchronize { @chat ? @chat.messages.dup : [] }
+    Thread.new do
+      begin
+        tmp = RubyLLM.chat(model: m, provider: :openai, assume_model_exists: true)
+        tmp.messages.replace(snapshot.dup)
+        register_tools(tmp)
+        observe_chat(tmp)
+        start_t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        response = ask_with_retry(tmp, prompt)
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_t
+        text = clean_reply(response.respond_to?(:content) ? response.content.to_s : '')
+        # Try to extract usage from last assistant message if available.
+        usage = ''
+        if tmp.messages.last
+          usage = usage_line(tmp.messages.last)
+        end
+        if text.empty?
+          log "[try #{m}] (#{elapsed.round(1)}s) → (no reply — model stayed silent)#{usage}"
+        else
+          log "[try #{m}] (#{elapsed.round(1)}s) → #{text}#{usage}"
+        end
+        # Also log tool result if reply came via tool (Halt has empty content).
+        # The observe_chat callbacks already logged tool calls/results for tmp,
+        # so operator sees full trace.
+      rescue StandardError => e
+        log_error("try (#{m}) failed", e)
+      end
+    end
+    "[try] Running '#{msg}' with model #{m} — one-off, not persisted, not sent to game. See [hivemind] logs for result..."
+  end
+
+  # Generic dry-run with arbitrary prompt (used by /eval tooling or /try).
+  def dry_run!(model, prompt_text)
+    try_model!(model, prompt_text, player: 'eval')
   end
 
   # Fallback reply path: only fires when the model answered with plain text

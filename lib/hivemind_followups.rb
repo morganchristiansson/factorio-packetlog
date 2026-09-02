@@ -24,7 +24,6 @@ module HiveMindFollowUps
   # LIVE conversation only (the tool is registered there) — the compaction
   # chat never sees it.
   def schedule_followup(delay_seconds:, task:, name:)
-    return 'Error: the agent is disabled.' if @disabled
     delay = delay_seconds.to_f
     return 'Error: delay_seconds must be a positive number of seconds.' if delay <= 0
     return "Error: minimum delay is #{MIN_FOLLOWUP_DELAY.to_i} seconds." if delay < MIN_FOLLOWUP_DELAY
@@ -82,7 +81,6 @@ module HiveMindFollowUps
   # Called at the sniffer's reconstruction seam after every reload; also
   # revives a thread that died. Safe to call repeatedly.
   def ensure_followup_scheduler
-    return if @disabled
     start_scheduler if @scheduler.nil? || !@scheduler.alive?
   end
 
@@ -109,7 +107,6 @@ module HiveMindFollowUps
   # player asks/greets via @mutex, so a follow-up never interleaves with a
   # live conversation — lines queued meanwhile are drained into its prompt.
   def fire_followup(entry)
-    return if @disabled
     # Persist the pop BEFORE running the turn: the scheduler already deleted
     # the entry from @followups, so this drops it from the session file —
     # a crash mid-turn can't resurrect an already-fired follow-up on restart.

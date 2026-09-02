@@ -190,11 +190,14 @@ class FactorioSniffer
       # RCON.
       if options[:ai_agent]
         if @rcon
-          @agent = HiveMindAgent.new(rcon: @rcon)
-          @agent.ensure_followup_scheduler
-          @agent.ensure_log_watcher(ServerDetect.log_path)
-          unless @agent.disabled?
+          begin
+            @agent = HiveMindAgent.new(rcon: @rcon)
+            @agent.ensure_followup_scheduler
+            @agent.ensure_log_watcher(ServerDetect.log_path)
             puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
+          rescue => e
+            warn "[hivemind] AI agent disabled: #{e.message}"
+            @agent = nil
           end
         else
           warn '[hivemind] AI agent auto-enabled (server mode) but RCON is unavailable (--no-rcon?); agent disabled'
@@ -1079,6 +1082,8 @@ class FactorioSniffer
           /debug                       toggle decoded per-action lines
           /filter                      show current filter state
           /stats                       print session stats
+          /model [MODEL]               show or switch LLM model at runtime (Hivemind only)
+          /try MODEL [MESSAGE]         one-off dry-run with MODEL — not persisted, not sent to game
           /compact                     distill session into memory, then start fresh
       HELP
     when '/players'
@@ -1095,28 +1100,50 @@ class FactorioSniffer
       puts "decoded per-action lines: #{@debug ? 'SHOWN' : 'hidden'}"
     when '/stats'
       print_summary
-    when '/compact'
-      if @agent && @agent.memory_enabled?
-        # Runs in a background thread so the console stays responsive (the
-        # compaction LLM call takes seconds; it queues behind any live ask).
-        # The session is wiped only after a SUCCESSFUL pass — if compaction
-        # errors, compact_memory! logs it (warn → console) and returns
-        # false, and the session is kept: a stuck/failed pass must never
-        # silently wipe an un-distilled session. Both calls serialize on
-        # the agent mutex.
-        Thread.new do
-          if @agent.compact_memory!('manual')
-            # Trim, don't wipe: drop the messages the pass saw (minus a
-            # recent tail kept for flow); mid-pass console lines survive.
-            @agent.trim_session_after_compaction!
-          else
-            puts 'memory compaction FAILED — session kept (see [hivemind] error above)'
-          end
-        end
-        puts 'memory compaction started — session resets when done (see [hivemind] logs)'
+    when '/model'
+      if @agent.nil?
+        puts "hivemind disabled (no HIVE_API_KEY or init failed) — model N/A"
+      elsif parts[1].nil?
+        puts "model: #{@agent.model} (default #{HiveMindAgent::DEFAULT_MODEL}, env HIVE_MODEL=#{ENV['HIVE_MODEL'] || 'not set'})"
+        puts "usage: /model <model-id>  — e.g. /model gpt-4o or /model deepseek-v3"
       else
-        puts 'memory compaction unavailable (AI agent disabled or memory store off) — session NOT cleared'
+        model = parts[1..].join(' ').strip.gsub(/\A["']|["']\z/, '')
+        puts @agent.switch_model!(model)
       end
+    when '/try'
+      if @agent.nil?
+        puts "hivemind disabled — cannot try"
+      elsif parts[1].nil?
+        puts "usage: /try <model> [message]  — e.g. /try gpt-4o hivemind how is the factory?"
+        puts "       replays last trigger with MODEL one-off (not persisted, not sent to game)"
+      else
+        model = parts[1].strip.gsub(/\A["']|["']\z/, '')
+        msg = parts[2..]&.join(' ')
+        msg = nil if msg && msg.strip.empty?
+        puts @agent.try_model!(model, msg)
+      end
+    when '/compact'
+      # Single guard lives in compact_memory! (dummy MemoryStore → enabled?=false
+      # → return false, no LLM call). No outer check needed.
+      unless @agent
+        puts 'memory compaction unavailable (AI agent not running) — session NOT cleared'
+        next
+      end
+      # Runs in a background thread so the console stays responsive (the
+      # compaction LLM call takes seconds; it queues behind any live ask).
+      # The session is wiped only after a SUCCESSFUL pass — if compaction
+      # is disabled or errors, compact_memory! returns false and the
+      # session is kept. Both calls serialize on the agent mutex.
+      Thread.new do
+        if @agent.compact_memory!('manual')
+          # Trim, don't wipe: drop the messages the pass saw (minus a
+          # recent tail kept for flow); mid-pass console lines survive.
+          @agent.trim_session_after_compaction!
+        else
+          puts 'memory compaction FAILED — session kept (see [hivemind] error above)'
+        end
+      end
+      puts 'memory compaction started — session resets when done (see [hivemind] logs)'
     else
       puts "unknown command #{parts[0]} — try /help"
     end

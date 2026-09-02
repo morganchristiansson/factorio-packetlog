@@ -38,7 +38,7 @@ module HiveMindCompaction
   # with no usable reply — the session is kept. clear_session! stays
   # callable standalone so a full wipe can be scripted/tested.
   def compact_memory!(reason = nil)
-    return false if @disabled || !memory_enabled?
+    return false unless @memory_store.enabled?
     return false unless compactable?
     log "memory compaction #{reason ? "(#{reason}) " : ''}— #{session_summary}"
     # Snapshot under the mutex, then RELEASE it for the forks: live asks

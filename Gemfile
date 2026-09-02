@@ -7,6 +7,7 @@ gem 'rconrb', '~> 0.2'       # Source RCON protocol client (Factorio's RCON)
 
 # Hivemind AI agent (--ai-agent): LLM chat via ruby_llm
 gem 'ruby_llm', '~> 1.16'
+gem 'ruby_llm-responses_api', '0.5.4' # Responses API for muse-spark-1.3-contributor-free (/v1/responses) — 0.6.x needs ruby_llm 2.0
 
 # Test suite
 gem 'minitest', '~> 5.0'

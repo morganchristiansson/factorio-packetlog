@@ -66,8 +66,39 @@ module HiveMindCompaction
       # concurrent forks still share the longest cached prefix. The agent
       # itself is never a target (stray blobs from older builds are
       # ignored, not rewritten).
+      keys = (%w[soul knowledge] + seen.sort).reject { |k| k == HiveMindAgent::AGENT_NAME }
+      # Warm-up: first key runs solo to prime provider prompt-cache (cold
+      # cache → first call pays full input cost, rest hit cache). Without
+      # this, two parallel cold calls both miss and double-pay.
+      first = keys.shift
+      if first
+        pass = nil
+        begin
+          @mutex.synchronize { pass = build_compaction_chat if @chat }
+          if pass
+            current = @memory_store.read_key(first).to_s.strip
+            pass.add_message(role: :user, content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
+            ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, first, current.empty? ? '(none yet)' : current))
+            content = extract_memory_content(pass.messages)
+            unchanged = content && content.match?(/\AUNCHANGED\z/i)
+            has_blob = !current.empty?
+            if content.nil? || (unchanged && !has_blob)
+              failures << first
+            elsif !unchanged
+              if @memory_store.write_key(first, content)
+                written += 1
+                log "memory compaction — #{first}: #{content.length} chars"
+              else
+                failures << first
+              end
+            end
+          end
+        ensure
+          pass = nil
+        end
+      end
       work = Queue.new
-      (%w[soul knowledge] + seen.sort).reject { |k| k == HiveMindAgent::AGENT_NAME }.each { |k| work << k }
+      keys.each { |k| work << k }
       results = Mutex.new
       workers = Array.new(COMPACTION_CONCURRENCY) do
         Thread.new do
@@ -147,7 +178,7 @@ module HiveMindCompaction
   # mutates existing entries. No tools: the fork speaks plain text only.
   # Observers are hooked so the console keeps showing reasoning/usage.
   def build_compaction_chat
-    pass = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
+    pass = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
     pass.messages.replace(@chat.messages)
     observe_chat(pass)
     pass

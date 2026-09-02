@@ -1127,7 +1127,7 @@ class FactorioSniffer
       # → return false, no LLM call). No outer check needed.
       unless @agent
         puts 'memory compaction unavailable (AI agent not running) — session NOT cleared'
-        next
+        return
       end
       # Runs in a background thread so the console stays responsive (the
       # compaction LLM call takes seconds; it queues behind any live ask).

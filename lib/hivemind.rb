@@ -3,6 +3,10 @@
 require 'set'
 require 'time'
 require 'ruby_llm'
+begin
+  require 'ruby_llm-responses_api'
+rescue LoadError
+end
 require_relative 'memory_store'
 # RubyLLM tool classes (HivemindReply, RconQuery,
 # ScheduleFollowUp, CancelFollowUp) live in hivemind_tools.rb.
@@ -40,6 +44,16 @@ class HiveMindAgent
   # the agent at a different provider without touching code.
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
   DEFAULT_MODEL    = 'deepseek-v4-flash'
+  DEFAULT_PROVIDER = :openai
+
+  # Models that are only available via the Responses API (Zen: /v1/responses).
+  # Auto-selects :openai_responses when HIVE_PROVIDER is not set.
+  RESPONSES_MODELS = %w[muse-spark-1.3-contributor-free].freeze
+  def self.provider_for(model)
+    return ENV['HIVE_PROVIDER'].to_sym if ENV['HIVE_PROVIDER'] && !ENV['HIVE_PROVIDER'].empty?
+    return :openai_responses if RESPONSES_MODELS.include?(model) || model.to_s.downcase.include?('muse-spark')
+    DEFAULT_PROVIDER
+  end
 
   # Trigger phrases (case-insensitive, WHOLE-WORD match). Word-boundary
   # matching keeps short/vague phrases from firing inside other words:
@@ -246,6 +260,7 @@ class HiveMindAgent
     #    rescues and leaves @agent=nil (hard fail, no disabled object).
     llm_api_key = api_key || ENV['HIVE_API_KEY']
     @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
+    @provider = self.class.provider_for(@model)
     api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
 
     raise ArgumentError, 'no API key set (HIVE_API_KEY) — agent disabled' if llm_api_key.nil?
@@ -276,7 +291,7 @@ class HiveMindAgent
     # explicit provider. Fail loudly here (startup) rather than at ask time.
     @chat = RubyLLM.chat(
       model: @model,
-      provider: :openai,
+      provider: @provider,
       assume_model_exists: true
     )
     @chat.with_instructions(system_prompt_with_memories)
@@ -932,11 +947,12 @@ class HiveMindAgent
       rescue StandardError
         nil
       end
+      @provider = self.class.provider_for(@model)
       @mutex.synchronize do
         if @chat
-          @chat.with_model(@model, provider: :openai, assume_exists: true)
+          @chat.with_model(@model, provider: @provider, assume_exists: true)
         else
-          @chat = RubyLLM.chat(model: @model, provider: :openai, assume_model_exists: true)
+          @chat = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
           @chat.with_instructions(system_prompt_with_memories)
           register_tools
           @observers_hooked = false
@@ -989,7 +1005,8 @@ class HiveMindAgent
     snapshot = @mutex.synchronize { @chat ? @chat.messages.dup : [] }
     Thread.new do
       begin
-        tmp = RubyLLM.chat(model: m, provider: :openai, assume_model_exists: true)
+        tmp_provider = self.class.provider_for(m)
+        tmp = RubyLLM.chat(model: m, provider: tmp_provider, assume_model_exists: true)
         tmp.messages.replace(snapshot.dup)
         register_tools(tmp)
         observe_chat(tmp)

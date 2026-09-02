@@ -1,4 +1,8 @@
 #!/usr/bin/env ruby
+begin
+  require 'bundler/setup'
+rescue LoadError
+end
 # factorio-sniffer — live/offline Factorio player action logger
 #
 # Captures UDP traffic on the Factorio port, decodes the binary protocol,

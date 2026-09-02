@@ -520,7 +520,7 @@ class HiveMindAgent
   # (tests / synchronous callers).
   def handle_log_line(line, async: true)
     text = clean_text(strip_log_prefix(line))
-    return if text.empty? || !LOG_EVENT_KEYS.any? { |k| text.downcase.include?(k) }
+    return if text.empty? || !LOG_EVENT_KEYS.any? { |k| text.downcase.start_with?(k) }
     append_history(nil, text)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     rate_mutex.synchronize do

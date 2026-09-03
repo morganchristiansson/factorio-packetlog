@@ -77,17 +77,32 @@ module HiveMindCompaction
           @mutex.synchronize { pass = build_compaction_chat if @chat }
           unless pass
             failures << first
-            log "memory compaction — #{first}: skipped (no chat)"
+            log "memory compaction — #{first}: FAILED (no chat)"
           else
             current = @memory_store.read_key(first).to_s.strip
             pass.add_message(role: :user, content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
             ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, first, current.empty? ? '(none yet)' : current))
             content = extract_memory_content(pass.messages)
+            if content.nil?
+              # One retry on empty — transient model stall, not just UNCHANGED
+              log "memory compaction — #{first}: no reply, retrying…"
+              ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, first, current.empty? ? '(none yet)' : current))
+              content = extract_memory_content(cur_pass.messages)
+            end
             unchanged = content && content.match?(/\AUNCHANGED\z/i)
             has_blob = !current.empty?
-            if content.nil? || (unchanged && !has_blob)
-              failures << first
-              log "memory compaction — #{first}: FAILED (no usable reply)"
+            if content.nil?
+              last = pass.messages.last
+              log "memory compaction — #{first}: FAILED (nil reply)#{last ? " — last=#{last.content.to_s[0,80]}" : ""}"
+            elsif unchanged && !has_blob
+              content = "present this session, no notable interaction yet"
+              if @memory_store.write_key(first, content)
+                written += 1
+                log "memory compaction — #{first}: #{content.length} chars (synthesized minimal) — #{content}"
+              else
+                failures << first
+                log "memory compaction — #{first}: FAILED (write error)"
+              end
             elsif unchanged
               log "memory compaction — #{first}: UNCHANGED"
             elsif @memory_store.write_key(first, content)
@@ -108,53 +123,69 @@ module HiveMindCompaction
       workers = Array.new(COMPACTION_CONCURRENCY) do
         Thread.new do
           loop do
-            key = begin
+            k = begin
               work.pop(true)
             rescue ThreadError
               break
             end
-            pass = nil
+            cur_key = k.dup
+            cur_pass = nil
             begin
-              @mutex.synchronize { pass = build_compaction_chat if @chat }
-              next unless pass
-              current = @memory_store.read_key(key).to_s.strip
+              @mutex.synchronize { cur_pass = build_compaction_chat if @chat }
+              unless cur_pass
+                results.synchronize { failures << cur_key; log "memory compaction — #{cur_key}: FAILED (no chat)" }
+                next
+              end
+              current = @memory_store.read_key(cur_key).to_s.strip
               # Session material rides in its OWN user message, identical
               # in every fork (shared cache prefix); only the small
               # per-key turn below diverges. On a retry, ask_with_retry
               # strips just the turn — the material message stays.
-              pass.add_message(role: :user,
+              cur_pass.add_message(role: :user,
                                content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
-              ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, key,
+              ask_with_retry(cur_pass, format(HiveMindPrompts::COMPACTION_TURN, cur_key,
                                           current.empty? ? '(none yet)' : current))
-              unless pass
-                results.synchronize { failures << key }
-                log "memory compaction — #{key}: FAILED (no chat)"
+              unless cur_pass
+                results.synchronize { failures << cur_key }
+                log "memory compaction — #{cur_key}: FAILED (no chat)"
                 next
               end
-              content = extract_memory_content(pass.messages)
+              content = extract_memory_content(cur_pass.messages)
+              if content.nil?
+                log "memory compaction — #{cur_key}: no reply, retrying…"
+                ask_with_retry(cur_pass, format(HiveMindPrompts::COMPACTION_TURN, cur_key, current.empty? ? '(none yet)' : current))
+                content = extract_memory_content(cur_pass.messages)
+              end
               unchanged = content && content.match?(/\AUNCHANGED\z/i)
               has_blob = !current.empty?
               results.synchronize do
-                if content.nil? || (unchanged && !has_blob)
-                  # No usable reply — or UNCHANGED for a key with no current
-                  # blob (a coverage gap). Counts as failure: the trim must not
-                  # drop an un-distilled range.
-                  failures << key
-                  log "memory compaction — #{key}: FAILED (no usable reply)"
+                if content.nil?
+                  last = cur_pass.messages.last
+                  failures << cur_key
+                  log "memory compaction — #{cur_key}: FAILED (nil reply)#{last ? " — last=#{last.content.to_s[0,80]}" : ""}"
+                elsif unchanged && !has_blob
+                  content = "present this session, no notable interaction yet"
+                  if @memory_store.write_key(cur_key, content)
+                    written += 1
+                    log "memory compaction — #{cur_key}: #{content.length} chars (synthesized minimal) — #{content}"
+                  else
+                    failures << cur_key
+                    log "memory compaction — #{cur_key}: FAILED (write error)"
+                  end
                 elsif unchanged
-                  log "memory compaction — #{key}: UNCHANGED"
-                elsif @memory_store.write_key(key, content)
+                  log "memory compaction — #{cur_key}: UNCHANGED"
+                elsif @memory_store.write_key(cur_key, content)
                   written += 1
-                  log "memory compaction — #{key}: #{content.length} chars — #{content}"
+                  log "memory compaction — #{cur_key}: #{content.length} chars — #{content}"
                 else
-                  failures << key
-                  log "memory compaction — #{key}: FAILED (write error)"
+                  failures << cur_key
+                  log "memory compaction — #{cur_key}: FAILED (write error)"
                 end
               end
             ensure
               # Nothing to strip: the live conversation was never touched.
               # Drop the throwaway chat's reference and let GC take it.
-              pass = nil
+              cur_pass = nil
             end
           end
         end

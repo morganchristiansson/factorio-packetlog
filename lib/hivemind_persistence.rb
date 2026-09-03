@@ -14,8 +14,6 @@ module HiveMindPersistence
   # by the provider ("missing field tool_call_id"). Tool results whose
   # call was dropped (old/corrupt file) are skipped so the conversation
   # never dangles.
-  LEGACY_TOOL_NAMES = { 'hivemind_say' => 'reply' }.freeze  # pre-rename sessions
-
   private
   def load_session
     return unless @session_path && File.exist?(@session_path)
@@ -60,16 +58,6 @@ module HiveMindPersistence
     end
     @followup_cond.signal if n_rearmed.positive?
     messages = data['messages'] || []
-    # Tool names may predate a rename (e.g. "hivemind_say" → "reply"):
-    # rewrite legacy names so restored tool calls reference the CURRENT
-    # tool set (a provider rejects calls naming an undeclared tool).
-    messages.each do |m|
-      next unless m.is_a?(Hash) && m['tool_calls'].is_a?(Array)
-      m['tool_calls'].each do |tc|
-        legacy = LEGACY_TOOL_NAMES[tc['name']]
-        tc['name'] = legacy if legacy
-      end
-    end
     # Pass 0: scrub DEAD write_memories exchanges. Compaction passes that
     # were hard-killed (Ctrl-C) never ran their strip step, so their
     # failed tool-call rounds got persisted — dozens of "write_memories({})

@@ -21,9 +21,7 @@ class HivemindReply < RubyLLM::Tool
   # Chat prefix shared with the agent's plain-text fallback path (send_reply).
   REPLY_PREFIX = 'Hivemind> '
 
-  # Model-facing name (RubyLLM defaults to the underscored class name,
-  # "hivemind_reply"). Sessions persisted before this override carry the
-  # old "hivemind_say" name — load_session rewrites those on restore.
+  # Model-facing name (RubyLLM defaults to "hivemind_reply").
   def name
     'reply'
   end

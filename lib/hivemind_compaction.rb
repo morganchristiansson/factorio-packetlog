@@ -75,7 +75,10 @@ module HiveMindCompaction
         pass = nil
         begin
           @mutex.synchronize { pass = build_compaction_chat if @chat }
-          if pass
+          unless pass
+            failures << first
+            log "memory compaction — #{first}: skipped (no chat)"
+          else
             current = @memory_store.read_key(first).to_s.strip
             pass.add_message(role: :user, content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
             ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, first, current.empty? ? '(none yet)' : current))
@@ -84,13 +87,15 @@ module HiveMindCompaction
             has_blob = !current.empty?
             if content.nil? || (unchanged && !has_blob)
               failures << first
-            elsif !unchanged
-              if @memory_store.write_key(first, content)
-                written += 1
-                log "memory compaction — #{first}: #{content.length} chars"
-              else
-                failures << first
-              end
+              log "memory compaction — #{first}: FAILED (no usable reply)"
+            elsif unchanged
+              log "memory compaction — #{first}: UNCHANGED"
+            elsif @memory_store.write_key(first, content)
+              written += 1
+              log "memory compaction — #{first}: #{content.length} chars — #{content}"
+            else
+              failures << first
+              log "memory compaction — #{first}: FAILED (write error)"
             end
           end
         ensure
@@ -121,6 +126,11 @@ module HiveMindCompaction
                                content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
               ask_with_retry(pass, format(HiveMindPrompts::COMPACTION_TURN, key,
                                           current.empty? ? '(none yet)' : current))
+              unless pass
+                results.synchronize { failures << key }
+                log "memory compaction — #{key}: FAILED (no chat)"
+                next
+              end
               content = extract_memory_content(pass.messages)
               unchanged = content && content.match?(/\AUNCHANGED\z/i)
               has_blob = !current.empty?
@@ -130,13 +140,15 @@ module HiveMindCompaction
                   # blob (a coverage gap). Counts as failure: the trim must not
                   # drop an un-distilled range.
                   failures << key
+                  log "memory compaction — #{key}: FAILED (no usable reply)"
                 elsif unchanged
-                  # legit no-op
+                  log "memory compaction — #{key}: UNCHANGED"
                 elsif @memory_store.write_key(key, content)
                   written += 1
-                  log "memory compaction — #{key}: #{content.length} chars"
+                  log "memory compaction — #{key}: #{content.length} chars — #{content}"
                 else
                   failures << key
+                  log "memory compaction — #{key}: FAILED (write error)"
                 end
               end
             ensure
@@ -178,9 +190,49 @@ module HiveMindCompaction
   # mutates existing entries. No tools: the fork speaks plain text only.
   # Observers are hooked so the console keeps showing reasoning/usage.
   def build_compaction_chat
+    # History may have been created with a different provider/model (e.g.
+    # free chat/completions model now unavailable, now on :openai_responses
+    # for muse-spark). Responses is strict: every tool call needs a paired
+    # non-empty output. The live history has a halted reply (HivemindReply
+    # returns halt('') → empty tool result) that chat/completions tolerates
+    # but responses rejects. Sanitize in place and keep the current @model/
+    # @provider (no fallback, no new env var).
     pass = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
-    pass.messages.replace(@chat.messages)
-    observe_chat(pass)
+    sanitized = []
+    pending = Set.new
+    @chat.messages.each do |m|
+      if m.role == :assistant && m.tool_call?
+        ids = m.tool_calls.is_a?(Hash) ? m.tool_calls.keys : []
+        pending.merge(ids)
+        sanitized << m
+      elsif m.role == :tool
+        # Halt (reply → halt('')) produces empty content → synthesize so
+        # responses doesn't see "No tool output found for call_..."
+        if m.content.to_s.strip.empty?
+          sanitized << RubyLLM::Message.new(role: :tool, content: '(sent to game)', tool_call_id: m.tool_call_id)
+        else
+          sanitized << m
+        end
+        pending.delete(m.tool_call_id)
+      else
+        if pending.any?
+          # Orphan assistant without following tool result → drop it
+          while sanitized.last && sanitized.last.role == :assistant && sanitized.last.tool_call?
+            sanitized.pop
+          end
+          pending.clear
+        end
+        sanitized << m
+      end
+    end
+    while sanitized.last && sanitized.last.role == :assistant && sanitized.last.tool_call? && pending.any?
+      sanitized.pop
+      pending.clear
+    end
+    pass.messages.replace(sanitized)
+    # No observe_chat here — compaction fork is plain-text, per-key
+    # "memory compaction — <player>: …" is the single line per key.
+    # Generic assistant/reasoning logs would duplicate it.
     pass
   end
 

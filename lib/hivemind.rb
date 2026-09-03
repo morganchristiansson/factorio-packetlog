@@ -85,12 +85,17 @@ class HiveMindAgent
   TRIM_TAIL_CHARS = 20_000
   HISTORY_LINE_LEN = 120        # per-line clip in the history context
   GREET_INTERVAL = 10.0         # min seconds between join greetings
-  # Game-log watcher (factorio-current.log tail): lines carrying one of
-  # these keys reach the agent. EVERY match is queued for the next prompt;
-  # the first match within LOG_EVENT_INTERVAL additionally fires a dedicated
-  # turn (so the model can react now) followed by an auto-compaction —
-  # repeats inside the window stay queue-only.
-  LOG_EVENT_KEYS = ['map reset:'].freeze
+  # Game-log watcher (factorio-current.log tail): scenario `log()` events
+  # in the common `event=<name>, k=v, ...` format from freeplay.lua/reset.lua
+  # (player-died, map-reset, research-finished, evo-stage, apex-spitter,
+  # artillery-target, fluid-flushed) are QUEUED for the next prompt.
+  # Only TURN_EVENTS additionally fire a dedicated turn (so the model can
+  # react now) followed by an auto-compaction — a map reset closes a
+  # round; other events stay queue-only. Repeats inside
+  # LOG_EVENT_INTERVAL stay queue-only. Matching is by parsed event name
+  # (see #log_event_name), so adding a turn event is one entry here.
+  LOG_EVENT_PREFIX = 'event='
+  LOG_TURN_EVENTS = %w[map-reset].freeze
   LOG_EVENT_INTERVAL = 300.0    # min seconds between log-event turns (5 min)
   # Auto-compaction gate: only distill when the session holds at least
   # this many characters of conversation — 2x what post-compaction trim
@@ -497,23 +502,24 @@ class HiveMindAgent
     rescue StandardError => e
       log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
     end
-    log "watching #{path} for /#{LOG_EVENT_KEYS.join('|')}/i"
+    log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{LOG_TURN_EVENTS.join(', ')})"
     true
   end
 
-  # One tailed log line. Only lines carrying a LOG_EVENT_KEY reach the
-  # agent; everything else is dropped without parsing. A match is ALWAYS
-  # queued (append_history) so it rides along with whatever prompt comes
-  # next; the FIRST match in LOG_EVENT_INTERVAL additionally fires a
-  # dedicated turn — react in chat if players would care — and then an
-  # auto-compaction (a map reset closes a round: distill memories while
-  # the session is fresh). Rate limit runs on rate_mutex (packet-style
+  # One tailed log line. Any `event=<name>, ...` line is QUEUED
+  # (append_history) so it rides along with whatever prompt comes next;
+  # only TURN_EVENTS (a map reset closes a round: distill memories while
+  # the session is fresh) additionally fire a dedicated turn on the FIRST
+  # match in LOG_EVENT_INTERVAL — react in chat if players would care —
+  # and then an auto-compaction. Rate limit runs on rate_mutex (packet-style
   # thread — never touches @mutex). async:false runs the turn inline
   # (tests / synchronous callers).
   def handle_log_line(line, async: true)
     text = clean_text(strip_log_prefix(line))
-    return if text.empty? || !LOG_EVENT_KEYS.any? { |k| text.downcase.start_with?(k) }
+    name = log_event_name(text)
+    return if name.nil?
     append_history(nil, text)
+    return unless LOG_TURN_EVENTS.include?(name)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     rate_mutex.synchronize do
       return if now - @last_log_event < LOG_EVENT_INTERVAL
@@ -547,10 +553,17 @@ class HiveMindAgent
   end
 
   # Strip Factorio's log-line decoration so only the content is enqueued:
-  # "   14.511 Script @__level__/reset.lua:284: map reset: …" →
-  # "map reset: …".
+  # "4279.523 Script @__level__/freeplay.lua:113:
+  # event=player-died, actor=morganc, ..." → "event=player-died, ...".
   def strip_log_prefix(line)
     line.sub(/\A\s*[\d.]+\s+(?:Script\s+\S+:\s*)?/, '')
+  end
+
+  # Generic event-name match on the stripped line: "event=player-died, ..."
+  # → "player-died". Returns nil for non-event lines. Case-insensitive so
+  # a future `EVENT=...` emitter still matches.
+  def log_event_name(text)
+    text[/\A#{Regexp.escape(LOG_EVENT_PREFIX)}([a-z0-9-]+)/i, 1]&.downcase
   end
 
   private
@@ -634,6 +647,12 @@ class HiveMindAgent
   # the orphan into the session file. Used by BOTH live asks (complete)
   # and memory compaction (whose ensure then strips nothing extra).
   def ask_with_retry(chat, prompt)
+    # Stateless Responses requests: the gem chains each call onto the last
+    # reply via previous_response_id, but we resend the full history every
+    # time — and a stale id (idle expiry, gateway restart) fails the whole
+    # ask with "referenced response not found or expired", poisoning every
+    # later turn the same way. Drop them so each request stands alone.
+    chat.messages.each { |m| m.response_id = nil if m.respond_to?(:response_id=) }
     attempt = 0
     begin
       start = chat.messages.size

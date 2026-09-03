@@ -21,13 +21,13 @@ class TestHivemindLogWatcher < Minitest::Test
   # ── Line handling ──────────────────────────────────────────────
 
   def test_map_reset_line_is_queued_and_fires_turn
-    @agent.handle_log_line('   14.511 Script @__level__/reset.lua:284: map reset: victory=false, science=29255, minutes=1025', async: false)
+    @agent.handle_log_line('2541.706 Script @__level__/reset.lua:291: event=map-reset, actor=morganc, victory=false, science=0, minutes=44', async: false)
     assert_equal 1, captured_prompts.size, 'first match in the window fires a dedicated turn'
     prompt = captured_prompts.first
     assert_includes prompt, 'Game server log event'
-    assert_includes prompt, 'map reset: victory=false', 'event reaches the model'
+    assert_includes prompt, 'event=map-reset, actor=morganc', 'event reaches the model'
     # prefix stripped (no timestamp / Script path anywhere)
-    refute_includes prompt, '14.511'
+    refute_includes prompt, '2541.706'
     refute_includes prompt, 'reset.lua'
   end
 
@@ -38,11 +38,11 @@ class TestHivemindLogWatcher < Minitest::Test
   end
 
   def test_repeats_within_interval_stay_queue_only
-    @agent.handle_log_line('1.0 Script x.lua:1: map reset: one', async: false) # fires + drains queue
+    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=1', async: false) # fires + drains queue
     assert_empty queued_lines
-    @agent.handle_log_line('2.0 Script x.lua:2: map reset: two', async: false) # repeat: queue only
+    @agent.handle_log_line('2.0 Script x.lua:2: event=map-reset, actor=a, victory=false, science=0, minutes=2', async: false) # repeat: queue only
     assert_equal 1, captured_prompts.size, 'repeat must not trigger a turn'
-    assert_includes queued_lines.join("\n"), 'map reset: two'
+    assert_includes queued_lines.join("\n"), 'event=map-reset, actor=a, victory=false, science=0, minutes=2'
   end
 
 
@@ -50,7 +50,7 @@ class TestHivemindLogWatcher < Minitest::Test
 
   def test_auto_compaction_skipped_on_thin_session
     compacted = collect_compactions
-    @agent.handle_log_line('1.0 Script x.lua:1: map reset: fresh world', async: false)
+    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=0', async: false)
     wait_for_turn_thread
     assert_empty compacted, 'thin session must not waste a compaction pass'
   end
@@ -59,7 +59,7 @@ class TestHivemindLogWatcher < Minitest::Test
     compacted = collect_compactions
     pad = 'x' * HiveMindAgent::AUTO_COMPACTION_MIN_CHARS
     @agent.instance_variable_get(:@chat).add_message(role: :user, content: pad)
-    @agent.handle_log_line('1.0 Script x.lua:1: map reset: end of round', async: false)
+    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
     wait_for_turn_thread
     assert_includes compacted, 'map reset'
   end

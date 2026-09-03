@@ -327,13 +327,15 @@ Not wired up yet, per requirements.
 In server mode the agent tails the running server's `factorio-current.log`
 (path auto-detected from `/proc/<pid>/cwd` of the factorio process,
 fallback `~/factorio`; see `ServerDetect.log_path`). Lines carrying a key
-from `LOG_EVENT_KEYS` (currently `map reset:`) reach the agent:
-
-- **Every match is queued** for the next prompt (timestamp and `Script
-  @...lua:NNN:` prefix stripped — the model sees `map reset: victory=false,
-  science=29255, minutes=1025`).
-- **The first match in 5 minutes** additionally fires a dedicated turn so
-  the agent can react in chat right away, then runs an **auto-compaction**
+in the scenario common format `event=<name>, k=v, ...` (player-died,
+map-reset, research-finished, evo-stage, apex-spitter, artillery-target,
+fluid-flushed) are queued for the next prompt (timestamp and `Script
+`@...lua:NNN:` prefix stripped — the model sees e.g.
+`event=player-died, actor=morganc, position=118.9,-167.0, cause=small-worm-turret`).
+- **Only map resets** (`LOG_TURN_EVENTS`: `map-reset`, matched by parsed
+event name via `#log_event_name`)
+  additionally fire a dedicated turn on the **first match in 5 minutes** so
+  the agent can react in chat right away, then run an **auto-compaction**
   (`compact_memory!("map reset")`) — a reset closes a round, so memories
   are distilled while fresh. The compaction is gated on history size:
   below `AUTO_COMPACTION_MIN_CHARS` (2x `TRIM_TAIL_CHARS`, what trimming

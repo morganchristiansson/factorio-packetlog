@@ -195,8 +195,10 @@ module HiveMindPersistence
   # valid tool round-trip after a restart: assistant tool_calls messages
   # keep their call ids/names/arguments (JSON-encoded), tool messages keep
   # their tool_call_id (the provider rejects a bare tool message without
-  # one). The static system prompt is not persisted (re-added on load);
-  # empty tool results carry nothing the model needs and are skipped.
+  # one). The static system prompt is not persisted (re-added on load).
+  # Empty tool results (the reply tool halts with '') are KEPT: dropping
+  # them orphans the assistant's tool_calls message, and the Responses API
+  # rejects the next request ("No tool output found for function call").
   def serialize_messages
     return [] unless @chat
     @chat.messages.filter_map do |m|
@@ -204,7 +206,7 @@ module HiveMindPersistence
       case m.role
       when :tool
         c = m.content.to_s
-        next if c.empty? || m.tool_call_id.to_s.empty?
+        next if m.tool_call_id.to_s.empty?
         { 'role' => 'tool', 'content' => c, 'tool_call_id' => m.tool_call_id }
       when :assistant
         if m.tool_call?

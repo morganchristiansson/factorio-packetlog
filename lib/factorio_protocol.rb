@@ -39,12 +39,17 @@ module FactorioProtocol
 
   # Data lengths for synchronizer action types (bytes after type byte, before peer_id).
   # nil = variable-length (handled by parse_synchronizer_action case logic).
+  # 0x0f/0x10 carry an 8-byte (uint64) tick and 0x12 carries tick(8) +
+  # latency(1) — NOT the dissector's 4-byte tick / 5-byte len. Verified
+  # against server-34197.pcap pkt 1311: 21 sync actions consume the packet
+  # byte-exactly only with these sizes (4-byte ticks desync the stream and
+  # fabricate a NewPeerInfo "join" out of tick bytes — garbage username).
   SYNC_ACTION_LENS = {
     0x00 => 0, 0x01 => 1, 0x02 => nil, 0x03 => nil, 0x04 => 8,
     0x05 => nil, 0x06 => 1, 0x07 => 1, 0x08 => 0,
     0x09 => 1, 0x0a => 1, 0x0b => 1, 0x0c => 0,
-    0x0d => 0, 0x0e => 0, 0x0f => nil, 0x10 => nil,
-    0x11 => 1, 0x12 => 5, 0x13 => 8, 0x14 => 8, 0x15 => 0,
+    0x0d => 0, 0x0e => 0, 0x0f => 8, 0x10 => 8,
+    0x11 => 1, 0x12 => 9, 0x13 => 8, 0x14 => 8, 0x15 => 0,
   }.freeze
 
   # ── Input Actions (from Hornwitser/factorio_dissector Lua plugin) ──

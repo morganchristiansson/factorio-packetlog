@@ -476,6 +476,96 @@ class TestFactorioProtocol < Minitest::Test
     assert sa[:username].valid_encoding?
   end
 
+  # ── Synchronizer tick-confirm sizes (server-34197.pcap pkt 1311) ──
+  # 0x0f/0x10 carry an 8-byte tick and 0x12 carries tick(8)+latency(1) —
+  # the old 4-byte/5-byte sizes desynced the stream and fabricated a
+  # NewPeerInfo "join" out of tick bytes (garbage "joined the game" line).
+
+  # Build a C→S heartbeat carrying a single empty tick closure plus raw
+  # sync-action bytes (mirrors pkt 1311's layout).
+  def build_c2s_sync_packet(sync_bytes, tick: 50_026_211, next_receive: 50_026_259)
+    [0x06].pack('C') +                 # msg_type 6 (C2S)
+      [0x1e].pack('C') +               # tc + single + all-empty + sync
+      [1, 0, 0, 0].pack('V') +         # seq
+      [tick].pack('Q<') +              # empty tick closure's tick
+      [next_receive].pack('Q<') +      # nextToReceiveServerTickClosure
+      sync_bytes.b
+  end
+
+  def test_skipped_tick_closure_confirm_is_8_byte_tick
+    sync = [2].pack('C') +             # sync count
+      [0x10].pack('C') + [50_026_221].pack('Q<') +
+      [0x10].pack('C') + [50_026_222].pack('Q<')
+    result = FactorioProtocol::HeartbeatPacket.parse(build_c2s_sync_packet(sync))
+    sas = result.heartbeat[:sync_actions]
+    assert_equal 2, sas.size
+    assert_equal 'SkippedTickClosureConfirm', sas[0][:name]
+    assert_equal 50_026_221, sas[0][:tick]
+    assert_equal 50_026_222, sas[1][:tick]
+    assert sas.none? { |sa| sa[:hit_unknown] }, '8-byte ticks must parse cleanly'
+    assert sas.none? { |sa| sa[:username] }, 'no phantom join may be decoded'
+  end
+
+  def test_skipped_tick_closure_is_8_byte_tick
+    sync = [1].pack('C') +
+      [0x0f].pack('C') + [50_026_221].pack('Q<')
+    result = FactorioProtocol::HeartbeatPacket.parse(build_c2s_sync_packet(sync))
+    sas = result.heartbeat[:sync_actions]
+    assert_equal 1, sas.size
+    assert_equal 'SkippedTickClosure', sas[0][:name]
+    assert_equal 50_026_221, sas[0][:tick]
+    refute sas[0][:hit_unknown]
+  end
+
+  def test_increased_latency_confirm_is_tick_plus_latency
+    sync = [1].pack('C') +
+      [0x12].pack('C') + [50_026_209].pack('Q<') + [0x02].pack('C')
+    result = FactorioProtocol::HeartbeatPacket.parse(build_c2s_sync_packet(sync))
+    sas = result.heartbeat[:sync_actions]
+    assert_equal 1, sas.size
+    assert_equal 'IncreasedLatencyConfirm', sas[0][:name]
+    assert_equal 50_026_209, sas[0][:tick]
+    assert_equal 2, sas[0][:latency]
+    refute sas[0][:hit_unknown]
+  end
+
+  def test_mixed_latency_and_skip_confirms_no_phantom_join
+    # Replica of server-34197.pcap pkt 1311's sync region: one
+    # IncreasedLatencyConfirm followed by sequential SkippedTickClosureConfirms.
+    # With the old sizes this desynced into GameEnds + a NewPeerInfo whose
+    # "username" was binary tick data (the garbage join line).
+    sync = [3].pack('C') +
+      [0x12].pack('C') + [50_026_209].pack('Q<') + [0x02].pack('C') +
+      [0x10].pack('C') + [50_026_221].pack('Q<') +
+      [0x10].pack('C') + [50_026_222].pack('Q<')
+    result = FactorioProtocol::HeartbeatPacket.parse(build_c2s_sync_packet(sync))
+    sas = result.heartbeat[:sync_actions]
+    assert_equal 3, sas.size
+    assert_equal %w[IncreasedLatencyConfirm SkippedTickClosureConfirm SkippedTickClosureConfirm],
+                   sas.map { |sa| sa[:name] }
+    assert sas.none? { |sa| sa[:hit_unknown] }
+    assert sas.none? { |sa| sa[:username] }, 'tick bytes must never decode as a join'
+  end
+
+  def test_new_peer_info_rejects_binary_garbage
+    # A NewPeerInfo length pointing at binary (tick-like) bytes — as produced
+    # by a desynced stream — must not yield a username (no phantom join).
+    garbage = [0xed, 0x56, 0xfb, 0x02, 0x00, 0x00, 0x00, 0x00,
+               0x10, 0xee, 0x56, 0xfb, 0x02, 0x00, 0x00, 0x00].pack('C*')
+    raw = [0x06].pack('C') +
+      [0x10].pack('C') +
+      [1, 0, 0, 0].pack('V') +
+      [0, 0, 0, 0, 0, 0, 0, 0].pack('Q<') +
+      [1].pack('C') +
+      [0x02].pack('C') +
+      [garbage.bytesize].pack('C') + garbage
+    result = FactorioProtocol::HeartbeatPacket.parse(raw)
+    sa = result.heartbeat[:sync_actions].first
+    refute_nil sa
+    assert_nil sa[:username], 'binary garbage must not decode as a username'
+    assert sa[:hit_unknown], 'desync must stop further sync parsing'
+  end
+
   private
 
   # Build a complete server-to-client heartbeat UDP packet with the given actions.

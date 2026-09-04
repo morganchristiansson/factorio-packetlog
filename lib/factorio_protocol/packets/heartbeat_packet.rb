@@ -376,10 +376,20 @@ module FactorioProtocol
       when 0x02 # NewPeerInfo — username string (uint32v-prefixed)
         s_off, s_len = decode_uint32v(data, offset)
         if s_len && s_off + s_len <= data.bytesize
-          # Force UTF-8: a Unicode name must not stay binary-flagged (that
-          # taints the hivemind prompt / players.json / console output).
-          sa[:username] = data[s_off, s_len].force_encoding('UTF-8').scrub('?')
-          offset = s_off + s_len
+          raw = data[s_off, s_len]
+          # Guard against stream desyncs: a misaligned parse reads binary
+          # (e.g. tick bytes) as the "username" and the sniffer would print
+          # a garbage "joined the game" line. Real names never contain C0
+          # controls/DEL (Unicode multibyte bytes are all >= 0x80); binary
+          # data always does — reject it instead of emitting a phantom join.
+          if raw.bytes.any? { |b| b < 0x20 || b == 0x7F }
+            sa[:hit_unknown] = true
+          else
+            # Force UTF-8: a Unicode name must not stay binary-flagged (that
+            # taints the hivemind prompt / players.json / console output).
+            sa[:username] = raw.force_encoding('UTF-8').scrub('?')
+            offset = s_off + s_len
+          end
         else
           sa[:hit_unknown] = true
         end
@@ -388,10 +398,27 @@ module FactorioProtocol
           sa[:state] = data.getbyte(offset)
           offset += 1
         end
+      when 0x0f, 0x10 # SkippedTickClosure / Confirm — 8-byte (uint64) tick
+        # (the dissector decodes a 4-byte tick; live 2.x traffic carries the
+        # full 8-byte updateTick — verified byte-exact on server-34197.pcap).
+        if offset + 8 <= data.bytesize
+          sa[:tick] = data.unpack1('Q<', offset: offset)
+          offset += 8
+        else
+          sa[:hit_unknown] = true
+        end
       when 0x04 # ClientShouldStartSendingTickClosures
         if offset + 8 <= data.bytesize
           sa[:data] = data[offset, 8]
           offset += 8
+        end
+      when 0x12 # IncreasedLatencyConfirm — tick(8) + latency(1)
+        if offset + 9 <= data.bytesize
+          sa[:tick] = data.unpack1('Q<', offset: offset)
+          sa[:latency] = data.getbyte(offset + 8)
+          offset += 9
+        else
+          sa[:hit_unknown] = true
         end
       else
         # Use known lengths from SYNC_ACTION_LENS, or stop processing

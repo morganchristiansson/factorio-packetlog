@@ -340,6 +340,10 @@ event name via `#log_event_name`)
   are distilled while fresh. The compaction is gated on history size:
   below `AUTO_COMPACTION_MIN_CHARS` (2x `TRIM_TAIL_CHARS`, what trimming
   keeps anyway) there is little to distill and the pass is skipped.
+  On success the session is trimmed (same as `/compact`), so a repeated
+  map reset finds a thin session and skips instead of re-compacting the
+  same round. Repeats inside the 5-minute window never reach compaction
+  at all (queue-only, no turn).
   Manual `/compact` ignores that gate.
 
 Repeats inside the window stay queue-only. The watcher thread lives on the

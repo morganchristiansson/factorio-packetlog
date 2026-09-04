@@ -112,7 +112,7 @@ class TestHivemindCompaction < Minitest::Test
   end
 
 
-  def test_players_seen_covers_every_source_including_join_leave_only
+  def test_session_players_covers_every_source_including_join_leave_only
     agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['zoe']), api_key: 'sk-test', session_path: false, memory_dir: false)
     # chat lines (player field set)
     agent.send(:append_history, 'alice', 'hello')
@@ -122,22 +122,26 @@ class TestHivemindCompaction < Minitest::Test
     agent.send(:append_history, nil, 'dave left the game')
     # memory injected this session (memory_prompt marks via mark_player_seen)
     agent.send(:mark_player_seen, 'erin')
-    # existing on-disk player memory
+    # existing on-disk player memory for a SILENT player (no session activity)
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
       store.write_player('frank', 'frank likes trains')
       agent.instance_variable_set(:@memory_store, store)
-      seen = agent.send(:players_seen)
+      seen = agent.send(:session_players)
       # zoe is online but silent — deliberately NOT a target (never
-      # appeared in the LLM session); frank comes from his on-disk blob.
-      %w[alice bob carol dave erin frank].each do |name|
+      # appeared in the LLM session); frank is likewise NOT a target —
+      # his blob exists on disk but he was silent this session, so there
+      # is no new material to distill (reconsidering him would just answer
+      # UNCHANGED in a wasted fork).
+      %w[alice bob carol dave erin].each do |name|
         assert_includes seen, name, "expected #{name} to be seen"
       end
+      refute_includes seen, 'frank', 'silent on-disk players are not targets'
       refute_includes seen, 'zoe', 'silent online players are not targets'
       # the agent's OWN replies are queued under player 'hivemind' — it is
       # not a player and must never become a compaction target
       agent.send(:append_history, 'hivemind', 'the factory watches')
-      refute_includes agent.send(:players_seen), 'hivemind'
+      refute_includes agent.send(:session_players), 'hivemind'
     end
   end
 

@@ -64,6 +64,25 @@ class TestHivemindLogWatcher < Minitest::Test
     assert_includes compacted, 'map reset'
   end
 
+  def test_successful_auto_compaction_trims_so_repeated_reset_skips
+    collect_completions
+    chat = @agent.instance_variable_get(:@chat)
+    # Many normal-sized turns totalling the gate (a single huge message
+    # would survive the trim's keep-at-least-one rule — real sessions
+    # are many messages, and the trim keeps only a ~20k tail of those).
+    40.times { |i| chat.add_message(role: :user, content: "turn #{i} #{'x' * 1000}") }
+    assert @agent.send(:auto_compaction_worthwhile?), 'setup: session above the gate'
+    # Real compact_memory! would hit the network — stub a SUCCESSFUL pass
+    # but mirror its side effect (recording how much it saw) so the real
+    # trim that run_log_event_turn performs drops the compacted range.
+    @agent.define_singleton_method(:compact_memory!) do |_reason = nil|
+      @compaction_included_count = @chat.messages.size
+      true
+    end
+    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
+    refute @agent.send(:auto_compaction_worthwhile?), 'trimmed session must fall below the auto-compaction gate so a repeated reset skips'
+  end
+
 
   # ── Watcher thread lifecycle ───────────────────────────────────
 

@@ -50,7 +50,7 @@ module HiveMindCompaction
       return false unless @chat
       return false if @compacting          # no overlapping /compact runs
       @compacting = true
-      seen = players_seen   # snapshot BEFORE the passes (console may grow during it)
+      seen = session_players   # snapshot BEFORE the passes (console may grow during it)
       # How much of the thread the forks will see — trim_session_after_
       # compaction! drops exactly this range (minus a recent tail) on success.
       @compaction_included_count = @chat.messages.size
@@ -317,7 +317,7 @@ module HiveMindCompaction
   # conversation. The conversation THREAD itself is the message history
   # already in the live chat (compaction runs inside it), so it is not
   # duplicated here.
-  def compaction_material(seen = players_seen)
+  def compaction_material(seen = session_players)
     parts = []
     current = @memory_store.all
     if current.empty?
@@ -346,18 +346,21 @@ module HiveMindCompaction
     parts.join("\n\n")
   end
 
-  # Compaction targets: every player encountered THIS LLM session
-  # (@session_players — persisted with the session file via append_history
-  # and memory_prompt, so restarts and hot reloads can't drift it from
-  # what the conversation actually contains), plus every player who ALREADY
-  # has a blob on disk (each is reconsidered every run; usually answers
-  # UNCHANGED). Deliberately NOT: the console queue (belongs to the live
-  # bot's delivery cycle) or the online roster (silent players haven't
-  # appeared in this session). Called under @mutex.
-  def players_seen
+  # Players active since last compaction (THIS LLM session) — the single
+  # name for this set everywhere: the `@session_players` ivar, the
+  # `session_players` reader here, and the `session_players` key in
+  # hivemind-session.json (persisted via append_history and memory_prompt,
+  # so restarts and hot reloads can't drift it from what the conversation
+  # actually contains). Players with on-disk blobs who were silent this
+  # session are deliberately NOT included — there is no new material about
+  # them, so the pass would just answer UNCHANGED (one wasted LLM fork per
+  # stale player). Deliberately NOT included either: the console queue
+  # (belongs to the live bot's delivery cycle) or the online roster
+  # (silent players haven't appeared in this session). Called under @mutex.
+  # Returns a snapshot copy (minus the agent name — replies are not a player).
+  def session_players
     players = @session_players_mutex.synchronize { Set.new(@session_players) }
-    @memory_store.player_names.each { |p| players << clean_text(p) }
-    players.delete(HiveMindAgent::AGENT_NAME)  # stray blobs from older builds
+    players.delete(HiveMindAgent::AGENT_NAME)
     players
   end
 

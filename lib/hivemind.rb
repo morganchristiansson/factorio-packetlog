@@ -533,7 +533,10 @@ class HiveMindAgent
   # The dedicated reaction turn for one log event: build the prompt, get a
   # reply, then distill the round into long-term memory. Compaction is
   # skipped when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or
-  # a pass is already running (compact_memory! guards that itself).
+  # a pass is already running (compact_memory! guards that itself). On
+  # success the session is TRIMMED (same as /compact) so a repeated map
+  # reset finds a thin session and skips — without the trim every reset
+  # would re-compact the same material.
   def run_log_event_turn(text)
     prompt = turn_prompt(
       "Game server log event: #{text}\n\n" \
@@ -546,7 +549,9 @@ class HiveMindAgent
       # After reacting: distill the round into long-term memory. Skipped
       # when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or a
       # pass is already running (compact_memory! guards that itself).
-      compact_memory!('map reset') if auto_compaction_worthwhile?
+      # Trim on success (session_players cleared, compacted history dropped)
+      # so repeated resets don't re-compact the same round.
+      trim_session_after_compaction! if auto_compaction_worthwhile? && compact_memory!('map reset')
     rescue StandardError => e
       log_error('log-event error', e)
     end

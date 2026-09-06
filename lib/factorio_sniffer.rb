@@ -50,18 +50,28 @@ class FactorioSniffer
   # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
   QUIT_WINDOW = 5
 
+  # Always-on capture rotation defaults (hardcoded — flags override, no new
+  # knobs). Without ANY bound the active capture grows forever (observed:
+  # a 511 MB server-34197.pcap plus 2.9 GB of never-pruned restarts) and
+  # rotation only happened on restart. So: rotate the active file when it
+  # exceeds 256 MB, rotate hourly, and prune rotated files older than 72h
+  # / beyond 256 MB total — worst case ≈ 512 MB on disk. Pass --keep /
+  # --max-size explicitly to keep more history (e.g. for grief analysis).
+  DEFAULT_KEEP_HOURS = 72
+  DEFAULT_MAX_SIZE_MB = 256
+
   def initialize(options, pcap_writer: nil)
     @options = options
     @player_db = PlayerDatabase.new(options[:player_db])
     @grief = nil
     @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
     # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
-    # analysis (-r) doesn't re-capture. Auto-naming uses a STABLE base
-    # (captures/server-<port>.pcap) — the writer hangs exactly one rotation
-    # timestamp off it, and a restart preserves the previous run via
-    # PcapWriter#rotate_on_restart. Client mode defers until the first packet
-    # reveals the server identity. Tests inject a fake writer via the
-    # pcap_writer: kwarg (dependency injection, not config).
+    # analysis (-r) doesn't re-capture. Auto-naming writes timestamped files
+    # directly (captures/server-<port>-<ts>.pcap) — the latest file IS the
+    # live one, no renames, no stable path. Restarts just open a new file.
+    # Client mode defers until the first packet reveals the server identity.
+    # Tests inject a fake writer via the pcap_writer: kwarg (dependency
+    # injection, not config).
     @pcap_writer = pcap_writer
     @pending_capture = nil
     if !options[:pcap] && !@pcap_writer
@@ -1313,7 +1323,7 @@ class FactorioSniffer
   # ── Always-on auto-named capture ────────────────────────────────
 
   def new_pcap_writer(path)
-    PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: @options[:keep], max_size: @options[:max_size])
+    PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: effective_keep, max_size: effective_max_size, timestamped: true)
   end
 
   # Default captures/ directory (created on demand), relative to cwd.
@@ -1323,11 +1333,9 @@ class FactorioSniffer
     dir
   end
 
-  # STABLE capture base path (no run timestamp): the writer appends exactly
-  # one rotation timestamp when it rolls a file (server-<port>-<ts>.pcap),
-  # and a restart appends one via rotate_on_restart. This keeps every
-  # rotated file under the same stem, so pruning (--keep/--max-size) covers
-  # ALL runs of this identity, not just the current one.
+  # Capture identity path (never written directly): the writer timestamps
+  # it on open (`server-<port>-<ts>.pcap`), so every file under the stem is
+  # one identity and retention covers ALL runs, not just the current one.
   def capture_path(dir, id)
     ext = @options[:save_capture_gz] ? '.pcap.gz' : '.pcap'
     File.join(dir, "#{id}#{ext}")
@@ -1335,13 +1343,17 @@ class FactorioSniffer
 
   # Human hint about rotation for the capture startup line.
   def retention_hint
-    if @options[:keep]
-      " (rotating hourly, keep #{@options[:keep]}h)"
-    elsif @options[:max_size]
-      " (rotating at #{@options[:max_size]}MB)"
-    else
-      ' (rotating off — pass --keep HOURS / --max-size MB to bound disk)'
-    end
+    " (rotating hourly/at #{effective_max_size}MB, keep #{effective_keep}h)"
+  end
+
+  # Effective retention: explicit flags win, otherwise the hardcoded
+  # defaults above (capture is always on — unbounded is never an option).
+  def effective_keep
+    @options[:keep] || DEFAULT_KEEP_HOURS
+  end
+
+  def effective_max_size
+    @options[:max_size] || DEFAULT_MAX_SIZE_MB
   end
 
   # Client mode: the server IP is unknown at startup — resolve it from the

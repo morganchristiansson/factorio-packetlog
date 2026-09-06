@@ -19,9 +19,9 @@ end
 #   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
 #   With grief detection: ... --detect-grief
 #   Save player db: ... --player-db players.json
-#   Capture: always on for live capture — auto-named captures/server-<port>.pcap
-#     (server) with rotation (--keep HOURS / --max-size MB), one timestamp per
-#     rotated file; --save-capture-gz to compress.
+#   Capture: always on for live capture — auto-named captures/server-<port>-<ts>.pcap
+#     (server), latest file is the live one, rotation + retention always on
+#     (defaults 72h / 256 MB, --keep / --max-size override); --save-capture-gz to compress.
 #   Filter by local IP: ... --local-ip 192.168.1.100
 
 require_relative 'lib/server_detect'
@@ -63,8 +63,8 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--no-rcon', 'Disable the RCON roster sync (server mode)') { |v| options[:no_rcon] = true }
     opts.on('--save-capture-gz', 'Compress the (always-on, auto-named) capture stream with gzip (~3-4x smaller)') { |v| options[:save_capture_gz] = true }
     opts.on('--save-transfer-blocks', 'Also record map-download TransferBlock packets (msg 13, raw save data) in the capture. Off by default: they contain no player actions and add ~12% to the file size. Required if you later want tools/extract_save_from_pcap.rb to reconstruct the save.') { |v| options[:save_transfer_blocks] = true }
-    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth across ALL runs (deletes older rotated files). Capture is always on, so this bounds disk.') { |v| options[:keep] = v }
-    opts.on('--max-size MB', Integer, 'Rolling capture: rotate the capture file when it exceeds this size (MB) and prune rotated files to keep total rotated size bounded. Restarts always preserve the previous capture (renamed with a timestamp).') { |v| options[:max_size] = v }
+    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth across ALL runs (deletes older rotated files). Defaults to 72 when omitted — capture is always on, so retention is always bounded.') { |v| options[:keep] = v }
+    opts.on('--max-size MB', Integer, 'Rolling capture: rotate the capture file when it exceeds this size (MB) and prune rotated files to keep total rotated size bounded. Defaults to 256 when omitted. Restarts always preserve the previous capture (renamed with a timestamp).') { |v| options[:max_size] = v }
     opts.on('--full-capture', 'Record every packet as-is: no TransferBlock exclusion, no keepalive-heartbeat filtering, no server-mode direction filter (implies --save-transfer-blocks)') { |v| options[:full_capture] = true }
     opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
     opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }

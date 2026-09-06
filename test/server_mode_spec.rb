@@ -506,11 +506,12 @@ puts "\nTest 11: always-on auto-named captures"
 
 Dir.mktmpdir do |dir|
   Dir.chdir(dir) do
-    # server mode: named at init (captures/server-34197.pcap, stable base)
+    # server mode: timestamped at init (captures/server-34197-<ts>.pcap) —
+    # the file IS the live one, no stable path, no renames
     _, sn = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil, autoname: true) do |s|
       w = s.instance_variable_get(:@pcap_writer)
-      ok = w && w.path =~ %r{captures/server-34197\.pcap\z}
-      check(!!ok, "server auto-name, no run timestamp (got #{w && w.path})")
+      ok = w && w.path =~ %r{captures/server-34197-\d{8}-\d{6}\.pcap\z}
+      check(!!ok, "server auto-name, timestamped directly (got #{w && w.path})")
       w&.close
     end
 
@@ -521,8 +522,8 @@ Dir.mktmpdir do |dir|
       pkt = "\x06\x02".b + ([0] * 10).pack('C*')
       s.send(:process_packet, 1, 1_700_000_000.0, '10.0.0.50', '10.0.0.1', 50000, 34197, pkt)
       w = s.instance_variable_get(:@pcap_writer)
-      ok = w && w.path =~ %r{captures/client-10\.0\.0\.1\.pcap\z}
-      check(!!ok, "client auto-name from first packet, no run timestamp (got #{w && w.path})")
+      ok = w && w.path =~ %r{captures/client-10\.0\.0\.1-\d{8}-\d{6}\.pcap\z}
+      check(!!ok, "client auto-name from first packet, timestamped directly (got #{w && w.path})")
       w&.close
     end
   end

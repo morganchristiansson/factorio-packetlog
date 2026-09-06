@@ -10,13 +10,14 @@ case before it).
 Without a capture covering the event, most questions are unprovable.
 
 - **Always capture**: capture is on automatically in live mode —
-  auto-named files in `captures/` with a stable base
-  (`server-<port>.pcap` / `client-<ip>.pcap`); rotation appends one
-  timestamp (`server-<port>-<ts>.pcap`) and restart preserves prior runs.
-- **Retain**: `--keep HOURS` rotates hourly and prunes older files;
-  `--max-size MB` rotates per-file size and bounds total rotated size.
+  timestamped files in `captures/` (`server-<port>-<ts>.pcap` /
+  `client-<ip>-<ts>.pcap`); the latest file is the live one, restarts just
+  start a new file.
+- **Retain**: captures rotate hourly / at 256 MB and prune rotated files
+  older than 72h (or beyond 256 MB total) by default; `--keep HOURS` /
+  `--max-size MB` keep more when you need a longer window.
   A restart also preserves the previous capture (renamed with a
-  timestamp).
+  timestamp; empty captures are dropped).
 - **Server-mode caveat**: captures exclude S→C broadcasts and
   keepalives (`--full-capture` records everything). S→C echoes carry
   nothing extra for investigation anyway.

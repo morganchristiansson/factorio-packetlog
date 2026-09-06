@@ -97,9 +97,11 @@ The sniffer's always-on capture filters and can compress/rotate:
   written gzip-compressed (measured ~3.4x on a full capture; much better
   once keepalives are filtered). `PcapReader` auto-detects and gunzips,
   so `-r` analysis and `tools/extract_save_from_pcap.rb` work unchanged.
-- **Rolling retention**: `--keep HOURS` rotates the capture every hour
-  (timestamped files) and deletes rotated files older than HOURS — bounds
-  disk usage on long-running captures. Combine with `.gz` paths.
+- **Rolling retention**: the capture rotates every hour AND when it
+  exceeds 256 MB (timestamped files); rotated files older than 72h — or
+  beyond 256 MB total — are deleted. `--keep HOURS` / `--max-size MB`
+  override the defaults when you need more history. Combine with `.gz`
+  paths.
 
 All of it is bypassed with `--full-capture` (record every packet as-is,
 implies `--save-transfer-blocks`).

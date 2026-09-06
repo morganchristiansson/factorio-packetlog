@@ -10,28 +10,32 @@ class PcapWriter
   attr_reader :path
 
   # gzip: true = write the stream gzip-compressed (use a .gz path).
-  # keep: rolling retention in HOURS — rotate the capture every hour
-  #   (renaming the finished file with a timestamp) and delete rotated
-  #   files older than `keep` hours. nil = single file, keep everything.
+  # keep: rolling retention in HOURS — rotate the capture every hour and
+  #   delete files older than `keep` hours. nil = keep everything.
   # max_size: rotate a capture file when it exceeds this size (MB) and
-  #   prune rotated files so TOTAL rotated size stays ≤ max_size.
-  # Restarts: a pre-existing capture at `path` is renamed with a
-  #   timestamp on open instead of being overwritten.
-  def initialize(path, gzip: false, keep: nil, max_size: nil)
-    @path = path
+  #   prune files so TOTAL size stays ≤ max_size.
+  # timestamped: write straight to a timestamped file
+  #   (`base-<YYYYMMDD-HHMMSS>.pcap`) — the latest file IS the live one,
+  #   no renames, no stable path. Restarts just open a new file. Used for
+  #   the always-on auto-named capture; explicit paths (e.g.
+  #   --save-unknowns) keep the legacy exact-path behavior.
+  def initialize(path, gzip: false, keep: nil, max_size: nil, timestamped: false)
+    @base_path = path
+    @timestamped = timestamped
     @gzip = gzip
     @keep_hours = keep
     @max_size_bytes = max_size ? max_size * 1024 * 1024 : nil
     @start_time = Time.now
     @file_start = Time.now
-    rotate_on_restart  # never silently destroy the previous run's capture
+    if timestamped
+      archive_legacy_stable_file  # one-time upgrade from the stable-path layout
+      @path = unique_timestamped_path(Time.now)
+    else
+      @path = path
+      rotate_on_restart  # never silently destroy the previous run's capture
+    end
     @file = open_file(@path)
-    # Write pcap global header directly (avoids pack issues)
-    @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
-    @file.write([2, 4].pack('v2'))  # version
-    @file.write([0, 0].pack('V2'))  # timezone, sigfigs
-    @file.write([65535].pack('V'))   # snaplen
-    @file.write([1].pack('V'))       # linktype = Ethernet
+    write_global_header
     # Buffered writes flushed by a BACKGROUND thread: the capture loop only
     # appends to the buffer (fast, non-blocking). Flushing on the capture
     # thread stalls it on disk I/O (the workspace is a Docker bind mount),
@@ -60,6 +64,11 @@ class PcapWriter
       @buf = +''.b
       @file.close if @file
       @file = nil
+      # Timestamped mode opens a new file per run — don't leave a
+      # header-only (zero-packet) file behind when nothing was captured.
+      if @timestamped && File.exist?(@path) && File.size(@path) <= 24
+        File.delete(@path)
+      end
     end
   end
 
@@ -83,19 +92,27 @@ class PcapWriter
 
   # If @path already holds a capture (previous run / restart), rename it
   # with a timestamp instead of overwriting — history is preserved.
+  # Header-only files (24-byte pcap global header, zero packets — e.g. a
+  # seconds-long run) carry nothing worth preserving: delete instead of
+  # renaming, so restarts don't accumulate 4K timestamped clutter.
   def rotate_on_restart
-    return unless File.exist?(@path) && File.size(@path) > 0
+    return unless File.exist?(@path)
+    if File.size(@path) <= 24
+      File.delete(@path)
+      return
+    end
     finished = timestamped_path(File.mtime(@path).strftime('%Y%m%d-%H%M%S'))
     finished = timestamped_path(Time.now.strftime('%Y%m%d-%H%M%S')) if File.exist?(finished)
     File.rename(@path, finished)
     prune_rotated
   end
 
-  # Hourly and/or size-based rotation + retention: flush/close the
-  # finished active file, rename it with a timestamp, open a fresh one,
-  # prune rotated files beyond the retention bounds. Runs under the write
-  # mutex (once per hour / per size threshold — a few ms of disk I/O on
-  # the capture thread is negligible off-burst).
+  # Hourly and/or size-based rotation + retention: close the finished
+  # file and open a fresh timestamped one (timestamped mode — nothing to
+  # rename; the finished file's name was final from the start), then prune
+  # beyond the retention bounds. Runs under the write mutex (once per hour
+  # / per size threshold — a few ms of disk I/O on the capture thread is
+  # negligible off-burst).
   def rotate_if_due
     due = @keep_hours && (Time.now - @file_start) >= 3600
     if @max_size_bytes
@@ -107,16 +124,56 @@ class PcapWriter
     @buf = +''.b
     @file.close
     @file = nil
-    finished = timestamped_path(@file_start.strftime('%Y%m%d-%H%M%S'))
-    File.rename(@path, finished) if File.exist?(@path)
+    if @timestamped
+      @path = unique_timestamped_path(Time.now)
+    else
+      finished = timestamped_path(@file_start.strftime('%Y%m%d-%H%M%S'))
+      File.rename(@path, finished) if File.exist?(@path)
+    end
     @file = open_file(@path)
+    write_global_header
     @file_start = Time.now
     prune_rotated
   end
 
+  # Pcap global header on every freshly opened file (init AND rotation —
+  # the old code forgot the rotation case, leaving headerless files).
+  def write_global_header
+    # Written directly (avoids pack issues)
+    @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
+    @file.write([2, 4].pack('v2'))  # version
+    @file.write([0, 0].pack('V2'))  # timezone, sigfigs
+    @file.write([65535].pack('V'))   # snaplen
+    @file.write([1].pack('V'))       # linktype = Ethernet
+  end
+
   def timestamped_path(ts)
-    ext = File.extname(@path)
-    "#{@path[0...-ext.length]}-#{ts}#{ext}"
+    ext = File.extname(@base_path)
+    "#{@base_path[0...-ext.length]}-#{ts}#{ext}"
+  end
+
+  # First free `base-<ts>.pcap` at or after `time` (same-second restarts
+  # must not collide).
+  def unique_timestamped_path(time)
+    t = time
+    loop do
+      cand = timestamped_path(t.strftime('%Y%m%d-%H%M%S'))
+      return cand unless File.exist?(cand)
+      t += 1
+    end
+  end
+
+  # One-time upgrade from the stable-path layout: a capture left AT the
+  # base path by the old version is archived with its mtime (or dropped
+  # when header-only) so it joins the normal retention set.
+  def archive_legacy_stable_file
+    return unless File.exist?(@base_path)
+    if File.size(@base_path) <= 24
+      File.delete(@base_path)
+      return
+    end
+    File.rename(@base_path, unique_timestamped_path(File.mtime(@base_path)))
+    prune_rotated
   end
 
   # Delete rotated files beyond the retention bounds: older than `keep`
@@ -142,9 +199,9 @@ class PcapWriter
   end
 
   def rotated_files
-    ext = File.extname(@path)
-    stem = File.basename(@path, ext)
-    Dir.glob(File.join(File.dirname(@path), "#{stem}-*#{ext}"))
+    ext = File.extname(@base_path)
+    stem = File.basename(@base_path, ext)
+    Dir.glob(File.join(File.dirname(@base_path), "#{stem}-*#{ext}")) - [@path]
   end
 
   def flush_loop

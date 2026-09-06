@@ -104,18 +104,20 @@ either on a client or on the game server host (server mode, with RCON).
 - **Server mode** (default when run on the server host): analyzes only
   incoming C→S packets (no broadcast duplicates), drops save-download
   TransferBlocks. `--local-ip` forces client mode. Capture is ALWAYS on for live
-  capture (pcap-read `-r` doesn't re-capture): auto-named to `captures/`
-  with a stable base (`server-<port>.pcap` / `client-<ip>.pcap`), so
-  rotation hangs exactly ONE timestamp off it (`server-<port>-<ts>.pcap`)
-  and `--keep HOURS` / `--max-size MB` prune across ALL runs of that
-  identity; restarts preserve the previous run. Captured
+  capture (pcap-read `-r` doesn't re-capture): auto-named timestamped files
+  (`server-<port>-<ts>.pcap` / `client-<ip>-<ts>.pcap`) — the latest file
+  IS the live one, no renames —
+  and retention prunes across ALL runs of that identity (defaults: rotate
+  hourly / at 256 MB, keep 72h / 256 MB total — `--keep HOURS` /
+  `--max-size MB` override); restarts just open a new file (previous runs
+  are already timestamped; empty files deleted on close). Captured
   pcaps are filtered by default: TransferBlocks (msg 13),
   keepalive-only heartbeats, and (server mode) outgoing S→C broadcasts are
   excluded — a 5h server capture went from ~460MB to ~20MB. `--full-capture`
   records everything; `--save-transfer-blocks` keeps just the TransferBlocks
   (needed for `tools/extract_save_from_pcap.rb`). A `.gz` path compresses
-  the pcap stream (~3-4x); `--keep HOURS` rolls hourly and prunes files
-  older than HOURS. See `docs/server-mode.md`.
+  the pcap stream (~3-4x); retention defaults to 72h / 256 MB (flags
+  override). See `docs/server-mode.md`.
 - **Hot reload**: Ctrl-C once reloads the lib code IN PLACE — no rebuild,
   no state snapshot, no capture reopen (zero packet loss; the memoized
   `@capturer` handle stays open). Ctrl-C again within QUIT_WINDOW quits.
@@ -181,7 +183,7 @@ sudo ruby factorio-sniffer.rb
 # With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
 # agent auto-enables in server mode (no flag, no extra args):
 HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
-# (Capture is always on; --keep HOURS bounds disk. No key = no AI.
+# (Capture is always on; retention defaults bound disk. No key = no AI.
 # Provider is fixed (:openai); model/endpoint overridable via
 # HIVE_MODEL / HIVE_API_BASE.)
 

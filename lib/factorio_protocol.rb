@@ -538,12 +538,15 @@ ACTIONS = {
   # Decode a write_to_console message payload into a plain string.
   # Returns nil when the data is empty or not decodable.
   #
-  # Observed payload formats (first byte is a message-type marker):
+  # Wire shapes (byte 0 is the sender's player SLOT, not a message type —
+  # earlier code enumerated observed slots 0x05/0x0b/0x24/… here and every
+  # new player broke decoding, so structure wins over slot values now):
   #   [0x04][text...]                    non-segment message, text to end
-  #   [0x05][meta(1)][text...]           segment message; meta = TOTAL message
-  #                                      length across segments; text to end
-  #   [0x0b][meta(1)][text...]           same layout as 0x05 (observed live)
-  #   [0x00|0x3d|0x01][meta(1)][text...] server echoes, text to end
+  #   [slot][wc-total_len][text...]      first/only segment; total_len is the
+  #                                      FULL message length (Factorio uint32v:
+  #                                      1 byte, or [0xff][u32 LE] past 0xfe)
+  #   continuation segments              raw text, no header (the sniffer
+  #                                      merges them before decoding)
   #   localized string                   protobuf-like [key][mode][params...]
   #   [uint32v len][text]                main-action-list form
   #   raw text                           no prefix at all
@@ -556,59 +559,13 @@ ACTIONS = {
       return d[1..-1].force_encoding('UTF-8').scrub('?')
     end
 
-    # [0x05|0x0b|0x24|0x29][meta(1)][text...] — meta byte is the TOTAL
-    # message length (may span multiple segments). Text runs to end of payload,
-    # NOT meta bytes — truncating to meta truncates long messages split across
-    # segments (partials are returned for in-flight splits; the sniffer
-    # reassembles them, see FactorioSniffer#chat_action_data).
-    if [0x05, 0x0b, 0x24, 0x29].include?(d.getbyte(0)) && d.bytesize >= 2
-      text = d[2..-1]
-      return nil if text.empty?   # [type][meta] with no text = empty message
-      return text.force_encoding('UTF-8').scrub('?')
-    end
-
-    # Live-observed chat tones [0x15|0x1f|0x2d|0x30][len][text] — same
-    # layout. Stripped only when byte1 is a plausible length for the
-    # remaining payload: 0x2d is '-' and 0x30 is '0', common first
-    # characters of RAW text, so a length check avoids mangling those.
-    # (Complete messages have len == bytesize - 2.)
-    if [0x15, 0x1f, 0x2d, 0x30].include?(d.getbyte(0)) && d.bytesize >= 2
-      len = d.getbyte(1)
-      return nil if len == 0 && d.bytesize == 2   # empty message
-      return d[2..-1].force_encoding('UTF-8').scrub('?') if len > 0 && len <= d.bytesize - 2
-    end
-
-    # Server echo formats: [0x00|0x3d|0x01][meta(1)][text...]
-    if d.getbyte(0) == 0x00 && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8').scrub('?')
-    end
-    if d.getbyte(0) == 0x3d && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8').scrub('?')
-    end
-    if d.getbyte(0) == 0x01 && d.bytesize > 2
-      return d[2..-1].force_encoding('UTF-8').scrub('?')
-    end
-
-    # General C→S format: [player_index(1)][total_msg_len(1)][text...].
-    # The FIRST byte is the sender's player index (0x00=player 0, 0x40=player
-    # 64, 0x42=player 66, …) — the 'prefixes' above (0x05/0x0b/0x24/0x29,
-    # 0x15/0x1f/0x2d/0x30, 0x00/0x3d/0x01) are all just player slots the code
-    # happened to observe. The SECOND byte is the TOTAL message length across
-    # all input-action segments. Text runs from byte 2 to the end of the
-    # payload (the sniffer merges split segments before decoding, so byte 1
-    # equals bytesize-2 for every complete message). This generic branch
-    # catches any unlisted player slot (e.g. 0x40/0x42/0x36/0x2f) and stops
-    # them falling through to the uint32v-length branch, which read the
-    # player byte as a length and TRUNCATED long messages (e.g. "...feelings
-    # toward" instead of the full "...toward the player morganc, the kind
-    # you would never tell..."). Strictly length-gated so raw text /
-    # localized strings whose 2nd byte merely looks like a length are safe.
-    #
-    # The total length is a Factorio uint32v: a single byte for lengths
-    # < 0xff, or [0xff][uint32 LE] for longer messages (>= 0xff, e.g. a
-    # 298-byte message encodes as ff 2a 01 00 00).
+    # [slot][wc-total_len][text...] — complete message, ANY slot. Strict:
+    # total must equal the remaining bytes, so a slot byte is never misread
+    # as a length (that truncated long messages mid-word: "...feelings
+    # toward" instead of the full text). Covers the 0xff long form too.
+    first = d.getbyte(0)
     len_off, total_len, len_bytes = decode_wc_length(d, 1)
-    if len_off && total_len && total_len > 0 && total_len == d.bytesize - 1 - len_bytes
+    if total_len && total_len > 0 && total_len == d.bytesize - 1 - len_bytes
       return d[1 + len_bytes..-1].force_encoding('UTF-8').scrub('?')
     end
 
@@ -617,10 +574,33 @@ ACTIONS = {
     msg = decode_localized_string(d)
     return msg if msg
 
-    # Main action list format: [uint32v len][text]
+    # Main action list format: [uint32v len][text] — exact fit only. A
+    # prefix-fit here reintroduces the truncation bug above (slot byte read
+    # as a length, returning a chopped prefix of the real message).
     off, slen = decode_uint32v(d, 0)
-    if slen && slen > 0 && off + slen <= d.bytesize
+    if slen && slen > 0 && off + slen == d.bytesize
       return d[off, slen].force_encoding('UTF-8').scrub('?')
+    end
+
+    # Anything still carrying a [slot][wc-len] header is a lone first
+    # segment (split message decoded standalone — production reassembles via
+    # chat_action_data first) or an empty [slot][0x00]: strip the header so it
+    # yields text (or nil) instead of uint32v garbage. Control slots (< 0x20 —
+    # never raw text) plus the observed printable slots; new player slots need
+    # NOT be added — their complete messages decode via the strict branch.
+    if len_off
+      rest = d[1 + len_bytes..-1]
+      if first < 0x20 || first == 0x24 || first == 0x29
+        return nil if rest.nil? || rest.empty?
+        return rest.force_encoding('UTF-8').scrub('?')
+      end
+      # 0x2d ('-') / 0x30 ('0') collide with raw-text initials: strip only on
+      # a plausible length, and an empty header with trailing text stays raw
+      # ("0\x00raw" is raw; "0\x00" alone is nil).
+      if first == 0x2d || first == 0x30
+        return nil if total_len == 0 && d.bytesize == 1 + len_bytes
+        return rest.force_encoding('UTF-8').scrub('?') if total_len > 0 && total_len <= rest.bytesize
+      end
     end
 
     # Raw text (no prefix)

@@ -675,57 +675,6 @@ class FactorioSniffer
 
   DIR_NAMES = %w[north northnortheast northeast eastnortheast east eastsoutheast southeast southsoutheast south southsouthwest southwest westsouthwest west westnorthwest northwest northnorthwest].freeze
 
-  # Named constants for commonly-referenced action types
-  module ActionType
-    NOTHING = 0
-    STOP_WALKING = 1
-    BEGIN_MINING = 2
-    STOP_MINING = 3
-    CONNECT_ROLLING_STOCK = 7
-    DISCONNECT_ROLLING_STOCK = 8
-    TOGGLE_DRIVING = 4
-    OPEN_GUI = 5
-    SETUP_ASSEMBLING_MACHINE = 88
-    START_WALKING = 69
-    BEGIN_MINING_TERRAIN = 70
-    CHANGE_RIDING_STATE = 71
-    OPEN_ITEM = 73
-    REMOTE_VIEW_SURFACE = 260
-    QUICK_BAR_SET = 245
-    QUICK_BAR_PICK = 246
-    PIPETTE = 90
-    CURSOR_TRANSFER = 78
-    STACK_TRANSFER = 80
-    INVENTORY_TRANSFER = 83
-    CRAFT = 85
-    WIRE_DRAGGING = 86
-    CHANGE_SHOOTING_STATE = 87
-    DROP_ITEM = 67
-    BUILD = 68
-    USE_ITEM = 124
-    START_REPAIR = 130
-    DECONSTRUCT = 131
-    COPY = 133
-    CHEAT = 58
-    STOP_DRAG_BUILD = 48
-    ROTATE_ENTITY = 280
-    FLIP_ENTITY = 281
-    FAST_ENTITY_SPLIT = 282
-    WRITE_TO_CONSOLE = 106
-    FAST_ENTITY_TRANSFER = 279
-    CHANGE_PICKING_STATE = 265
-    SELECTED_ENTITY_CHANGED_VERY_CLOSE = 266
-    SELECTED_ENTITY_CHANGED_VERY_CLOSE_PRECISE = 267
-    SELECTED_ENTITY_CHANGED_RELATIVE = 268
-    SELECTED_ENTITY_CLEARED = 9
-    ZOOM_AROUND_POINT = 128
-    MOVE_ON_PAN = 129
-    RENDER_MODE_CHANGED = 310
-    OPEN_TRAIN_GUI = 290
-    SET_ENTITY_COLOR = 292
-    SET_TRAINS_LIMIT = 314
-  end
-
   def format_action_data(act)
     return '' unless act[:data] && act[:data].bytesize > 0
     d = act[:data]

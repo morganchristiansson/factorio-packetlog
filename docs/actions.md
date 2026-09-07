@@ -8,234 +8,232 @@ The table below is the 2.1 mapping; the 2.0 mapping lives in
 `tools/validate_actions.rb` re-validates IDs against `/toggle-action-logging`
 output. See [protocol-notes.md](protocol-notes.md).
 
-| ID | Name | Doc |
-|----|------|-----|
-| 9 | selected_entity_cleared | *(internal, see below)* |
-| 60 | close_gui | [actions/60-unknown_60.md](actions/60-unknown_60.md) |
-| 84 | server_tick_info | [actions/84-unknown_84.md](actions/84-unknown_84.md) |
-| 100 | set_cheat_mode_quality | [actions/100-set_cheat_mode_quality.md](actions/100-set_cheat_mode_quality.md) |
-| 101 | set_logistic_filter_item | [actions/101-set_logistic_filter_item.md](actions/101-set_logistic_filter_item.md) |
-| 102 | swap_logistic_filter_items | [actions/102-swap_logistic_filter_items.md](actions/102-swap_logistic_filter_items.md) |
-| 103 | set_circuit_mode_of_operation | [actions/103-set_circuit_mode_of_operation.md](actions/103-set_circuit_mode_of_operation.md) |
-| 104 | gui_click | [actions/104-gui_click.md](actions/104-gui_click.md) |
-| 105 | gui_confirmed | [actions/105-gui_confirmed.md](actions/105-gui_confirmed.md) |
-| 106 | write_to_console | [actions/106-write_to_console.md](actions/106-write_to_console.md) |
-| 107 | market_offer | [actions/107-market_offer.md](actions/107-market_offer.md) |
-| 108 | change_train_stop_station | [actions/108-change_train_stop_station.md](actions/108-change_train_stop_station.md) |
-| 109 | change_active_item_group_for_crafting | [actions/109-change_active_item_group_for_crafting.md](actions/109-change_active_item_group_for_crafting.md) |
-| 110 | change_active_item_group_for_filters | [actions/110-change_active_item_group_for_filters.md](actions/110-change_active_item_group_for_filters.md) |
-| 111 | change_active_character_tab | [actions/111-change_active_character_tab.md](actions/111-change_active_character_tab.md) |
-| 112 | gui_text_changed | [actions/112-gui_text_changed.md](actions/112-gui_text_changed.md) |
-| 113 | gui_checked_state_changed | [actions/113-gui_checked_state_changed.md](actions/113-gui_checked_state_changed.md) |
-| 114 | gui_selection_state_changed | [actions/114-gui_selection_state_changed.md](actions/114-gui_selection_state_changed.md) |
-| 115 | gui_selected_tab_changed | [actions/115-gui_selected_tab_changed.md](actions/115-gui_selected_tab_changed.md) |
-| 116 | gui_value_changed | [actions/116-gui_value_changed.md](actions/116-gui_value_changed.md) |
-| 117 | gui_switch_state_changed | [actions/117-gui_switch_state_changed.md](actions/117-gui_switch_state_changed.md) |
-| 118 | gui_location_changed | [actions/118-gui_location_changed.md](actions/118-gui_location_changed.md) |
-| 119 | gui_inventory_bar_changed | [actions/119-gui_inventory_bar_changed.md](actions/119-gui_inventory_bar_changed.md) |
-| 120 | gui_inventory_filter_changed | [actions/120-gui_inventory_filter_changed.md](actions/120-gui_inventory_filter_changed.md) |
-| 121 | gui_inventory_action | [actions/121-gui_inventory_action.md](actions/121-gui_inventory_action.md) |
-| 122 | place_equipment | [actions/122-place_equipment.md](actions/122-place_equipment.md) |
-| 123 | take_equipment | [actions/123-take_equipment.md](actions/123-take_equipment.md) |
-| 124 | use_item | [actions/124-use_item.md](actions/124-use_item.md) |
-| 125 | send_spidertron | [actions/125-send_spidertron.md](actions/125-send_spidertron.md) |
-| 126 | set_inventory_bar | [actions/126-set_inventory_bar.md](actions/126-set_inventory_bar.md) |
-| 128 | zoom_around_point | *(internal, see below)* |
-| 129 | move_on_pan | *(internal, see below)* |
-| 130 | start_repair | [actions/130-start_repair.md](actions/130-start_repair.md) |
-| 131 | deconstruct | [actions/131-deconstruct.md](actions/131-deconstruct.md) |
-| 132 | upgrade | [actions/132-upgrade.md](actions/132-upgrade.md) |
-| 133 | copy | [actions/133-copy.md](actions/133-copy.md) |
-| 134 | alternative_copy | [actions/134-alternative_copy.md](actions/134-alternative_copy.md) |
-| 135 | select_blueprint_entities | [actions/135-select_blueprint_entities.md](actions/135-select_blueprint_entities.md) |
-| 136 | alt_select_blueprint_entities | [actions/136-alt_select_blueprint_entities.md](actions/136-alt_select_blueprint_entities.md) |
-| 137 | setup_blueprint | [actions/137-setup_blueprint.md](actions/137-setup_blueprint.md) |
-| 138 | setup_single_blueprint_record | [actions/138-setup_single_blueprint_record.md](actions/138-setup_single_blueprint_record.md) |
-| 139 | copy_opened_blueprint | [actions/139-copy_opened_blueprint.md](actions/139-copy_opened_blueprint.md) |
-| 140 | copy_large_opened_blueprint | [actions/140-copy_large_opened_blueprint.md](actions/140-copy_large_opened_blueprint.md) |
-| 141 | reassign_blueprint | [actions/141-reassign_blueprint.md](actions/141-reassign_blueprint.md) |
-| 142 | open_blueprint_record | [actions/142-open_blueprint_record.md](actions/142-open_blueprint_record.md) |
-| 143 | grab_blueprint_record | [actions/143-grab_blueprint_record.md](actions/143-grab_blueprint_record.md) |
-| 144 | drop_blueprint_record | [actions/144-drop_blueprint_record.md](actions/144-drop_blueprint_record.md) |
-| 145 | delete_blueprint_record | [actions/145-delete_blueprint_record.md](actions/145-delete_blueprint_record.md) |
-| 146 | upgrade_opened_blueprint_by_record | [actions/146-upgrade_opened_blueprint_by_record.md](actions/146-upgrade_opened_blueprint_by_record.md) |
-| 147 | upgrade_opened_blueprint_by_item | [actions/147-upgrade_opened_blueprint_by_item.md](actions/147-upgrade_opened_blueprint_by_item.md) |
-| 148 | spawn_item | [actions/148-spawn_item.md](actions/148-spawn_item.md) |
-| 149 | set_ghost_cursor | [actions/149-set_ghost_cursor.md](actions/149-set_ghost_cursor.md) |
-| 153 | edit_blueprint_tool_preview | [actions/153-edit_blueprint_tool_preview.md](actions/153-edit_blueprint_tool_preview.md) |
-| 154 | remove_cables | [actions/154-remove_cables.md](actions/154-remove_cables.md) |
-| 155 | export_blueprint | [actions/155-export_blueprint.md](actions/155-export_blueprint.md) |
-| 156 | import_blueprint | [actions/156-import_blueprint.md](actions/156-import_blueprint.md) |
-| 157 | import_blueprints_filtered | [actions/157-import_blueprints_filtered.md](actions/157-import_blueprints_filtered.md) |
-| 160 | cancel_deconstruct | [actions/160-cancel_deconstruct.md](actions/160-cancel_deconstruct.md) |
-| 161 | cancel_upgrade | [actions/161-cancel_upgrade.md](actions/161-cancel_upgrade.md) |
-| 162 | change_arithmetic_combinator_parameters | [actions/162-change_arithmetic_combinator_parameters.md](actions/162-change_arithmetic_combinator_parameters.md) |
-| 163 | drag_decider_combinator_condition | [actions/163-drag_decider_combinator_condition.md](actions/163-drag_decider_combinator_condition.md) |
-| 164 | add_decider_combinator_condition | [actions/164-add_decider_combinator_condition.md](actions/164-add_decider_combinator_condition.md) |
-| 165 | modify_decider_combinator_condition | [actions/165-modify_decider_combinator_condition.md](actions/165-modify_decider_combinator_condition.md) |
-| 166 | remove_decider_combinator_condition | [actions/166-remove_decider_combinator_condition.md](actions/166-remove_decider_combinator_condition.md) |
-| 167 | drag_decider_combinator_output | [actions/167-drag_decider_combinator_output.md](actions/167-drag_decider_combinator_output.md) |
-| 168 | add_decider_combinator_output | [actions/168-add_decider_combinator_output.md](actions/168-add_decider_combinator_output.md) |
-| 169 | modify_decider_combinator_output | [actions/169-modify_decider_combinator_output.md](actions/169-modify_decider_combinator_output.md) |
-| 170 | remove_decider_combinator_output | [actions/170-remove_decider_combinator_output.md](actions/170-remove_decider_combinator_output.md) |
-| 171 | drag_decider_combinator_else_output | [actions/171-drag_decider_combinator_else_output.md](actions/171-drag_decider_combinator_else_output.md) |
-| 172 | add_decider_combinator_else_output | [actions/172-add_decider_combinator_else_output.md](actions/172-add_decider_combinator_else_output.md) |
-| 173 | modify_decider_combinator_else_output | [actions/173-modify_decider_combinator_else_output.md](actions/173-modify_decider_combinator_else_output.md) |
-| 174 | remove_decider_combinator_else_output | [actions/174-remove_decider_combinator_else_output.md](actions/174-remove_decider_combinator_else_output.md) |
-| 175 | change_selector_combinator_parameters | [actions/175-change_selector_combinator_parameters.md](actions/175-change_selector_combinator_parameters.md) |
-| 176 | change_programmable_speaker_parameters | [actions/176-change_programmable_speaker_parameters.md](actions/176-change_programmable_speaker_parameters.md) |
-| 177 | change_programmable_speaker_alert_parameters | [actions/177-change_programmable_speaker_alert_parameters.md](actions/177-change_programmable_speaker_alert_parameters.md) |
-| 178 | change_programmable_speaker_circuit_parameters | [actions/178-change_programmable_speaker_circuit_parameters.md](actions/178-change_programmable_speaker_circuit_parameters.md) |
-| 179 | set_vehicle_automatic_targeting_parameters | [actions/179-set_vehicle_automatic_targeting_parameters.md](actions/179-set_vehicle_automatic_targeting_parameters.md) |
-| 180 | build_terrain | [actions/180-build_terrain.md](actions/180-build_terrain.md) |
-| 181 | change_research_condition | [actions/181-change_research_condition.md](actions/181-change_research_condition.md) |
-| 182 | drag_research_condition | [actions/182-drag_research_condition.md](actions/182-drag_research_condition.md) |
-| 183 | change_train_wait_condition | [actions/183-change_train_wait_condition.md](actions/183-change_train_wait_condition.md) |
-| 184 | change_train_wait_condition_data | [actions/184-change_train_wait_condition_data.md](actions/184-change_train_wait_condition_data.md) |
-| 185 | remove_train_station | [actions/185-remove_train_station.md](actions/185-remove_train_station.md) |
-| 186 | remove_train_interrupt | [actions/186-remove_train_interrupt.md](actions/186-remove_train_interrupt.md) |
-| 187 | add_train_station | [actions/187-add_train_station.md](actions/187-add_train_station.md) |
-| 188 | change_train_station | [actions/188-change_train_station.md](actions/188-change_train_station.md) |
-| 189 | add_train_interrupt | [actions/189-add_train_interrupt.md](actions/189-add_train_interrupt.md) |
-| 190 | activate_interrupt | [actions/190-activate_interrupt.md](actions/190-activate_interrupt.md) |
-| 191 | edit_interrupt | [actions/191-edit_interrupt.md](actions/191-edit_interrupt.md) |
-| 192 | rename_interrupt | [actions/192-rename_interrupt.md](actions/192-rename_interrupt.md) |
-| 193 | go_to_train_station | [actions/193-go_to_train_station.md](actions/193-go_to_train_station.md) |
-| 194 | set_train_stopped | [actions/194-set_train_stopped.md](actions/194-set_train_stopped.md) |
-| 195 | set_schedule_record_allow_unloading | [actions/195-set_schedule_record_allow_unloading.md](actions/195-set_schedule_record_allow_unloading.md) |
-| 196 | custom_input | [actions/196-custom_input.md](actions/196-custom_input.md) |
-| 197 | change_item_label | [actions/197-change_item_label.md](actions/197-change_item_label.md) |
-| 198 | change_entity_label | [actions/198-change_entity_label.md](actions/198-change_entity_label.md) |
-| 199 | change_train_name | [actions/199-change_train_name.md](actions/199-change_train_name.md) |
-| 200 | change_logistic_point_group | [actions/200-change_logistic_point_group.md](actions/200-change_logistic_point_group.md) |
-| 201 | launch_rocket | [actions/201-launch_rocket.md](actions/201-launch_rocket.md) |
-| 202 | delete_logistic_group | [actions/202-delete_logistic_group.md](actions/202-delete_logistic_group.md) |
-| 203 | set_logistic_network_name | [actions/203-set_logistic_network_name.md](actions/203-set_logistic_network_name.md) |
-| 204 | build_rail | [actions/204-build_rail.md](actions/204-build_rail.md) |
-| 205 | cancel_research | [actions/205-cancel_research.md](actions/205-cancel_research.md) |
-| 206 | move_research | [actions/206-move_research.md](actions/206-move_research.md) |
-| 207 | select_area | [actions/207-select_area.md](actions/207-select_area.md) |
-| 208 | alt_select_area | [actions/208-alt_select_area.md](actions/208-alt_select_area.md) |
-| 209 | super_forced_select_area | [actions/209-reverse_select_area.md](actions/209-reverse_select_area.md) |
-| 210 | reverse_select_area | [actions/210-alt_reverse_select_area.md](actions/210-alt_reverse_select_area.md) |
-| 212 | set_infinity_container_filter_item | [actions/212-set_infinity_container_filter_item.md](actions/212-set_infinity_container_filter_item.md) |
-| 213 | set_infinity_container_filter_item | [actions/213-set_infinity_container_logistic_mode.md](actions/213-set_infinity_container_logistic_mode.md) |
-| 214 | set_infinity_container_logistic_mode | [actions/214-swap_infinity_container_filter_items.md](actions/214-swap_infinity_container_filter_items.md) |
-| 215 | swap_infinity_container_filter_items | [actions/215-set_infinity_pipe_filter.md](actions/215-set_infinity_pipe_filter.md) |
-| 216 | set_infinity_pipe_filter | [actions/216-mod_settings_changed.md](actions/216-mod_settings_changed.md) |
-| 217 | mod_settings_changed | [actions/217-set_entity_energy_property.md](actions/217-set_entity_energy_property.md) |
-| 218 | set_entity_energy_property | [actions/218-set_equipment_energy_property.md](actions/218-set_equipment_energy_property.md) |
-| 219 | set_equipment_energy_property | [actions/219-edit_custom_tag.md](actions/219-edit_custom_tag.md) |
-| 220 | edit_custom_tag | [actions/220-edit_permission_group.md](actions/220-edit_permission_group.md) |
-| 221 | edit_permission_group | [actions/221-import_blueprint_string.md](actions/221-import_blueprint_string.md) |
-| 222 | import_blueprint_string | [actions/222-import_permissions_string.md](actions/222-import_permissions_string.md) |
-| 225 | gui_elem_changed | [actions/225-gui_elem_changed.md](actions/225-gui_elem_changed.md) |
-| 227 | drag_train_schedule | [actions/227-drag_train_schedule.md](actions/227-drag_train_schedule.md) |
-| 228 | drag_train_schedule | [actions/228-drag_train_schedule_interrupt.md](actions/228-drag_train_schedule_interrupt.md) |
-| 229 | drag_train_schedule_interrupt | [actions/229-drag_train_wait_condition.md](actions/229-drag_train_wait_condition.md) |
-| 230 | drag_train_wait_condition | [actions/230-select_item_filter.md](actions/230-select_item_filter.md) |
-| 231 | select_item_filter | [actions/231-swap_item_filters.md](actions/231-swap_item_filters.md) |
-| 232 | swap_item_filters | [actions/232-select_entity_slot.md](actions/232-select_entity_slot.md) |
-| 233 | select_entity_slot | [actions/233-swap_entity_slots.md](actions/233-swap_entity_slots.md) |
-| 234 | swap_entity_slots | [actions/234-select_entity_filter_slot.md](actions/234-select_entity_filter_slot.md) |
-| 235 | select_entity_filter_slot | [actions/235-swap_entity_filter_slots.md](actions/235-swap_entity_filter_slots.md) |
-| 236 | swap_entity_filter_slots | [actions/236-select_asteroid_chunk_slot.md](actions/236-select_asteroid_chunk_slot.md) |
-| 237 | select_asteroid_chunk_slot | [actions/237-swap_asteroid_chunk_slots.md](actions/237-swap_asteroid_chunk_slots.md) |
-| 238 | swap_asteroid_chunk_slots | [actions/238-select_tile_slot.md](actions/238-select_tile_slot.md) |
-| 239 | select_tile_slot | [actions/239-swap_tile_slots.md](actions/239-swap_tile_slots.md) |
-| 240 | swap_tile_slots
- | [actions/240-select_mapper_slot_from.md](actions/240-select_mapper_slot_from.md) |
-| 241 | select_mapper_slot_from | [actions/241-select_mapper_slot_to.md](actions/241-select_mapper_slot_to.md) |
-| 242 | select_mapper_slot_to | [actions/242-swap_mappers.md](actions/242-swap_mappers.md) |
-| 244 | quick_bar_set_slot | [actions/244-quick_bar_set_slot.md](actions/244-quick_bar_set_slot.md) |
-| 245 | quick_bar_set_slot | [actions/245-quick_bar_pick_slot.md](actions/245-quick_bar_pick_slot.md) |
-| 246 | quick_bar_pick_slot | [actions/246-quick_bar_set_selected_page.md](actions/246-quick_bar_set_selected_page.md) |
-| 248 | map_editor_action | [actions/248-map_editor_action.md](actions/248-map_editor_action.md) |
-| 251 | change_multiplayer_config | [actions/251-change_multiplayer_config.md](actions/251-change_multiplayer_config.md) |
-| 252 | change_multiplayer_config | [actions/252-admin_action.md](actions/252-admin_action.md) |
-| 253 | admin_action | [actions/253-lua_shortcut.md](actions/253-lua_shortcut.md) |
-| 255 | create_space_platform | [actions/255-create_space_platform.md](actions/255-create_space_platform.md) |
-| 256 | create_space_platform | [actions/256-delete_space_platform.md](actions/256-delete_space_platform.md) |
-| 257 | delete_space_platform | [actions/257-cancel_delete_space_platform.md](actions/257-cancel_delete_space_platform.md) |
-| 258 | cancel_delete_space_platform | [actions/258-rename_space_platform.md](actions/258-rename_space_platform.md) |
-| 259 | rename_space_platform | [actions/259-remote_view_surface.md](actions/259-remote_view_surface.md) |
-| 260 | remote_view_surface | [actions/260-remote_view_entity.md](actions/260-remote_view_entity.md) |
-| 262 | close_remote_view | [actions/262-instantly_create_space_platform.md](actions/262-instantly_create_space_platform.md) |
-| 263 | instantly_create_space_platform | [actions/263-flush_opened_entity_specific_fluid.md](actions/263-flush_opened_entity_specific_fluid.md) |
-| 264 | flush_opened_entity_specific_fluid | [actions/264-change_picking_state.md](actions/264-change_picking_state.md) |
-| 265 | change_picking_state | [actions/265-selected_entity_changed_very_close.md](actions/265-selected_entity_changed_very_close.md) |
-| 266 | selected_entity_changed_very_close | [actions/266-unknown_266.md](actions/266-unknown_266.md) |
-| 267 | selected_entity_changed_very_close_precise | [actions/267-unknown_267.md](actions/267-unknown_267.md) |
-| 268 | selected_entity_changed_relative | [actions/268-unknown_268.md](actions/268-unknown_268.md) |
-| 269 | set_combinator_description | [actions/269-set_combinator_description.md](actions/269-set_combinator_description.md) |
-| 270 | set_combinator_description | [actions/270-switch_constant_combinator_state.md](actions/270-switch_constant_combinator_state.md) |
-| 271 | switch_constant_combinator_state | [actions/271-switch_power_switch_state.md](actions/271-switch_power_switch_state.md) |
-| 272 | switch_power_switch_state | [actions/272-switch_inserter_filter_mode_state.md](actions/272-switch_inserter_filter_mode_state.md) |
-| 273 | switch_inserter_filter_mode_state | [actions/273-set_use_inserter_filters.md](actions/273-set_use_inserter_filters.md) |
-| 274 | set_use_inserter_filters | [actions/274-switch_loader_filter_mode.md](actions/274-switch_loader_filter_mode.md) |
-| 275 | switch_loader_filter_mode | [actions/275-switch_mining_drill_filter_mode_state.md](actions/275-switch_mining_drill_filter_mode_state.md) |
-| 276 | switch_mining_drill_filter_mode_state | [actions/276-switch_connect_to_logistic_network.md](actions/276-switch_connect_to_logistic_network.md) |
-| 277 | switch_connect_to_logistic_network | [actions/277-set_behavior_mode.md](actions/277-set_behavior_mode.md) |
-| 278 | set_behavior_mode | [actions/278-fast_entity_transfer.md](actions/278-fast_entity_transfer.md) |
-| 279 | fast_entity_transfer | [actions/279-rotate_entity.md](actions/279-rotate_entity.md) |
-| 280 | rotate_entity | [actions/280-flip_entity.md](actions/280-flip_entity.md) |
-| 281 | flip_entity | [actions/281-fast_entity_split.md](actions/281-fast_entity_split.md) |
-| 282 | fast_entity_split | [actions/282-request_missing_construction_materials.md](actions/282-request_missing_construction_materials.md) |
-| 283 | request_missing_construction_materials | [actions/283-providing_to_other_platforms.md](actions/283-providing_to_other_platforms.md) |
-| 284 | providing_to_other_platforms | [actions/284-trash_not_requested_items.md](actions/284-trash_not_requested_items.md) |
-| 286 | set_research_finished_stops_game | [actions/286-set_research_finished_stops_game.md](actions/286-set_research_finished_stops_game.md) |
-| 287 | set_research_finished_stops_game | [actions/287-set_inserter_max_stack_size.md](actions/287-set_inserter_max_stack_size.md) |
-| 288 | set_inserter_max_stack_size | [actions/288-set_loader_belt_stack_size_override.md](actions/288-set_loader_belt_stack_size_override.md) |
-| 289 | set_loader_belt_stack_size_override | [actions/289-open_train_gui.md](actions/289-open_train_gui.md) |
-| 290 | open_train_gui | [actions/290-open_trains_gui.md](actions/290-open_trains_gui.md) |
-| 291 | open_trains_gui | [actions/291-set_entity_color.md](actions/291-set_entity_color.md) |
-| 292 | set_entity_color | [actions/292-set_copy_color_from_train_stop.md](actions/292-set_copy_color_from_train_stop.md) |
-| 293 | set_copy_color_from_train_stop | [actions/293-set_deconstruction_item_trees_and_rocks_only.md](actions/293-set_deconstruction_item_trees_and_rocks_only.md) |
-| 294 | set_deconstruction_item_trees_and_rocks_only | [actions/294-set_deconstruction_item_tile_selection_mode.md](actions/294-set_deconstruction_item_tile_selection_mode.md) |
-| 295 | set_deconstruction_item_tile_selection_mode | [actions/295-delete_custom_tag.md](actions/295-delete_custom_tag.md) |
-| 296 | delete_custom_tag | [actions/296-delete_permission_group.md](actions/296-delete_permission_group.md) |
-| 297 | delete_permission_group | [actions/297-add_permission_group.md](actions/297-add_permission_group.md) |
-| 298 | add_permission_group | [actions/298-set_infinity_container_remove_unfiltered_items.md](actions/298-set_infinity_container_remove_unfiltered_items.md) |
-| 299 | set_infinity_container_remove_unfiltered_items | [actions/299-set_car_weapons_control.md](actions/299-set_car_weapons_control.md) |
-| 300 | set_car_weapons_control | [actions/300-set_request_from_buffers.md](actions/300-set_request_from_buffers.md) |
-| 301 | set_request_from_buffers | [actions/301-change_active_quick_bar.md](actions/301-change_active_quick_bar.md) |
-| 304 | set_splitter_priority | [actions/304-set_splitter_priority.md](actions/304-set_splitter_priority.md) |
-| 306 | set_heat_interface_temperature | [actions/306-set_heat_interface_temperature.md](actions/306-set_heat_interface_temperature.md) |
-| 307 | set_heat_interface_temperature | [actions/307-set_heat_interface_mode.md](actions/307-set_heat_interface_mode.md) |
-| 308 | set_heat_interface_mode | [actions/308-open_train_station_gui.md](actions/308-open_train_station_gui.md) |
-| 310 | render_mode_changed | *(internal, see below)* |
-| 311 | set_player_color | [actions/311-set_player_color.md](actions/311-set_player_color.md) |
-| 313 | set_trains_limit | [actions/313-set_trains_limit.md](actions/313-set_trains_limit.md) |
-| 315 | set_linked_container_link_i_d | [actions/315-set_linked_container_link_i_d.md](actions/315-set_linked_container_link_i_d.md) |
-| 316 | set_linked_container_link_i_d | [actions/316-set_turret_ignore_unlisted.md](actions/316-set_turret_ignore_unlisted.md) |
-| 317 | set_turret_ignore_unlisted | [actions/317-set_lamp_always_on.md](actions/317-set_lamp_always_on.md) |
-| 318 | set_lamp_always_on | [actions/318-open_global_electric_network_gui.md](actions/318-open_global_electric_network_gui.md) |
-| 319 | open_global_electric_network_gui | [actions/319-set_pump_fluid_filter.md](actions/319-set_pump_fluid_filter.md) |
-| 321 | remove_logistic_section | [actions/321-remove_logistic_section.md](actions/321-remove_logistic_section.md) |
-| 322 | remove_logistic_section | [actions/322-edit_display_panel.md](actions/322-edit_display_panel.md) |
-| 323 | edit_display_panel | [actions/323-edit_display_panel_always_show.md](actions/323-edit_display_panel_always_show.md) |
-| 324 | edit_display_panel_always_show | [actions/324-edit_display_panel_show_in_chart.md](actions/324-edit_display_panel_show_in_chart.md) |
-| 325 | edit_display_panel_show_in_chart | [actions/325-edit_display_panel_icon.md](actions/325-edit_display_panel_icon.md) |
-| 326 | edit_display_panel_icon | [actions/326-edit_display_panel_parameters.md](actions/326-edit_display_panel_parameters.md) |
-| 327 | edit_display_panel_parameters | [actions/327-edit_display_panel_single_entry.md](actions/327-edit_display_panel_single_entry.md) |
-| 328 | edit_display_panel_single_entry | [actions/328-reorder_logistic_section.md](actions/328-reorder_logistic_section.md) |
-| 329 | reorder_logistic_section | [actions/329-set_logistic_section_active.md](actions/329-set_logistic_section_active.md) |
-| 330 | set_logistic_section_active | [actions/330-add_pin.md](actions/330-add_pin.md) |
-| 331 | add_pin | [actions/331-pin_search_result.md](actions/331-pin_search_result.md) |
-| 332 | pin_search_result | [actions/332-pin_alert_group.md](actions/332-pin_alert_group.md) |
-| 333 | pin_alert_group | [actions/333-pin_custom_alert.md](actions/333-pin_custom_alert.md) |
-| 334 | pin_custom_alert | [actions/334-edit_pin.md](actions/334-edit_pin.md) |
-| 335 | edit_pin | [actions/335-remove_pin.md](actions/335-remove_pin.md) |
-| 336 | remove_pin | [actions/336-move_pin.md](actions/336-move_pin.md) |
-| 337 | move_pin | [actions/337-send_train_to_pin_target.md](actions/337-send_train_to_pin_target.md) |
-| 338 | send_train_to_pin_target | [actions/338-gui_hover.md](actions/338-gui_hover.md) |
-| 339 | gui_hover | [actions/339-gui_leave.md](actions/339-gui_leave.md) |
-| 341 | spectator_change_surface | [actions/341-spectator_change_surface.md](actions/341-spectator_change_surface.md) |
-| 342 | spectator_change_surface
- | [actions/342-adjust_blueprint_snapping.md](actions/342-adjust_blueprint_snapping.md) |
-| 343 | adjust_blueprint_snapping | [actions/343-set_train_stop_priority.md](actions/343-set_train_stop_priority.md) |
-| 345 | land_at_planet | [actions/345-land_at_planet.md](actions/345-land_at_planet.md) |
-| 348 | parametrise_blueprint | [actions/348-parametrise_blueprint.md](actions/348-parametrise_blueprint.md) |
-| 350 | set_rocket_silo_send_to_orbit_automated_mode | [actions/350-set_rocket_silo_send_to_orbit_automated_mode.md](actions/350-set_rocket_silo_send_to_orbit_automated_mode.md) |
-| 354 | set_control_behavior_input_networks | [actions/354-set_control_behavior_input_networks.md](actions/354-set_control_behavior_input_networks.md) |
-| 355 | set_control_behavior_input_networks | [actions/355-set_control_behavior_output_networks.md](actions/355-set_control_behavior_output_networks.md) |
+| ID | Name |
+|----|------|
+| 9 | selected_entity_cleared |
+| 60 | close_gui |
+| 84 | server_tick_info |
+| 100 | set_cheat_mode_quality |
+| 101 | set_logistic_filter_item |
+| 102 | swap_logistic_filter_items |
+| 103 | set_circuit_mode_of_operation |
+| 104 | gui_click |
+| 105 | gui_confirmed |
+| 106 | write_to_console |
+| 107 | market_offer |
+| 108 | change_train_stop_station |
+| 109 | change_active_item_group_for_crafting |
+| 110 | change_active_item_group_for_filters |
+| 111 | change_active_character_tab |
+| 112 | gui_text_changed |
+| 113 | gui_checked_state_changed |
+| 114 | gui_selection_state_changed |
+| 115 | gui_selected_tab_changed |
+| 116 | gui_value_changed |
+| 117 | gui_switch_state_changed |
+| 118 | gui_location_changed |
+| 119 | gui_inventory_bar_changed |
+| 120 | gui_inventory_filter_changed |
+| 121 | gui_inventory_action |
+| 122 | place_equipment |
+| 123 | take_equipment |
+| 124 | use_item |
+| 125 | send_spidertron |
+| 126 | set_inventory_bar |
+| 128 | zoom_around_point |
+| 129 | move_on_pan |
+| 130 | start_repair |
+| 131 | deconstruct |
+| 132 | upgrade |
+| 133 | copy |
+| 134 | alternative_copy |
+| 135 | select_blueprint_entities |
+| 136 | alt_select_blueprint_entities |
+| 137 | setup_blueprint |
+| 138 | setup_single_blueprint_record |
+| 139 | copy_opened_blueprint |
+| 140 | copy_large_opened_blueprint |
+| 141 | reassign_blueprint |
+| 142 | open_blueprint_record |
+| 143 | grab_blueprint_record |
+| 144 | drop_blueprint_record |
+| 145 | delete_blueprint_record |
+| 146 | upgrade_opened_blueprint_by_record |
+| 147 | upgrade_opened_blueprint_by_item |
+| 148 | spawn_item |
+| 149 | set_ghost_cursor |
+| 153 | edit_blueprint_tool_preview |
+| 154 | remove_cables |
+| 155 | export_blueprint |
+| 156 | import_blueprint |
+| 157 | import_blueprints_filtered |
+| 160 | cancel_deconstruct |
+| 161 | cancel_upgrade |
+| 162 | change_arithmetic_combinator_parameters |
+| 163 | drag_decider_combinator_condition |
+| 164 | add_decider_combinator_condition |
+| 165 | modify_decider_combinator_condition |
+| 166 | remove_decider_combinator_condition |
+| 167 | drag_decider_combinator_output |
+| 168 | add_decider_combinator_output |
+| 169 | modify_decider_combinator_output |
+| 170 | remove_decider_combinator_output |
+| 171 | drag_decider_combinator_else_output |
+| 172 | add_decider_combinator_else_output |
+| 173 | modify_decider_combinator_else_output |
+| 174 | remove_decider_combinator_else_output |
+| 175 | change_selector_combinator_parameters |
+| 176 | change_programmable_speaker_parameters |
+| 177 | change_programmable_speaker_alert_parameters |
+| 178 | change_programmable_speaker_circuit_parameters |
+| 179 | set_vehicle_automatic_targeting_parameters |
+| 180 | build_terrain |
+| 181 | change_research_condition |
+| 182 | drag_research_condition |
+| 183 | change_train_wait_condition |
+| 184 | change_train_wait_condition_data |
+| 185 | remove_train_station |
+| 186 | remove_train_interrupt |
+| 187 | add_train_station |
+| 188 | change_train_station |
+| 189 | add_train_interrupt |
+| 190 | activate_interrupt |
+| 191 | edit_interrupt |
+| 192 | rename_interrupt |
+| 193 | go_to_train_station |
+| 194 | set_train_stopped |
+| 195 | set_schedule_record_allow_unloading |
+| 196 | custom_input |
+| 197 | change_item_label |
+| 198 | change_entity_label |
+| 199 | change_train_name |
+| 200 | change_logistic_point_group |
+| 201 | launch_rocket |
+| 202 | delete_logistic_group |
+| 203 | set_logistic_network_name |
+| 204 | build_rail |
+| 205 | cancel_research |
+| 206 | move_research |
+| 207 | select_area |
+| 208 | alt_select_area |
+| 209 | super_forced_select_area |
+| 210 | reverse_select_area |
+| 212 | set_infinity_container_filter_item |
+| 213 | set_infinity_container_filter_item |
+| 214 | set_infinity_container_logistic_mode |
+| 215 | swap_infinity_container_filter_items |
+| 216 | set_infinity_pipe_filter |
+| 217 | mod_settings_changed |
+| 218 | set_entity_energy_property |
+| 219 | set_equipment_energy_property |
+| 220 | edit_custom_tag |
+| 221 | edit_permission_group |
+| 222 | import_blueprint_string |
+| 225 | gui_elem_changed |
+| 227 | drag_train_schedule |
+| 228 | drag_train_schedule |
+| 229 | drag_train_schedule_interrupt |
+| 230 | drag_train_wait_condition |
+| 231 | select_item_filter |
+| 232 | swap_item_filters |
+| 233 | select_entity_slot |
+| 234 | swap_entity_slots |
+| 235 | select_entity_filter_slot |
+| 236 | swap_entity_filter_slots |
+| 237 | select_asteroid_chunk_slot |
+| 238 | swap_asteroid_chunk_slots |
+| 239 | select_tile_slot |
+| 240 | swap_tile_slots |
+| 241 | select_mapper_slot_from |
+| 242 | select_mapper_slot_to |
+| 244 | quick_bar_set_slot |
+| 245 | quick_bar_set_slot |
+| 246 | quick_bar_pick_slot |
+| 248 | map_editor_action |
+| 251 | change_multiplayer_config |
+| 252 | change_multiplayer_config |
+| 253 | admin_action |
+| 255 | create_space_platform |
+| 256 | create_space_platform |
+| 257 | delete_space_platform |
+| 258 | cancel_delete_space_platform |
+| 259 | rename_space_platform |
+| 260 | remote_view_surface |
+| 262 | close_remote_view |
+| 263 | instantly_create_space_platform |
+| 264 | flush_opened_entity_specific_fluid |
+| 265 | change_picking_state |
+| 266 | selected_entity_changed_very_close |
+| 267 | selected_entity_changed_very_close_precise |
+| 268 | selected_entity_changed_relative |
+| 269 | set_combinator_description |
+| 270 | set_combinator_description |
+| 271 | switch_constant_combinator_state |
+| 272 | switch_power_switch_state |
+| 273 | switch_inserter_filter_mode_state |
+| 274 | set_use_inserter_filters |
+| 275 | switch_loader_filter_mode |
+| 276 | switch_mining_drill_filter_mode_state |
+| 277 | switch_connect_to_logistic_network |
+| 278 | set_behavior_mode |
+| 279 | fast_entity_transfer |
+| 280 | rotate_entity |
+| 281 | flip_entity |
+| 282 | fast_entity_split |
+| 283 | request_missing_construction_materials |
+| 284 | providing_to_other_platforms |
+| 286 | set_research_finished_stops_game |
+| 287 | set_research_finished_stops_game |
+| 288 | set_inserter_max_stack_size |
+| 289 | set_loader_belt_stack_size_override |
+| 290 | open_train_gui |
+| 291 | open_trains_gui |
+| 292 | set_entity_color |
+| 293 | set_copy_color_from_train_stop |
+| 294 | set_deconstruction_item_trees_and_rocks_only |
+| 295 | set_deconstruction_item_tile_selection_mode |
+| 296 | delete_custom_tag |
+| 297 | delete_permission_group |
+| 298 | add_permission_group |
+| 299 | set_infinity_container_remove_unfiltered_items |
+| 300 | set_car_weapons_control |
+| 301 | set_request_from_buffers |
+| 304 | set_splitter_priority |
+| 306 | set_heat_interface_temperature |
+| 307 | set_heat_interface_temperature |
+| 308 | set_heat_interface_mode |
+| 310 | render_mode_changed |
+| 311 | set_player_color |
+| 313 | set_trains_limit |
+| 315 | set_linked_container_link_i_d |
+| 316 | set_linked_container_link_i_d |
+| 317 | set_turret_ignore_unlisted |
+| 318 | set_lamp_always_on |
+| 319 | open_global_electric_network_gui |
+| 321 | remove_logistic_section |
+| 322 | remove_logistic_section |
+| 323 | edit_display_panel |
+| 324 | edit_display_panel_always_show |
+| 325 | edit_display_panel_show_in_chart |
+| 326 | edit_display_panel_icon |
+| 327 | edit_display_panel_parameters |
+| 328 | edit_display_panel_single_entry |
+| 329 | reorder_logistic_section |
+| 330 | set_logistic_section_active |
+| 331 | add_pin |
+| 332 | pin_search_result |
+| 333 | pin_alert_group |
+| 334 | pin_custom_alert |
+| 335 | edit_pin |
+| 336 | remove_pin |
+| 337 | move_pin |
+| 338 | send_train_to_pin_target |
+| 339 | gui_hover |
+| 341 | spectator_change_surface |
+| 342 | spectator_change_surface |
+| 343 | adjust_blueprint_snapping |
+| 345 | land_at_planet |
+| 348 | parametrise_blueprint |
+| 350 | set_rocket_silo_send_to_orbit_automated_mode |
+| 354 | set_control_behavior_input_networks |
+| 355 | set_control_behavior_input_networks |

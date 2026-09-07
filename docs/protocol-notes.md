@@ -2,7 +2,7 @@
 
 Session-verified findings about the Factorio multiplayer protocol. The
 authoritative reference docs are `docs/README.md` (network layer),
-`docs/packets/` (per-message), `docs/actions/` (input actions). This file
+`docs/packets/` (per-message), `docs/actions.md` (input actions). This file
 holds the *verified-by-capture* notes, fixes, and open questions.
 
 ## ACTIONS Table (`lib/factorio_protocol.rb`)
@@ -257,7 +257,7 @@ Client (C→S) format — 8 bytes:
   misparsed as phantom actions with bogus player deltas (single-player game
   logged `add_decider_combinator_condition` Player_36 and
   `select_next_valid_gun` Player_59). Locked in by fixtures
-  `client_open_gui_8b{,_2,_3}`. See `docs/actions/005-open_gui.md`.
+  `client_open_gui_8b{,_2,_3}`. See `docs/actions.md`.
 
 ## selected_entity_changed family (types 266-268) + selected_entity_cleared (9)
 
@@ -291,7 +291,7 @@ The log tick equals the packet hb tick, and the data tick field = hb tick - 3.
 `selected_entity_changed_based_on_unit_number` does not exist in 2.1.14
 (removed); type 265 is `change_picking_state` (live defines).
 `close_remote_view` (262) and `close_gui` (60) use the same wire shape.
-See `docs/actions/266-selected_entity_changed_very_close.md`.
+See `docs/actions.md`.
 
 ## zoom_around_point (128), move_on_pan (129), render_mode_changed (310)
 

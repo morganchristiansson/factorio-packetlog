@@ -304,7 +304,15 @@ class HiveMindAgent
       # Normal chat replies respond in seconds, so 300 only moves the
       # ceiling, not the latency.
       config.request_timeout = 300
-      config.max_retries = 1
+      # Transient failures (5xx, 429, overload, timeouts, dropped
+      # connections) retry inside faraday-retry: RubyLLM registers retry
+      # OUTSIDE its error middleware, so raised RubyLLM errors bubble
+      # through it — plus Timeout::Error/ETIMEDOUT/RetriableResponse,
+      # which the old hand-rolled loop never covered. 4 retries, 5s x2
+      # backoff ~= 5/10/20/40s delays.
+      config.max_retries = 4
+      config.retry_interval = 5
+      config.retry_backoff_factor = 2
       # RubyLLM defaults to sending the system prompt as role `developer`
       # (OpenAI's newer convention) on OpenAI-compatible endpoints; some
       # endpoints (e.g. Console Go models) only accept `system` and reject
@@ -662,29 +670,14 @@ class HiveMindAgent
     persist! if @session_path  # conversation changed — save for restart
   end
 
-  # Provider failures worth an application-level retry. NOTE: RubyLLM's
-  # built-in faraday-retry does NOT cover these: it only sees exceptions
-  # raised inside its own middleware (network errors), while HTTP-status
-  # failures are converted to RubyLLM errors by ErrorMiddleware, which
-  # sits OUTSIDE the retry middleware in the stack — so they propagate
-  # unretried (a single 503 kills the call even with max_retries set).
-  RETRYABLE_LLM_ERRORS = [
-    RubyLLM::ServiceUnavailableError,
-    RubyLLM::ServerError,
-    RubyLLM::OverloadedError,
-    RubyLLM::RateLimitError,
-    Faraday::TimeoutError,
-    Faraday::ConnectionFailed
-  ].freeze
-  ASK_ATTEMPTS = 5
-  ASK_RETRY_DELAYS = [5, 15, 30, 60].freeze # seconds before retries 1-4
-
-  # Run one chat.ask with retries on transient provider failures. On a
-  # failure the half-appended turn is sliced off first — chat.ask adds
-  # the user message to the thread BEFORE the request goes out, so a raw
-  # retry would duplicate the prompt and a final failure would persist
-  # the orphan into the session file. Used by BOTH live asks (complete)
-  # and memory compaction (whose ensure then strips nothing extra).
+  # One chat.ask — retries happen INSIDE faraday-retry (see configure),
+  # so no sleep loop here. On FINAL failure the half-appended user turn is
+  # sliced off: chat.ask adds it BEFORE the request goes out, so without
+  # this a failed prompt duplicates on the next ask and persists as an
+  # orphan in the session file. Slices on ANY error (a 400 leaves the same
+  # orphan the old retryable-only rescue kept). Used by live asks
+  # (complete), dry runs (try_model!), and compaction (whose material
+  # message stays — only the turn is stripped).
   def ask_with_retry(chat, prompt)
     # Every request carries the OpenCode identity headers (re-applied here
     # so hot-reloaded chats and throwaway forks can't miss them).
@@ -695,19 +688,11 @@ class HiveMindAgent
     # ask with "referenced response not found or expired", poisoning every
     # later turn the same way. Drop them so each request stands alone.
     chat.messages.each { |m| m.response_id = nil if m.respond_to?(:response_id=) }
-    attempt = 0
-    begin
-      start = chat.messages.size
-      chat.ask(prompt)
-    rescue *RETRYABLE_LLM_ERRORS => e
-      attempt += 1
-      chat.messages.slice!(start..)
-      raise if attempt >= ASK_ATTEMPTS
-      delay = ASK_RETRY_DELAYS[attempt - 1]
-      log "LLM call failed (#{e.class.name.split('::').last}) — retrying #{attempt}/#{ASK_ATTEMPTS - 1} in #{delay}s"
-      sleep delay
-      retry
-    end
+    start = chat.messages.size
+    chat.ask(prompt)
+  rescue StandardError
+    chat.messages.slice!(start..)
+    raise
   end
 
   # Build the per-turn USER prompt: fresh context snapshot (online

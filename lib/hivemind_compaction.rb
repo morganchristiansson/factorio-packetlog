@@ -229,6 +229,7 @@ module HiveMindCompaction
     # but responses rejects. Sanitize in place and keep the current @model/
     # @provider (no fallback, no new env var).
     pass = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
+    apply_request_headers(pass)
     sanitized = []
     pending = Set.new
     @chat.messages.each do |m|

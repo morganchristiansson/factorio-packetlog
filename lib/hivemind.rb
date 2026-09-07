@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'securerandom'
 require 'set'
 require 'time'
 require 'ruby_llm'
@@ -45,6 +46,11 @@ class HiveMindAgent
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
   DEFAULT_MODEL    = 'deepseek-v4-flash'
   DEFAULT_PROVIDER = :openai
+  # Identity headers for the OpenCode Go gateway (required, not optional):
+  # a custom User-Agent (never a generic SDK/HTTP-library name) plus a
+  # stable per-conversation session id (x-opencode-session) for routing
+  # and prompt caching. Both are hardcoded/deterministic — no knobs.
+  USER_AGENT = 'factorio-hivemind/1.0'
 
   # Models that are only available via the Responses API (Zen: /v1/responses).
   # Auto-selects :openai_responses when HIVE_PROVIDER is not set.
@@ -127,6 +133,10 @@ class HiveMindAgent
       # Pending follow-ups belong to the session being wiped — drop them so
       # a stale timer can't inject a turn into the fresh session later.
       @followup_mutex.synchronize { @followups.clear }
+      # A wiped session is a NEW conversation — rotate the OpenCode session
+      # id so routing/caching follows the fresh thread, not the old one.
+      @opencode_session_id = SecureRandom.uuid
+      apply_request_headers(@chat)
       @chat&.with_instructions(system_prompt_with_memories)
     end
     persist! if @session_path
@@ -191,6 +201,11 @@ class HiveMindAgent
   # calls briefly hold different Mutex instances).
   def rate_mutex = (@rate_mutex ||= Mutex.new)
   def persist_mutex = (@persist_mutex ||= Mutex.new)
+  # Stable OpenCode session id (x-opencode-session), one per conversation.
+  # Reload-safe like the mutexes above: a hot-reloaded agent keeps its
+  # boot-time ivars, so an object built before this field existed mints
+  # its id lazily on first use instead of sending a blank header.
+  def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
   def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil)
     @rcon = rcon
@@ -300,6 +315,7 @@ class HiveMindAgent
       assume_model_exists: true
     )
     @chat.with_instructions(system_prompt_with_memories)
+    apply_request_headers(@chat)
     register_tools
 
     hook_chat_observers if @chat
@@ -575,6 +591,16 @@ class HiveMindAgent
 
   # ── LLM plumbing ──────────────────────────────────────────────────
 
+  # Stamp the OpenCode-required request headers onto a chat: the custom
+  # User-Agent plus the stable per-conversation session id. with_headers
+  # REPLACES, so both ride in one call. Applied at creation AND
+  # defensively in ask_with_retry (every ask funnels through it), so even
+  # a hot-reloaded chat that predates this code sends headers.
+  def apply_request_headers(chat)
+    return unless chat
+    chat.with_headers(**{ 'User-Agent': USER_AGENT, 'x-opencode-session': opencode_session_id })
+  end
+
   # Re-register the tool set with FRESH instances before every ask. Tools
   # are registered once at creation otherwise; hot reloads (Ctrl-C `load`)
   # rebind the tool CLASSES, so stale instances would keep running old
@@ -652,6 +678,9 @@ class HiveMindAgent
   # the orphan into the session file. Used by BOTH live asks (complete)
   # and memory compaction (whose ensure then strips nothing extra).
   def ask_with_retry(chat, prompt)
+    # Every request carries the OpenCode identity headers (re-applied here
+    # so hot-reloaded chats and throwaway forks can't miss them).
+    apply_request_headers(chat)
     # Stateless Responses requests: the gem chains each call onto the last
     # reply via previous_response_id, but we resend the full history every
     # time — and a stale id (idle expiry, gateway restart) fails the whole
@@ -975,9 +1004,11 @@ class HiveMindAgent
       @mutex.synchronize do
         if @chat
           @chat.with_model(@model, provider: @provider, assume_exists: true)
+          apply_request_headers(@chat)
         else
           @chat = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
           @chat.with_instructions(system_prompt_with_memories)
+          apply_request_headers(@chat)
           register_tools
           @observers_hooked = false
           hook_chat_observers
@@ -1031,6 +1062,7 @@ class HiveMindAgent
       begin
         tmp_provider = self.class.provider_for(m)
         tmp = RubyLLM.chat(model: m, provider: tmp_provider, assume_model_exists: true)
+        apply_request_headers(tmp)
         tmp.messages.replace(snapshot.dup)
         register_tools(tmp)
         observe_chat(tmp)

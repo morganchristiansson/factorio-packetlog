@@ -601,4 +601,40 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal ' (100 in, 20 out)', @agent.send(:usage_line, msg)
     assert_equal '', @agent.send(:usage_line, RubyLLM::Message.new(role: :assistant, content: 'no tokens'))
   end
+
+
+  # ── OpenCode request identity (User-Agent + session id) ──────
+
+  # The gateway requires a custom User-Agent (not a generic SDK/HTTP
+  # name) plus a stable x-opencode-session per conversation.
+  def test_chat_carries_opencode_identity_headers
+    chat = @agent.instance_variable_get(:@chat)
+    ua = (chat.headers[:'User-Agent'] || chat.headers['User-Agent']).to_s
+    assert_equal HiveMindAgent::USER_AGENT, ua
+    refute_match(/ruby_llm|faraday/i, ua)
+    sid = (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
+    refute_empty sid
+    assert_equal @agent.opencode_session_id, sid
+  end
+
+  # Re-applying headers around an ask must NOT rotate the id — the whole
+  # conversation shares one stable value for routing/prompt caching.
+  def test_opencode_session_id_stable_across_asks
+    chat = @agent.instance_variable_get(:@chat)
+    before = @agent.opencode_session_id
+    chat.define_singleton_method(:ask) { |_prompt| RubyLLM::Message.new(role: :assistant, content: 'ok') }
+    @agent.send(:ask_with_retry, chat, 'hello')
+    assert_equal before, @agent.opencode_session_id
+    assert_equal before, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
+  end
+
+  # A wiped session is a new conversation — the id rotates with it.
+  def test_clear_session_rotates_opencode_session_id
+    before = @agent.opencode_session_id
+    @agent.clear_session!
+    after = @agent.opencode_session_id
+    refute_equal before, after
+    chat = @agent.instance_variable_get(:@chat)
+    assert_equal after, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
+  end
 end

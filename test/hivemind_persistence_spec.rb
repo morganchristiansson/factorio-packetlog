@@ -173,4 +173,20 @@ class TestHivemindPersistence < Minitest::Test
     end
   end
 
+  # The resumed conversation keeps its routing/caching identity: the
+  # OpenCode session id persists in the file and lands on the new chat.
+  def test_opencode_session_id_survives_restart
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1.send(:persist!)
+      id1 = a1.opencode_session_id
+
+      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      assert_equal id1, a2.opencode_session_id
+      chat = a2.instance_variable_get(:@chat)
+      assert_equal id1, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
+    end
+  end
+
 end

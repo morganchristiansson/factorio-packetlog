@@ -26,6 +26,11 @@ module HiveMindPersistence
     if data['console_queue'].is_a?(Array)
       @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] }
     end
+    # Resume the OpenCode session id so the restored conversation keeps
+    # its routing/caching identity; a missing key (older file) mints fresh.
+    id = data['opencode_session']
+    @opencode_session_id = id if id.is_a?(String) && !id.empty?
+    apply_request_headers(@chat)
     # Players encountered this LLM session — drives compaction targets;
     # must survive restarts or targets drift from the conversation.
     @session_players = Set.new
@@ -141,6 +146,10 @@ module HiveMindPersistence
   def session_data
     {
       'version' => 1,
+      # Stable OpenCode session id — restored on restart so the resumed
+      # conversation keeps its routing/caching identity (rotated only by
+      # clear_session!, which starts a genuinely new conversation).
+      'opencode_session' => opencode_session_id,
       'console_queue' => @console_queue,
       'session_players' => @session_players.to_a,
       # JSON object keyed by timer name — entries are name-keyed in memory.

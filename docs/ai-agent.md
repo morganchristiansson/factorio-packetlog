@@ -248,6 +248,14 @@ which every endpoint accepts. This is applied at startup only — a model
 switch needs a full sniffer restart (Ctrl-C reload keeps the old
 RubyLLM config since the agent object persists).
 
+Request identity: every LLM request carries a custom `User-Agent`
+(`factorio-hivemind/1.0`, never a generic SDK/HTTP-library name) plus a
+stable per-conversation `x-opencode-session` id (OpenCode Go requires
+both — without them the gateway rejects requests). The id is minted at
+startup, persisted in `hivemind-session.json` so restarts resume the same
+conversation identity, and rotated only by a full session wipe
+(`clear_session!` — a genuinely new conversation).
+
 Example:
 
 ```bash

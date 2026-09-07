@@ -63,7 +63,6 @@ class FactorioSniffer
   def initialize(options, pcap_writer: nil)
     @options = options
     @player_db = PlayerDatabase.new(options[:player_db])
-    @grief = nil
     @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
     # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
     # analysis (-r) doesn't re-capture. Auto-naming writes timestamped files

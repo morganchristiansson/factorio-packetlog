@@ -386,13 +386,6 @@ ACTIONS = {
   355=>["set_control_behavior_input_networks",0],
 }.freeze
 
-  GRIEF_ACTIONS = %w[
-    Cheat SetAllowCommands DestroyItem PlayerAdminChange
-    ServerCommand MapEditorAction PutSpecialItemInMap
-    ChangeMultiplayerConfig DeleteCustomTag EditPermissionGroup
-    DeletePermissionGroup AddPermissionGroup
-  ].freeze
-
   # ── Variable-Length Integer Decoding ───────────────────────────────
   # Shared primitives live in WireDecode (mixed into packet classes too);
   # the module extends it so `FactorioProtocol.decode_uint16v` etc. still

@@ -6,7 +6,7 @@ end
 # factorio-sniffer — live/offline Factorio player action logger
 #
 # Captures UDP traffic on the Factorio port, decodes the binary protocol,
-# extracts player actions, and logs them with optional grief detection.
+# extracts player actions, and logs them.
 #
 # Thin entry point: parses args, builds the sniffer once, and runs it.
 # Ctrl-C/SIGHUP hot-reloads the lib code IN PLACE (the sniffer keeps its
@@ -17,7 +17,6 @@ end
 #   Live capture: sudo ruby factorio-sniffer.rb -i eth0 -p 34197
 #   Server mode:  sudo ruby factorio-sniffer.rb          (auto-detects IP/port/interface from the running factorio process)
 #   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
-#   With grief detection: ... --detect-grief
 #   Save player db: ... --player-db players.json
 #   Capture: always on for live capture — auto-named captures/server-<port>-<ts>.pcap
 #     (server), latest file is the live one, rotation + retention always on

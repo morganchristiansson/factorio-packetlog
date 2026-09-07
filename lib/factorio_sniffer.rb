@@ -673,8 +673,6 @@ class FactorioSniffer
     pkt
   end
 
-  DIR_NAMES = %w[north northnortheast northeast eastnortheast east eastsoutheast southeast southsoutheast south southsouthwest southwest westsouthwest west westnorthwest northwest northnorthwest].freeze
-
   def format_action_data(act)
     return '' unless act[:data] && act[:data].bytesize > 0
     d = act[:data]
@@ -726,7 +724,7 @@ class FactorioSniffer
       pos = FactorioProtocol::Position.decode(act)
       if pos && d.bytesize >= 9
         dir = d.getbyte(8)
-        dname = DIR_NAMES[dir] || dir
+        dname = FactorioTypes::DIR_NAMES[dir] || dir
         return " pos=(#{'%.3f' % pos[0]}, #{'%.3f' % pos[1]}) dir=#{dname}"
       end
     when "move_on_pan"

@@ -28,7 +28,6 @@ class PcapWriter
     @start_time = Time.now
     @file_start = Time.now
     if timestamped
-      archive_legacy_stable_file  # one-time upgrade from the stable-path layout
       @path = unique_timestamped_path(Time.now)
     else
       @path = path
@@ -163,19 +162,6 @@ class PcapWriter
     end
   end
 
-  # One-time upgrade from the stable-path layout: a capture left AT the
-  # base path by the old version is archived with its mtime (or dropped
-  # when header-only) so it joins the normal retention set.
-  def archive_legacy_stable_file
-    return unless File.exist?(@base_path)
-    if File.size(@base_path) <= 24
-      File.delete(@base_path)
-      return
-    end
-    File.rename(@base_path, unique_timestamped_path(File.mtime(@base_path)))
-    prune_rotated
-  end
-
   # Delete rotated files beyond the retention bounds: older than `keep`
   # hours, and — when max_size is set — the OLDEST files until total
   # rotated size is ≤ max_size.
@@ -183,7 +169,12 @@ class PcapWriter
     rotated = rotated_files
     if @keep_hours
       cutoff = Time.now - (@keep_hours * 3600)
-      rotated.each { |f| File.delete(f) if File.mtime(f) < cutoff }
+      rotated.each do |f|
+        if File.mtime(f) < cutoff
+          puts "retention: deleted #{f} (older than #{@keep_hours}h)"
+          File.delete(f)
+        end
+      end
       rotated = rotated_files
     end
     if @max_size_bytes
@@ -191,6 +182,7 @@ class PcapWriter
       rotated.sort_by { |f| File.mtime(f) }.each do |f|
         break if total <= @max_size_bytes
         total -= File.size(f)
+        puts "retention: deleted #{f} (over #{@max_size_bytes / 1024 / 1024}MB total)"
         File.delete(f)
       end
     end

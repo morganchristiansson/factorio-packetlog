@@ -166,8 +166,26 @@ class RconClient
   # HiveMind agent to reply to in-game chat.
   def say(text)
     return if text.nil? || text.empty?
-    escaped = text.gsub('\\', '\\\\').gsub('"', '\\"').gsub(/[\r\n]+/, ' ')
-    execute("game.print(\"#{escaped}\")")
+    execute("game.print(\"#{lua_quote(text)}\")")
+  end
+
+  # Set a player's overhead/chat tag (game.players[name].tag) — the ONLY
+  # world-mutating RCON write the Hivemind agent may perform (dedicated
+  # tool; everything else is read-only rcon_query). Name and tag are
+  # Lua-string-quoted like #say so neither can inject Lua. Tags only
+  # describe (shown next to the name in chat/overhead) — they never alter
+  # mechanics. An empty tag clears it. Returns true when the player exists
+  # (online or not — game.players covers everyone who ever joined) and the
+  # tag was set, false when the player is unknown or the write failed.
+  MAX_TAG_LEN = 64
+  def set_player_tag(name, tag)
+    player = name.to_s.strip
+    return false if player.empty?
+    text = tag.to_s.strip[0, MAX_TAG_LEN]
+    body = execute(%(do local p = game.players["#{lua_quote(player)}"] rcon.print(p ~= nil) if p then p.tag = "#{lua_quote(text)}" end end)).to_s.strip
+    body == 'true'
+  rescue StandardError
+    false
   end
 
   # Server version string (e.g. "2.0.77") via the rcon.print data channel
@@ -198,6 +216,21 @@ class RconClient
   end
 
   private
+
+  # Lua double-quoted string escaping shared by #say and #set_player_tag:
+  # every backslash and quote gets a literal backslash prefix so content
+  # can't break out of the string or inject Lua; newlines collapse to
+  # spaces (single-line contexts). Char loop on purpose: gsub with a
+  # STRING replacement interprets backslashes (backreferences), which
+  # silently un-doubles them — the exact hole this closes.
+  def lua_quote(str)
+    out = +''
+    str.to_s.each_char do |ch|
+      out << "\\" if ch == '"' || ch == "\\"
+      out << ((ch == "\n" || ch == "\r") ? ' ' : ch)
+    end
+    out
+  end
 
   def connect
     c = Rcon::Client.new(host: @host, port: @port, password: @password)

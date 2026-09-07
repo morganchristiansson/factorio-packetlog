@@ -80,6 +80,44 @@ class RconQuery < RubyLLM::Tool
   end
 end
 
+# RubyLLM tool: set a Factorio player's overhead/chat tag. The ONLY
+# state-changing tool — everything else (rcon_query) stays read-only.
+# Tags DESCRIBE (shown next to the name in chat/overhead) but never alter
+# mechanics, which is why this narrow write is safe to expose while
+# arbitrary /sc Lua is not: name and tag are Lua-quoted inside RconClient
+# so neither can inject code, and the write targets exactly one field
+# (game.players[name].tag). Empty tag clears it.
+class SetPlayerTag < RubyLLM::Tool
+  def name
+    'set_player_tag'
+  end
+  desc 'Set a Factorio player overhead/chat tag (game.players[name].tag), ' \
+       'shown next to their name in chat and above their character. Tags only ' \
+       'describe — they never change game mechanics. This is the ONLY tool that ' \
+       'may change game state; rcon_query stays read-only. Check the exact ' \
+       'player name with rcon_query (/players) first — unknown names error. ' \
+       'An empty tag clears it.'
+
+  param :player, type: 'string',
+                  desc: 'Exact player name (must have joined the server before).'
+  param :tag, type: 'string',
+               desc: 'Tag text, max 64 chars; empty clears the tag.'
+
+  def initialize(rcon:)
+    @rcon = rcon
+  end
+
+  def execute(player:, tag:)
+    if @rcon.set_player_tag(player, tag)
+      "Tag set for #{player}."
+    else
+      "Error: unknown player '#{player}' (or RCON failed) — verify the name with rcon_query /players."
+    end
+  rescue StandardError => e
+    "RCON error: #{e.class}: #{e.message}"
+  end
+end
+
 # RubyLLM tool: schedule a follow-up turn after a delay (like JavaScript
 # setTimeout). The model uses it when a plan or request needs a later
 # check/reminder — e.g. "rally the players to defend spawn" →

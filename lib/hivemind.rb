@@ -617,6 +617,7 @@ class HiveMindAgent
     return unless chat
     chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
     chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
+    chat.with_tool(SetPlayerTag.new(rcon: @rcon)) if defined?(SetPlayerTag)
     chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp)
     chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp)
   end

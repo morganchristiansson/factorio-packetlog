@@ -11,13 +11,18 @@ require 'minitest/autorun'
 require 'hivemind'
 
 class FakeRcon
-  attr_reader :sent
+  attr_reader :sent, :tag_sets
   # connected: player names (or {name:} hashes) for connected_players;
   # attrs: rows for player_attributes (LuaPlayer attr shape).
   def initialize(connected: [], attrs: [])
     @sent = []
+    @tag_sets = []
     @connected = connected
     @attrs = attrs
+  end
+  def set_player_tag(player, tag)
+    @tag_sets << [player, tag]
+    true
   end
   def say(text)
     @sent << text

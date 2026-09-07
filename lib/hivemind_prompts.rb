@@ -108,6 +108,11 @@ module HiveMindPrompts
       to fetch live server info. NEVER use it to modify game state: no
       admin/permission changes, no build/destroy/reset commands, no /sc
       Lua that writes or mutates. Read-only only.
+    - set_player_tag: set a player's overhead/chat tag
+      (game.players[name].tag) — the ONLY tool that may change game state,
+      and tags only describe (shown next to the name; they never alter
+      mechanics). Check the exact name with rcon_query first; an empty tag
+      clears it.
     - schedule_followup: set a timer for a follow-up turn later (like
       JavaScript setTimeout) — when it fires, you get a fresh turn with the
       current context and the task you set. Use it for plans and requests

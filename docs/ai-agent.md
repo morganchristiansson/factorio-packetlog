@@ -309,6 +309,11 @@ rebind tool classes immediately — no restart needed for tool changes.
   1500 chars). The tool desc and system prompt instruct read-only use: no
   admin/permission changes, no state mutation. A leading `/` is added if
   missing.
+- **`SetPlayerTag`** (`set_player_tag(player:, tag:)`) — the ONLY
+  state-changing tool: sets a player's overhead/chat tag
+  (`game.players[name].tag` via `RconClient#set_player_tag`). Tags only
+  describe (never alter mechanics); name and tag are Lua-quoted so neither
+  can inject code, and unknown names error. Empty tag clears it.
 - **`ScheduleFollowUp`** (`schedule_followup(delay_seconds:, task:, name:)`) — a
   one-shot timer (like JavaScript `setTimeout` with a named handle) for a
   **follow-up turn**. When the delay elapses, the agent runs a fresh LLM turn

@@ -104,10 +104,11 @@ class HiveMindAgent
   LOG_TURN_EVENTS = %w[map-reset].freeze
   LOG_EVENT_INTERVAL = 300.0    # min seconds between log-event turns (5 min)
   # Auto-compaction gate: only distill when the session holds at least
-  # this many characters of conversation — 2x what post-compaction trim
-  # KEEPS (TRIM_TAIL_CHARS). Below that there is little to compact and
-  # the pass would be a wasted LLM call. Manual /compact ignores this.
-  AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 2
+  # this many characters of conversation — 20x what post-compaction trim
+  # KEEPS (TRIM_TAIL_CHARS), ~400k chars ≈ 100k tokens ≈ 10% of a 1M-token
+  # window. Below that there is little to distill and the pass would be a
+  # wasted LLM call. Manual /compact ignores this.
+  AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 20
   # Forget the CURRENT session (live conversation + queued console lines)
   # but KEEP the long-term memories. The next turn re-seeds the system
   # prompt (SOUL/KNOWLEDGE) and re-injects the online players' memories.

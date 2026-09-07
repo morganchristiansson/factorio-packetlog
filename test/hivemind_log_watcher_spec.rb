@@ -70,7 +70,8 @@ class TestHivemindLogWatcher < Minitest::Test
     # Many normal-sized turns totalling the gate (a single huge message
     # would survive the trim's keep-at-least-one rule — real sessions
     # are many messages, and the trim keeps only a ~20k tail of those).
-    40.times { |i| chat.add_message(role: :user, content: "turn #{i} #{'x' * 1000}") }
+    # ~400 x 1k messages to clear the 10x gate (~400k chars).
+    400.times { |i| chat.add_message(role: :user, content: "turn #{i} #{'x' * 1000}") }
     assert @agent.send(:auto_compaction_worthwhile?), 'setup: session above the gate'
     # Real compact_memory! would hit the network — stub a SUCCESSFUL pass
     # but mirror its side effect (recording how much it saw) so the real

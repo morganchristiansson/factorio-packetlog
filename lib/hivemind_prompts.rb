@@ -117,17 +117,17 @@ module HiveMindPrompts
   PROMPT
 
   # Compaction rules opening EACH per-key pass. Compaction is FORKED:
-  # one throwaway chat per key (soul / knowledge / each seen player), all
-  # replaying the same bounded thread under the LIVE system prompt. Keys
-  # are isolated — none builds on another — so forks lose nothing and
-  # contain failures. The per-key turn appends the key name AFTER the
-  # shared material (COMPACTION_TURN), so consecutive forks are
-  # byte-identical up to the final line: the longest possible shared
-  # provider-cache prefix. Plain text is the ONLY channel this gateway
-  # delivers reliably — tool-call arguments are dropped in transport
-  # (write_memories died batched, per-call, strict, and flat), and giant
-  # single-shot replies get killed by the gateway's request window
-  # (HTTP 500 at ~60-90s). Small forks dodge both.
+  # ONE throwaway chat for all keys (soul / knowledge / each seen player),
+  # replaying the bounded thread under the LIVE system prompt, then a single
+  # turn asking for every memory as delimited plain-text sections
+  # (COMPACTION_TURN_ALL). One request instead of one per key. Plain text
+  # is the ONLY channel this gateway delivers reliably — tool-call arguments
+  # are dropped in transport (write_memories died batched, per-call, strict,
+  # and flat) — and the per-section word budgets below keep the single reply
+  # to a few KB, well inside the gateway's request window (giant single-shot
+  # replies get HTTP 500 at ~60-90s). Sections are validated locally; a
+  # malformed reply gets one retry, then the pass fails with the session
+  # kept.
   COMPACTION_PROMPT = <<~PROMPT
     You are "Hivemind", the collective consciousness of this Factorio
     factory. This is a MEMORY COMPACTION pass, not a conversation — no
@@ -167,27 +167,37 @@ module HiveMindPrompts
     - Do NOT record trivia (individual chat lines, greetings, one-off
       questions). Record durable facts, trends, and relationships.
 
-    - The current content of this key is shown in the material above —
+    - The current content of each key is shown in the material above —
       start from it; do not discard knowledge that is still true.
 
-    You will be given ONE key per pass and asked to write that memory.
+    You will be asked to write ALL keys in one reply, as delimited
+    sections (format in the next message).
   PROMPT
 
-  # Appended AFTER the shared material in every per-key fork, so forks
-  # stay byte-identical up to the final line — the longest possible
-  # shared cache prefix across consecutive passes. Formatted with the
-  # key and the key's CURRENT blob (re-sent right next to the question:
-  # the model decides UNCHANGED against it without hunting through the
-  # material).
-  COMPACTION_TURN = <<~PROMPT
-    Now write the memory for key "%s".
-
-    Current content of this key:
+  # The single all-keys turn, appended AFTER the shared material. Formatted
+  # with the target key list (soul, knowledge, then players, comma-separated).
+  # The model gives each key the same independent consideration it would get
+  # alone — a thin session for one key must not starve the others of detail.
+  # Section bodies are validated locally (parse_compaction_sections): a missing
+  # or empty section fails the pass (one retry, then the session is kept).
+  COMPACTION_TURN_ALL = <<~PROMPT
+    Now write the memories for ALL of these keys, in this order:
     %s
 
-    Reply with the COMPLETE new content ONLY — plain text, no quotes, no
-    code fences, no commentary before or after. If (and only if) this key
-    already HAS a current memory and nothing needs updating, reply with
-    exactly: UNCHANGED
+    Reply as plain text with one section per key, using EXACTLY these header
+    lines (key names verbatim, same order):
+
+    === memory: soul ===
+    <complete new content for soul>
+    === memory: knowledge ===
+    <complete new content for knowledge>
+    === memory: <player> ===
+    <complete new content for that player>
+    ... (one such section per listed key)
+
+    Rules per section: the COMPLETE new content (it replaces the whole blob),
+    plain text, no quotes, no code fences, no commentary before, between, or
+    after sections. If (and only if) a key already HAS a current memory and
+    nothing needs updating, that section's body is exactly: UNCHANGED
   PROMPT
 end

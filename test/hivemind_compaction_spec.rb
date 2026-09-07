@@ -132,7 +132,7 @@ class TestHivemindCompaction < Minitest::Test
       # appeared in the LLM session); frank is likewise NOT a target —
       # his blob exists on disk but he was silent this session, so there
       # is no new material to distill (reconsidering him would just answer
-      # UNCHANGED in a wasted fork).
+      # UNCHANGED in a wasted section).
       %w[alice bob carol dave erin].each do |name|
         assert_includes seen, name, "expected #{name} to be seen"
       end
@@ -158,25 +158,37 @@ class TestHivemindCompaction < Minitest::Test
       live.add_message(role: :user, content: 'turn: alice says hi')
       agent.send(:append_history, 'alice', 'hi hivemind')   # marks alice seen
       asked = []
+      forks = []
       agent.define_singleton_method(:build_compaction_chat) do
         fork = super()
+        forks << fork
         fork.define_singleton_method(:ask) do |prompt|
-          asked << prompt[/key "([^"]+)"/, 1]
+          # the all-keys turn lists its targets on one line
+          if (m = prompt.match(/ALL of these keys, in this order:\n(.+?)\n/m))
+            asked.replace(m[1].split(',').map(&:strip))
+          end
           add_message(role: :user, content: prompt)
-          add_message(role: :assistant,
-                      content: prompt.include?('key "soul"') ? 'UNCHANGED' : "memory for #{prompt[/key \"([^\"]+)\"/, 1]}")
+          add_message(role: :assistant, content: <<~REPLY)
+            === memory: soul ===
+            UNCHANGED
+            === memory: knowledge ===
+            memory for knowledge
+            === memory: alice ===
+            memory for alice
+          REPLY
         end
         fork
       end
 
       assert agent.compact_memory!
-      assert_equal %w[alice knowledge soul].sort, asked.sort, 'no hivemind fork'
+      assert_equal 1, forks.size, 'single pass, not one fork per key'
+      assert_equal %w[alice knowledge soul].sort, asked.sort, 'no hivemind section'
       assert_equal 'stray blob from older build', store.player('hivemind'), 'agent blob untouched'
     end
   end
 
 
-  def test_compact_memory_forks_per_key_and_leaves_live_chat_alone
+  def test_compact_memory_single_pass_and_leaves_live_chat_alone
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       live = agent.instance_variable_get(:@chat)
@@ -186,54 +198,51 @@ class TestHivemindCompaction < Minitest::Test
       pre_size = live.messages.size
       forks = []
 
-      # FORKED passes: one throwaway chat per key (soul / knowledge /
-      # alice), each exercising the REAL build_compaction_chat (replay
-      # logic under test); only the network call is stubbed per fork.
-      # soul rewrites, knowledge replies UNCHANGED (blob exists), alice
-      # gets her first memory.
+      # SINGLE pass: one throwaway chat for all keys (soul / knowledge /
+      # alice), exercising the REAL build_compaction_chat (replay logic
+      # under test); only the network call is stubbed. soul rewrites,
+      # knowledge replies UNCHANGED (blob exists), alice gets her first
+      # memory — all as delimited sections of one reply.
       agent.instance_variable_get(:@memory_store).write_knowledge('the mall feeds the factory')
       agent.define_singleton_method(:build_compaction_chat) do
         fork = super()
         forks << fork
         fork.define_singleton_method(:ask) do |prompt|
           add_message(role: :user, content: prompt)
-          reply =
-            if prompt.include?('key "soul"') then 'new soul from fork'
-            elsif prompt.include?('key "knowledge"') then 'UNCHANGED'
-            elsif prompt.include?('key "alice"') then 'alice built the mall'
-            else 'UNCHANGED'
-            end
-          add_message(role: :assistant, content: reply)
+          add_message(role: :assistant, content: <<~REPLY)
+            === memory: soul ===
+            new soul from single pass
+            === memory: knowledge ===
+            UNCHANGED
+            === memory: alice ===
+            alice built the mall
+          REPLY
         end
         fork
       end
 
       assert agent.compact_memory!('quit'), 'compaction runs'
-      assert_equal 3, forks.size, 'one fork per key: soul, knowledge, alice'
+      assert_equal 1, forks.size, 'one pass for all keys: soul, knowledge, alice'
 
-      # every fork: instructions + material + the key turn appended after
+      # the pass: instructions + material + the all-keys turn appended after
       # the REPLAYED live thread (system + live turns), all in ONE user
       # message under the LIVE system prompt (cache-prefix friendly)
-      forks.each do |fork|
-        roles = fork.messages.map(&:role)
-        # system + replayed live thread + material message + per-key turn
-        assert_equal %i[system user assistant user user assistant], roles
-        assert_includes fork.messages.first.content, 'Persistent memories'
-        # session material is its OWN message, byte-identical in every fork
-        assert_includes fork.messages[-3].content, 'MEMORY COMPACTION pass'
-        assert_includes fork.messages[-3].content, 'Current memories:'
-        assert_includes fork.messages[-3].content, 'alice: i will build the mall'
-        assert_includes fork.messages[-3].content, 'Players encountered this session'
-      end
-      # keys are asked in a stable order and named in the small divergent
-      # turn (longest shared cache prefix across consecutive forks)
-      assert_includes forks[0].messages[-2].content, 'key "soul"'
-      assert_includes forks[1].messages[-2].content, 'key "knowledge"'
-      assert_includes forks[2].messages[-2].content, 'key "alice"'
+      fork = forks.first
+      roles = fork.messages.map(&:role)
+      # system + replayed live thread + material message + turn + reply
+      assert_equal %i[system user assistant user user assistant], roles
+      assert_includes fork.messages.first.content, 'Persistent memories'
+      # session material is its OWN message
+      assert_includes fork.messages[-3].content, 'MEMORY COMPACTION pass'
+      assert_includes fork.messages[-3].content, 'Current memories:'
+      assert_includes fork.messages[-3].content, 'alice: i will build the mall'
+      assert_includes fork.messages[-3].content, 'Players encountered this session'
+      # the turn names all keys in a stable order (soul, knowledge, players)
+      assert_includes fork.messages[-2].content, 'soul, knowledge, alice'
 
       # applied to the memory store; UNCHANGED left knowledge alone
       store = agent.instance_variable_get(:@memory_store)
-      assert_equal 'new soul from fork', store.soul
+      assert_equal 'new soul from single pass', store.soul
       assert_equal 'the mall feeds the factory', store.knowledge
       assert_equal 'alice built the mall', store.player('alice')
       # the LIVE conversation was never touched by the passes themselves
@@ -272,14 +281,8 @@ class TestHivemindCompaction < Minitest::Test
         fork = super()
         fork.define_singleton_method(:ask) do |prompt|
           add_message(role: :user, content: prompt)
-          # soul succeeds; the other forks produce NOTHING usable —
-          # empty reply (knowledge has a seeded blob path too, so both
-          # empty and UNCHANGED-without-blob routes get exercised via
-          # alice, who has no blob at all)
-          reply = if prompt.include?('key "soul"') then 'new soul'
-                  else ''
-                  end
-          add_message(role: :assistant, content: reply)
+          # section-less reply both times (retry included) — nothing usable
+          add_message(role: :assistant, content: '')
         end
         fork
       end

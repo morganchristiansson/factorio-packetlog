@@ -628,6 +628,21 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal before, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
   end
 
+  # Post-compaction trim is also a new conversation identity: the rewritten
+  # SOUL/KNOWLEDGE change the system prompt at token 0, invalidating the
+  # whole cached prefix — the kept suffix buys no continuity, so the id
+  # rotates (needs a thread large enough to actually trim).
+  def test_trim_after_compaction_rotates_opencode_session_id
+    chat = @agent.instance_variable_get(:@chat)
+    3.times { chat.add_message(role: :user, content: 'x' * 10_000) }
+    @agent.instance_variable_set(:@compaction_included_count, chat.messages.size)
+    before = @agent.opencode_session_id
+    assert @agent.trim_session_after_compaction!
+    after = @agent.opencode_session_id
+    refute_equal before, after
+    assert_equal after, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
+  end
+
   # A wiped session is a new conversation — the id rotates with it.
   def test_clear_session_rotates_opencode_session_id
     before = @agent.opencode_session_id

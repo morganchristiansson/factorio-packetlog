@@ -175,6 +175,12 @@ class HiveMindAgent
       return true if cut <= floor
       msgs.slice!(floor...cut)
       log "session trimmed after compaction: dropped #{cut - floor} compacted messages, #{msgs.size - floor} kept"
+      # The rewritten SOUL/KNOWLEDGE change the system prompt at token 0,
+      # so the whole cached prefix rebuilds regardless of the kept suffix —
+      # there is no cache continuity to preserve. Rotate the session id
+      # with it: post-compaction is a new conversation identity.
+      @opencode_session_id = SecureRandom.uuid
+      apply_request_headers(@chat)
       @memories_sent.clear
       @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
       @chat.with_instructions(system_prompt_with_memories)

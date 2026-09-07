@@ -132,7 +132,7 @@ class TestHivemindPersistence < Minitest::Test
       sess = File.join(dir, 'session.json')
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
-      store.write_player('alice', 'alice loves belts')
+      store.write_key('alice', 'alice loves belts')
       agent.send(:append_history, 'alice', 'hello hivemind')
       agent.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: one')
 

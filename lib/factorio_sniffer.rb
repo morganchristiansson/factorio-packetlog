@@ -511,7 +511,6 @@ class FactorioSniffer
         # Join = liveness proof (connect stamps hb); index bound once a
         # C→S heartbeat confirms it.
         @attrs.connect(sa[:username], @game_tick)
-        @attrs.connect(sa[:username], @game_tick)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
         unless @self_name == sa[:username]

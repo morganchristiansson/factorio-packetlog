@@ -64,18 +64,6 @@ class MemoryStore
     Dir.children(dir).grep(/\.md\z/).map { |f| f.delete_suffix('.md') }.sort
   end
 
-  def write_soul(content)
-    write_key(SOUL_KEY, content)
-  end
-
-  def write_knowledge(content)
-    write_key(KNOWLEDGE_KEY, content)
-  end
-
-  def write_player(name, content)
-    write_key(name, content)
-  end
-
   # Map a memory key to its file: "soul" → SOUL.md, "knowledge" →
   # KNOWLEDGE.md, anything else → players/<sanitized key>.md.
   def write_key(key, content)

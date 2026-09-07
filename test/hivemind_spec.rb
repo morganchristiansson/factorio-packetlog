@@ -535,7 +535,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_join_greeting_includes_player_memory
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.instance_variable_get(:@memory_store).write_player('alice', 'alice once nuked the bus on purpose')
+      agent.instance_variable_get(:@memory_store).write_key('alice', 'alice once nuked the bus on purpose')
       seen_prompt = nil
       agent.define_singleton_method(:complete) do |prompt|
         seen_prompt = prompt

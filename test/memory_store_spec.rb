@@ -56,7 +56,7 @@ class TestMemoryStore < Minitest::Test
     Dir.mktmpdir(nil, tmp_root) do |dir|
       store = MemoryStore.new(dir)
       %w[../../evil a/b ..__evil line\nbreak sévérin].each do |name|
-        assert store.write_player(name, 'v')
+        assert store.write_key(name, 'v')
         assert_equal 'v', store.player(name), "read-back for #{name.inspect}"
       end
       # no escape hatch anywhere
@@ -77,7 +77,7 @@ class TestMemoryStore < Minitest::Test
       refute store.seed('soul', 'second')   # already exists — never overwritten
       assert_equal 'first', store.soul
       # an edited SOUL survives re-seeding (fresh store over same dir)
-      store.write_soul('hand edited')
+      store.write_key('soul', 'hand edited')
       MemoryStore.new(dir).seed('soul', 'default')
       assert_equal 'hand edited', store.soul
     end
@@ -86,8 +86,8 @@ class TestMemoryStore < Minitest::Test
   def test_writes_are_atomic_leave_no_tmp
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
-      store.write_soul('content')
-      store.write_player('alice', 'content')
+      store.write_key('soul', 'content')
+      store.write_key('alice', 'content')
       files = Dir.glob(File.join(dir, '**', '*.tmp')) + Dir.glob(File.join(dir, '*.tmp'))
       assert_empty files
     end
@@ -96,7 +96,7 @@ class TestMemoryStore < Minitest::Test
   def test_content_capped_at_max_blob
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
-      store.write_soul('x' * (MemoryStore::MAX_BLOB + 100))
+      store.write_key('soul', 'x' * (MemoryStore::MAX_BLOB + 100))
       assert_equal MemoryStore::MAX_BLOB, store.soul.length
     end
   end

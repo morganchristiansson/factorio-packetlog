@@ -22,7 +22,7 @@ class TestHivemindCompaction < Minitest::Test
       store = agent.instance_variable_get(:@memory_store)
       assert_equal HiveMindAgent::DEFAULT_SOUL, store.soul, 'SOUL seeded from the default personality'
       # An existing/edited SOUL is never overwritten by a new process.
-      store.write_soul('the factory regained its voice')
+      store.write_key('soul', 'the factory regained its voice')
       HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       assert_equal 'the factory regained its voice', store.soul
     end
@@ -35,7 +35,7 @@ class TestHivemindCompaction < Minitest::Test
       # reflects the store at conversation creation.
       store = MemoryStore.new(dir)
       store.seed('soul', 'my custom soul')
-      store.write_knowledge('the bus feeds the mall')
+      store.write_key('knowledge', 'the bus feeds the mall')
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       sys = agent.instance_variable_get(:@chat).messages.find { |m| m.role == :system }
       content = sys.content.to_s
@@ -55,7 +55,7 @@ class TestHivemindCompaction < Minitest::Test
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
-      store.write_player('alice', 'alice is building the mall')
+      store.write_key('alice', 'alice is building the mall')
 
       p1 = agent.send(:turn_prompt, 'INSTRUCTION ONE', player: 'alice')
       assert_includes p1, 'Persistent player memories:'
@@ -70,7 +70,7 @@ class TestHivemindCompaction < Minitest::Test
       refute_includes p2, '=== memory of alice ==='
 
       # A different player still gets their own memory.
-      store.write_player('bob', 'bob guards the iron')
+      store.write_key('bob', 'bob guards the iron')
       p3 = agent.send(:turn_prompt, 'INSTRUCTION THREE', player: 'bob')
       assert_includes p3, '=== memory of bob ==='
       assert_includes p3, 'bob guards the iron'
@@ -85,9 +85,9 @@ class TestHivemindCompaction < Minitest::Test
       agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice', 'carol']),
                                 api_key: 'sk-test', session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
-      store.write_player('alice', 'alice builds malls')
-      store.write_player('carol', 'carol hoards circuits')
-      store.write_player('bob', 'bob is offline')  # not online — not seeded
+      store.write_key('alice', 'alice builds malls')
+      store.write_key('carol', 'carol hoards circuits')
+      store.write_key('bob', 'bob is offline')  # not online — not seeded
 
       prompt = agent.send(:turn_prompt, 'INSTRUCTION')
       assert_includes prompt, '=== memory of alice ==='
@@ -104,7 +104,7 @@ class TestHivemindCompaction < Minitest::Test
   def test_ask_llm_injects_triggering_players_memory
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
-      agent.instance_variable_get(:@memory_store).write_player('alice', 'alice owes the factory a rocket')
+      agent.instance_variable_get(:@memory_store).write_key('alice', 'alice owes the factory a rocket')
       prompt = capture_prompt(agent) { agent.send(:ask_llm, 'alice', 'hivemind whats my build plan?') }
       assert_includes prompt, '=== memory of alice ==='
       assert_includes prompt, 'alice owes the factory a rocket'
@@ -125,7 +125,7 @@ class TestHivemindCompaction < Minitest::Test
     # existing on-disk player memory for a SILENT player (no session activity)
     Dir.mktmpdir do |dir|
       store = MemoryStore.new(dir)
-      store.write_player('frank', 'frank likes trains')
+      store.write_key('frank', 'frank likes trains')
       agent.instance_variable_set(:@memory_store, store)
       seen = agent.send(:session_players)
       # zoe is online but silent — deliberately NOT a target (never
@@ -153,7 +153,7 @@ class TestHivemindCompaction < Minitest::Test
     Dir.mktmpdir do |dir|
       agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice']), api_key: 'sk-test', session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
-      store.write_player('hivemind', 'stray blob from older build')
+      store.write_key('hivemind', 'stray blob from older build')
       live = agent.instance_variable_get(:@chat)
       live.add_message(role: :user, content: 'turn: alice says hi')
       agent.send(:append_history, 'alice', 'hi hivemind')   # marks alice seen
@@ -203,7 +203,7 @@ class TestHivemindCompaction < Minitest::Test
       # under test); only the network call is stubbed. soul rewrites,
       # knowledge replies UNCHANGED (blob exists), alice gets her first
       # memory — all as delimited sections of one reply.
-      agent.instance_variable_get(:@memory_store).write_knowledge('the mall feeds the factory')
+      agent.instance_variable_get(:@memory_store).write_key('knowledge', 'the mall feeds the factory')
       agent.define_singleton_method(:build_compaction_chat) do
         fork = super()
         forks << fork

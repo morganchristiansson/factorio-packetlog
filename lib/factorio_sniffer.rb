@@ -818,14 +818,6 @@ class FactorioSniffer
         a, b, c = d.unpack('E3')
         return " (#{'%.2f' % a}, #{'%.2f' % b}, #{'%.2f' % c})"
       end
-    when "move_on_pan"
-      if d.bytesize >= 17
-        x = d.unpack1('l', offset: 0) / 256.0
-        y = d.unpack1('l', offset: 4) / 256.0
-        v = d.unpack1('l', offset: 8)
-        f = d.unpack1('e', offset: 12)
-        return " pos=(#{'%.2f' % x}, #{'%.2f' % y}) int=#{v} f=#{'%.2f' % f}"
-      end
     when "render_mode_changed"
       return " mode=#{d.getbyte(0)}" if d.bytesize >= 1
     when "remote_view_surface"

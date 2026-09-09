@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap-dev \
     tcpdump \
     tshark \
+    traceroute \
+    mtr-tiny \
+    iputils-ping \
+    dnsutils \
     xxd \
     git \
     && rm -rf /var/lib/apt/lists/*
@@ -28,7 +32,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
 
 # ── npm global packages ─────────────────────────────────────────────────────
-RUN npm install -g @earendil-works/pi-coding-agent@0.84.2 && \
+RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 && \
     pi --version
 
 # ── Ruby gems ──────────────────────────────────────────────
@@ -42,3 +46,6 @@ RUN gem install bundler && \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 USER ubuntu
+
+RUN pi install npm:pi-web-access && \
+    pi install npm:@dietrichgebert/ponytail

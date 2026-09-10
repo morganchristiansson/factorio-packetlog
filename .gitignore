@@ -1,6 +1,7 @@
 # Capture artifacts
 *.pcap
 captures/
+logs/
 
 # Runtime state
 players.json

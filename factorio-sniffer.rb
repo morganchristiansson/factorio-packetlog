@@ -38,6 +38,91 @@ require_relative 'lib/factorio_sniffer'
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_PORT = 34_197
 DEFAULT_PLAYER_DB = 'players.json'
+# Console history files older than this are pruned at startup (hardcoded —
+# text output is tiny, but unbounded is never an option).
+LOG_KEEP_DAYS = 7
+
+# ─────────────────────────────────────────────────────────────────────
+# Console history log
+# ─────────────────────────────────────────────────────────────────────
+# Tee for $stdout/$stderr: everything printed to the console is also
+# appended to logs/packetlog-<timestamp>.log (same content, nothing
+# extra) so incident history survives the terminal scrollback. One shared
+# mutex keeps lines from interleaving across the packet/agent threads.
+# Lives here (entry point, never hot-reloaded) so a Ctrl-C reload can't
+# double-wrap the streams.
+class OutputTee
+  def initialize(primary, secondary, mutex)
+    @primary = primary
+    @secondary = secondary
+    @mutex = mutex
+  end
+
+  def write(s)
+    @mutex.synchronize do
+      @primary.write(s)
+      @secondary.write(s)
+    end
+  end
+
+  def puts(*args)
+    if args.empty?
+      write("\n")
+    else
+      args.flatten.each { |a| write(a.to_s.end_with?("\n") ? a.to_s : "#{a}\n") }
+    end
+    nil
+  end
+
+  def print(*args)
+    write(args.join)
+    nil
+  end
+
+  def flush
+    @mutex.synchronize do
+      @primary.flush
+      @secondary.flush
+    end
+  end
+
+  def tty?
+    @primary.tty?
+  rescue NoMethodError
+    false
+  end
+
+  def sync
+    @primary.sync
+  end
+
+  def sync=(v)
+    @primary.sync = v
+  end
+end
+
+# New history file per run in logs/ (next to captures/); prune files
+# older than LOG_KEEP_DAYS. Returns the path.
+def setup_output_log
+  dir = File.join(Dir.pwd, 'logs')
+  FileUtils.mkdir_p(dir)
+  cutoff = Time.now - LOG_KEEP_DAYS * 24 * 3600
+  Dir.glob(File.join(dir, 'packetlog-*.log')).each do |f|
+    begin
+      File.delete(f) if File.mtime(f) < cutoff
+    rescue SystemCallError
+      nil
+    end
+  end
+  path = File.join(dir, "packetlog-#{Time.now.strftime('%Y%m%d-%H%M%S')}.log")
+  file = File.open(path, 'a')
+  file.sync = true
+  mutex = Mutex.new
+  $stdout = OutputTee.new($stdout, file, mutex)
+  $stderr = OutputTee.new($stderr, file, mutex)
+  puts "console history: #{path}"
+  path
+end
 
 # ─────────────────────────────────────────────────────────────────────
 # CLI + hot-reload loop
@@ -171,6 +256,10 @@ if __FILE__ == $PROGRAM_NAME
     puts "Available interfaces: #{LiveCapture.list_interfaces.join(', ')}"
     exit 0
   end
+
+  # Console history from here on (auto-detect chatter, joins, chat —
+  # everything below prints through the tee).
+  setup_output_log
 
   # Apply player mappings to the DB before starting
   db = PlayerDatabase.new(options[:player_db])

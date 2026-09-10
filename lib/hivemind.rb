@@ -61,6 +61,18 @@ class HiveMindAgent
     DEFAULT_PROVIDER
   end
 
+  # Responses-API-only hack (inert until prepended — see
+  # ensure_stateless_responses!): the gem chains every request onto the
+  # last reply via previous_response_id, but we resend the full history
+  # every time — and the gateway doesn't retain server-side responses
+  # (idle expiry, restarts), so any chained id fails the ask with
+  # "referenced response not found or expired". The tool-call follow-up
+  # INSIDE a single ask picks up the fresh id from the just-completed
+  # reply, so per-ask nil-ing can't cover it — never chain.
+  module StatelessResponses
+    def extract_last_response_id(*) = nil
+  end
+
   # Trigger phrases (case-insensitive, WHOLE-WORD match). Word-boundary
   # matching keeps short/vague phrases from firing inside other words:
   # "hm" must not page on "shmoose", and a player named "HivemindFan"
@@ -288,6 +300,7 @@ class HiveMindAgent
     llm_api_key = api_key || ENV['HIVE_API_KEY']
     @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
     @provider = self.class.provider_for(@model)
+    ensure_stateless_responses!(@provider)
     api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
 
     raise ArgumentError, 'no API key set (HIVE_API_KEY) — agent disabled' if llm_api_key.nil?
@@ -606,6 +619,20 @@ class HiveMindAgent
 
   # ── LLM plumbing ──────────────────────────────────────────────────
 
+  # Responses-API-only gate for the StatelessResponses hack above: the
+  # chat/completions provider has no previous_response_id chaining, so
+  # the prepend is installed only when actually running on
+  # :openai_responses. Called wherever a provider is (re)resolved —
+  # initialize, switch_model!, try_model! — since any of them can select
+  # a responses model. Global prepend, installed once (the ancestors
+  # check keeps hot reloads from stacking it).
+  def ensure_stateless_responses!(provider)
+    return unless provider == :openai_responses
+    return unless defined?(RubyLLM::Providers::OpenAIResponses)
+    mod = HiveMindAgent::StatelessResponses
+    RubyLLM::Providers::OpenAIResponses.prepend(mod) unless RubyLLM::Providers::OpenAIResponses.ancestors.include?(mod)
+  end
+
   # Stamp the OpenCode-required request headers onto a chat: the custom
   # User-Agent plus the stable per-conversation session id. with_headers
   # REPLACES, so both ride in one call. Applied at creation AND
@@ -682,12 +709,6 @@ class HiveMindAgent
     # Every request carries the OpenCode identity headers (re-applied here
     # so hot-reloaded chats and throwaway forks can't miss them).
     apply_request_headers(chat)
-    # Stateless Responses requests: the gem chains each call onto the last
-    # reply via previous_response_id, but we resend the full history every
-    # time — and a stale id (idle expiry, gateway restart) fails the whole
-    # ask with "referenced response not found or expired", poisoning every
-    # later turn the same way. Drop them so each request stands alone.
-    chat.messages.each { |m| m.response_id = nil if m.respond_to?(:response_id=) }
     start = chat.messages.size
     chat.ask(prompt)
   rescue StandardError
@@ -994,6 +1015,7 @@ class HiveMindAgent
         nil
       end
       @provider = self.class.provider_for(@model)
+      ensure_stateless_responses!(@provider)
       @mutex.synchronize do
         if @chat
           @chat.with_model(@model, provider: @provider, assume_exists: true)
@@ -1054,6 +1076,7 @@ class HiveMindAgent
     Thread.new do
       begin
         tmp_provider = self.class.provider_for(m)
+        ensure_stateless_responses!(tmp_provider)
         tmp = RubyLLM.chat(model: m, provider: tmp_provider, assume_model_exists: true)
         apply_request_headers(tmp)
         tmp.messages.replace(snapshot.dup)

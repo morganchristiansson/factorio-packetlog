@@ -1,0 +1,10 @@
+Fragmented msg-4 ConnectionRequestReplyConfirm (morganc's join, 2026-09-10,
+captures/server-34197-20260910-205559.pcap pkts 34154-34159, C->S, one
+message_id, frag_numbers 0-5, ~500B chunks).
+
+A modded client's confirm carries the mod list/settings blob (KBs, needed
+so the deterministic sim matches), so Factorio fragments it at the message
+layer (0x40 flag). frag_confirm_0.bin parses to username "morganc";
+frag_confirm_1..5.bin are mid-blob slices that must NEVER parse as whole
+messages (they used to decode as phantom "usernames", stealing player
+slot #1 in players.json and the confirm binding).

@@ -233,7 +233,22 @@ perturbation flag); the heartbeat payload always starts at byte 1. Parsing
 from byte 5 (treating the flag as a 4-byte offset) silently dropped ALL tick
 closures from ~half of all heartbeats (every `0x26`/`0x27`-prefixed packet).
 Verified against factorio_dissector and 97,656 affected packets. Fragmented
-messages (0x40 bit) are skipped.
+heartbeats (0x40 bit) are skipped (a fragment is not a full message).
+
+## Fragmented msg-4 confirm carries the mod list (phantom joins)
+
+A modded client's ConnectionRequestReplyConfirm carries its mod
+list/settings blob (KBs, so every client runs the same deterministic
+sim) and arrives as frags 0..N (~500B chunks, one message_id). Only
+frag 0 holds the leading fields (username); frags 1+ are mid-blob
+slices. Parsing them as whole messages decoded mod text (tech
+prerequisites, research triggers, spawn weights) as phantom "usernames"
+— one real "morganc connected" plus 4-5 phantom "X connected" lines in
+the same millisecond, last-write-wins @ip_names, and the first heartbeat
+bound a phantom as the game player (players.json "1" = log-like text).
+Fix: parse_udp_payload skips frag_number > 0 (header only); frag 0
+parses as before. Proof: captures/server-34197-20260910-205559.pcap
+pkts 34154-34159, saved as test/fixtures/frag_confirm_{0..5}.bin.
 
 ## open_gui (type 5) — server echo 14 bytes / client 8 bytes
 

@@ -514,6 +514,16 @@ ACTIONS = {
     hdr = parse_network_header(data)
     return nil unless hdr
 
+    # Fragments 1+ are mid-message slices, not whole messages: only frag 0
+    # carries the leading fields. Parsing later frags as whole messages
+    # reads mid-payload bytes as headers — e.g. a modded client's
+    # multi-KB msg-4 confirm (mod list for deterministic sync) arrives as
+    # frags 0..N, and frags 1+ decode windows of the mod blob as fake
+    # "usernames" (phantom joins that steal the player slot). Frag 0
+    # still parses (username/peers/game-name all live up front).
+    # (Full reassembly: skipped — nothing we extract lives past frag 0.)
+    return { header: hdr } if hdr[:fragmented] && hdr[:frag_number].to_i > 0
+
     case hdr[:msg_type]
     when 6, 7
       # Heartbeat payload always starts at byte 1. The random flag (0x20) is

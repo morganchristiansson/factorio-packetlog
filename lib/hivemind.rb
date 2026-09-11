@@ -703,9 +703,33 @@ class HiveMindAgent
     apply_request_headers(chat)
     start = chat.messages.size
     chat.ask(prompt)
-  rescue StandardError
+  rescue StandardError => e
+    log_bad_request_proof(chat) if e.is_a?(RubyLLM::BadRequestError)
     chat.messages.slice!(start..)
     raise
+  end
+
+  # Failure-only probe for provider 400s: re-render the Responses payload
+  # the gem just sent and log its server-side references
+  # (previous_response_id + function_call/call_id pairs) — ids and types
+  # only, never content. Decisive either way: if previous_response_id is
+  # present the stateless patch isn't active; if absent the reference the
+  # gateway rejects must come from the tool round-trip. Only runs when an
+  # ask actually fails, so zero noise on the happy path.
+  def log_bad_request_proof(chat)
+    provider = chat.instance_variable_get(:@provider)
+    return unless provider.is_a?(RubyLLM::Providers::OpenAIResponses)
+    payload = provider.send(:render_payload, chat.messages, tools: chat.tools,
+      temperature: nil, model: chat.model, stream: false)
+    items = Array(payload[:input]).map do |i|
+      t = i[:type].to_s
+      t += "(#{i[:call_id]})" if i[:call_id]
+      t += "(#{i[:name]})" if i[:type].to_s == 'function_call'
+      t
+    end
+    log("bad-request proof: previous_response_id=#{payload[:previous_response_id].inspect} input=[#{items.join(', ')}]")
+  rescue StandardError => e
+    log("bad-request proof unavailable: #{e.class}: #{e.message}")
   end
 
   # Build the per-turn USER prompt: fresh context snapshot (online

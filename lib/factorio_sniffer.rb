@@ -8,6 +8,7 @@ require_relative 'pcap'
 require_relative 'live_capture'
 require_relative 'rcon_client'
 require_relative 'hivemind'
+require_relative 'translation_agent'
 require_relative 'log_tail'
 require_relative 'server_detect'
 require_relative 'player_attrs'
@@ -40,7 +41,7 @@ class FactorioSniffer
   # each file (redefining classes); `require` would only load once.
   # Constant-redefinition warnings are expected and silenced during load.
   RELOADABLE_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -212,6 +213,18 @@ class FactorioSniffer
           warn '[hivemind] AI agent auto-enabled (server mode) but RCON is unavailable (--no-rcon?); agent disabled'
         end
       end
+
+      # Translation agent: auto-translates chat for foreign players.
+      # Enabled in server mode when RCON is available (no API key needed).
+      if @rcon
+        begin
+          @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db)
+          puts "[translate] Translation agent online — auto-translating foreign player chat"
+        rescue => e
+          warn "[translate] Translation agent disabled: #{e.message}"
+          @translation_agent = nil
+        end
+      end
     end
 
     # Version → segment-type mapping (server mode may also query RCON here;
@@ -315,6 +328,9 @@ class FactorioSniffer
     select_protocol_version
     @agent&.ensure_followup_scheduler
     @agent&.ensure_log_watcher(ServerDetect.log_path)
+    # Translation agent persists as an ivar; its refresh thread survives reload.
+    # No re-initialization needed unless the thread died.
+    @translation_agent&.enable! if @translation_agent && !@translation_agent.enabled
   end
 
   private
@@ -487,7 +503,7 @@ class FactorioSniffer
       ca[:peers].each do |p|
         @peer_names[p[:peer_id]] = p[:name]
         pid = p[:peer_id] + 1
-        @player_db.add(pid, p[:name])
+        @player_db.add(pid, p[:name], locale: nil)
         puts "#{ts_str}  [server]  online peer #{p[:peer_id]} -> #{p[:name]} (candidate index #{pid})"
       end
     end
@@ -507,7 +523,7 @@ class FactorioSniffer
       if sa[:username]  # NewPeerInfo — a player joined (or is this client)
         @peer_names[sa[:peer_id]] = sa[:username]
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
-        @player_db.add(pid, sa[:username])
+        @player_db.add(pid, sa[:username], locale: nil)
         # Join = liveness proof (connect stamps hb); index bound once a
         # C→S heartbeat confirms it.
         @attrs.connect(sa[:username], @game_tick)
@@ -571,7 +587,7 @@ class FactorioSniffer
         name = entry && !entry[1] ? entry[0] : nil  # unconfirmed only
         if name
           entry[1] = true  # confirmed — never re-fire the join event
-          @player_db.add(idx + 1, name)
+          @player_db.add(idx + 1, name, locale: nil)
           @player_db.remove_other_entries_for(name, idx + 1)
           @attrs.set_index(name, idx + 1)  # confirming heartbeat = liveness proof
           # src_ip → name for connected players: lets the clean-quit
@@ -586,7 +602,7 @@ class FactorioSniffer
         end
       elsif @self_name && src_ip == @self_ip && @self_index.nil?
         @self_index = idx
-        @player_db.add(idx + 1, @self_name)
+        @player_db.add(idx + 1, @self_name, locale: nil)
         # Peer-id-based guess (peer_id+1) may differ for returning players;
         # remove any other slot claiming our name.
         @player_db.remove_other_entries_for(@self_name, idx + 1)
@@ -904,6 +920,7 @@ class FactorioSniffer
         msg = FactorioProtocol.decode_chat(data)
         if msg
           @agent&.on_chat(pname, msg)
+          @translation_agent&.on_chat(act, msg)
           puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
         end
       end
@@ -967,18 +984,21 @@ class FactorioSniffer
   # between runs either way.
   def load_roster
     return unless @rcon
-    players = @rcon.connected_players
-    return if players.nil? || players.empty?
-    players.each do |p|
-      @player_db.add(p[:index], p[:name])
-      @player_db.remove_other_entries_for(p[:name], p[:index])
+    # Use player_attributes which now includes locale
+    attrs = @rcon.player_attributes
+    return if attrs.nil? || attrs.empty?
+    connected = attrs.select { |a| a[:connected] }
+    return if connected.empty?
+    connected.each do |a|
+      @player_db.add(a[:index], a[:name], locale: a[:locale])
+      @player_db.remove_other_entries_for(a[:name], a[:index])
       # Authoritative live-roster seed (connected + index + fresh hb);
       # time accounting is player_attributes' job (load_player_attrs).
-      @attrs.roster_online(p[:name], p[:index])
+      @attrs.roster_online(a[:name], a[:index])
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
-    puts "#{ts}  [rcon]  connected players (#{players.size}): " +
-         players.map { |p| "#{p[:name]} (##{p[:index]})" }.join(', ')
+    puts "#{ts}  [rcon]  connected players (#{connected.size}): " +
+         connected.map { |a| "#{a[:name]} (##{a[:index]})" }.join(', ')
   end
 
   public

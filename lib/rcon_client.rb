@@ -33,16 +33,16 @@ class RconClient
 
   # One-liner returning player attributes for ALL known players (incl.
   # offline) — index, name, connected, admin, online_time (total ticks
-  # across all sessions), afk_time (ticks since last action). Seeds
-  # PlayerAttrs at startup; afterwards the sniffer maintains these from
+  # across all sessions), afk_time (ticks since last action), locale.
+  # Seeds PlayerAttrs at startup; afterwards the sniffer maintains these from
   # the packet stream. Same write_file/print duality as the roster — at
   # ~80 B/player the attrs JSON exceeds the 4KB rcon.print cap beyond
   # ~50 players.
   PLAYER_ATTRS_FILENAME = 'factorio-sniffer-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time} end rcon.print(helpers.table_to_json(t))'
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -81,12 +81,12 @@ class RconClient
   end
 
   # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
-  # [{index:, name:, connected:, admin:, online_time:, afk_time:}]. Returns
-  # nil when the payload isn't one. A truncated payload (rcon.print cap)
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}].
+  # Returns nil when the payload isn't one. A truncated payload (rcon.print cap)
   # parses as a partial list.
   #
   # JSON (helpers.table_to_json) instead of serpent.line: serpent sorts
-  # keys alphabetically (a, c, i, k, n, o), which silently broke an
+  # keys alphabetically (a, c, i, k, l, n, o), which silently broke an
   # order-sensitive regex — the attrs seed never populated.
   def self.parse_player_attrs(body)
     parsed = parse_json(body)
@@ -98,7 +98,8 @@ class RconClient
         connected: r['c'] == true,
         admin: r['a'] == true,
         online_time: r['o'].to_i,
-        afk_time: r['k'].to_i }
+        afk_time: r['k'].to_i,
+        locale: r['l']&.to_s }
     end
   end
 

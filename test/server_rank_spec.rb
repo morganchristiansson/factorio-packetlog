@@ -81,6 +81,18 @@ class ServerRankSpec < Minitest::Test
     assert_nil FactorioProtocol.parse_game_info(fake_reply[0, 60])
   end
 
+  def test_parse_server_info_uint32v_counts
+    # Heavily-modded servers send counts in uint32v long form (0xFF + u32 LE
+    # — a 505-mod server sends FF F9 01 00 00); a plain-u8 read decodes 255
+    # and desyncs tags/players into garbage ("114 players" of mod-list bytes).
+    ext = fake_reply.sub("\x01\x00\x01\x01".b, "\x01\x00\x01\xff\x01\x00\x00\x00".b)
+                     .sub("\x00\x02\x03bob".b, "\x00\xff\x02\x00\x00\x00\x03bob".b)
+    assert_equal fake_reply.bytesize + 8, ext.bytesize # anchors hit
+    info = FactorioProtocol.parse_game_info(ext)
+    assert_equal [['base', '2.0.77']], info[:mods]
+    assert_equal %w[bob alice], info[:players]
+  end
+
   def test_resolve_version_implies_server_version
     list = [fake_server('Mine', 3, '2.0.77'), fake_server('Other', 9, '2.1.17')]
     v, note = resolve_version(list, server: 'mine', version: nil, all_versions: false)

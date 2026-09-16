@@ -110,9 +110,9 @@ if $PROGRAM_NAME == __FILE__
   puts lines
   if opts[:interactive] && $stdin.tty?
     by_rank = {}
-    sorted.first(opts[:top]).each_with_index { |s, i| by_rank[i + 1] = s }
+    sorted.each_with_index { |s, i| by_rank[i + 1] = s }
     if opts[:server]
-      sorted.each_with_index.select { |s, _| strip_tags(s['name']).downcase.include?(opts[:server].downcase) }
+      pool.each_with_index.select { |s, _| strip_tags(s['name']).downcase.include?(opts[:server].downcase) }
             .each { |s, i| by_rank[i + 1] = s }
     end
     loop do

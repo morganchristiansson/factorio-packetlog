@@ -553,45 +553,40 @@ ACTIONS = {
   # Parse a REASSEMBLED msg-17 payload (header byte already stripped;
   # unfragmented replies have a 1-byte header, fragmented ones 4 — see
   # server_query.rb). Reverse-engineered live against 2.0.77/2.1.14 servers:
-  #   [u32 token][u64 zero][u8 len][name][3B version][u32le build]
+  #   [u32 token][u64 zero][uint32v len][name][3B version][u32le build]
   #   [uint32v len][description][u32le time_min*65536][u32 ?]
-  #   [u8 len][host:port][01 00 01][u8 nmods][mods: len+name+3B ver+u32 crc]
-  #   [u8 ntags][tags][u8 nplayers][player names][01]
-  # Returns nil on overrun (truncated/corrupt datagram). String lengths
+  #   [uint32v len][host:port][01 00 01][uint32v nmods][mods: len+name+3B ver+u32 crc]
+  #   [uint32v ntags][tags][uint32v nplayers][player names][01]
+  # Every length/count is a uint32v: a 0xFF lead byte means [0xFF][u32 LE]
+  # follows (a 505-mod 2.0.76 server encodes its mod count as FF F9 01 00 00;
+  # reading it as a plain u8 yields 255 mods and desyncs tags/players into
+  # garbage — "114 players" that are really mod-list bytes). Returns nil
+  # on overrun (truncated/corrupt datagram). String lengths
   # are BYTES (multi-byte UTF-8 names/tags walk fine).
   def self.parse_game_info(p)
     return nil if p.nil? || p.bytesize < 13
-    pos = 12 # opaque server id block
-    nl = p.getbyte(pos); pos += 1 + nl
-    return nil if p.bytesize < pos + 7
-    info = { name: p[pos - nl, nl],
-             version: p[pos, 3].bytes.join('.'),
-             build: p[pos + 3, 4].unpack1('V') }
-    pos += 7
-    return nil if p.bytesize < pos + 1
-    if p.getbyte(pos) == 0xff
-      return nil if p.bytesize < pos + 5
-      dl = p[pos + 1, 4].unpack1('V'); pos += 5
-    else
-      dl = p.getbyte(pos); pos += 1
-    end
-    return nil if p.bytesize < pos + dl + 8
+    pos, nl = decode_uint32v(p, 12) # opaque server id block
+    return nil if nl.nil? || p.bytesize < pos + nl + 7
+    info = { name: p[pos, nl],
+             version: p[pos + nl, 3].bytes.join('.'),
+             build: p[pos + nl + 3, 4].unpack1('V') }
+    pos += nl + 7
+    pos, dl = decode_uint32v(p, pos)
+    return nil if dl.nil? || p.bytesize < pos + dl + 8
     info[:description] = p[pos, dl]; pos += dl
     info[:time_min] = p[pos, 4].unpack1('V') / 65536.0; pos += 8
-    return nil if p.bytesize < pos + 1
-    hl = p.getbyte(pos)
-    return nil if p.bytesize < pos + 1 + hl + 4
-    info[:host] = p[pos + 1, hl]; pos += 1 + hl
+    pos, hl = decode_uint32v(p, pos)
+    return nil if hl.nil? || p.bytesize < pos + hl + 4
+    info[:host] = p[pos, hl]; pos += hl
     pos += 3 # 01 00 01 prefix
-    return nil if p.bytesize < pos + 1
-    nm = p.getbyte(pos); pos += 1
+    pos, nm = decode_uint32v(p, pos)
+    return nil if nm.nil?
     info[:mods] = []
     nm.times do
-      return nil if p.bytesize < pos + 1
-      l = p.getbyte(pos)
-      return nil if p.bytesize < pos + 8 + l
-      info[:mods] << [p[pos + 1, l], p[pos + 1 + l, 3].bytes.join('.')]
-      pos += 8 + l
+      pos2, l = decode_uint32v(p, pos)
+      return nil if l.nil? || p.bytesize < pos2 + l + 7
+      info[:mods] << [p[pos2, l], p[pos2 + l, 3].bytes.join('.')]
+      pos = pos2 + l + 7
     end
     info[:tags] = read_info_strings(p, pos)
     return nil if info[:tags].nil?
@@ -601,28 +596,26 @@ ACTIONS = {
     info
   end
 
-  # Read a [u8 count][len+str]* block at pos; nil on overrun.
+  # Read a [uint32v count][len+str]* block at pos; nil on overrun.
   def self.read_info_strings(p, pos)
-    return nil if p.bytesize < pos + 1
-    n = p.getbyte(pos); pos += 1
+    pos, n = decode_uint32v(p, pos)
+    return nil if n.nil?
     n.times.map do
-      return nil if p.bytesize < pos + 1
-      l = p.getbyte(pos)
-      return nil if p.bytesize < pos + 1 + l
-      s = p[pos + 1, l]; pos += 1 + l
+      pos2, l = decode_uint32v(p, pos)
+      return nil if l.nil? || pos2 + l > p.bytesize
+      s = p[pos2, l]; pos = pos2 + l
       s
     end
   end
 
-  # Advance pos past a [u8 count][len+str]* block; nil on overrun.
+  # Advance pos past a [uint32v count][len+str]* block; nil on overrun.
   def self.read_info_strings_pos(p, pos)
-    return nil if p.bytesize < pos + 1
-    n = p.getbyte(pos); pos += 1
+    pos, n = decode_uint32v(p, pos)
+    return nil if n.nil?
     n.times do
-      return nil if p.bytesize < pos + 1
-      l = p.getbyte(pos)
-      return nil if p.bytesize < pos + 1 + l
-      pos += 1 + l
+      pos2, l = decode_uint32v(p, pos)
+      return nil if l.nil? || pos2 + l > p.bytesize
+      pos = pos2 + l
     end
     pos
   end

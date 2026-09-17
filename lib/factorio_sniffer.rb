@@ -216,10 +216,11 @@ class FactorioSniffer
 
       # Translation agent: auto-translates chat for foreign players.
       # Enabled in server mode when RCON is available (no API key needed).
+      # Default backend is now argos-translate (installed on server, not locally).
       if @rcon
         begin
-          @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db)
-          puts "[translate] Translation agent online — auto-translating foreign player chat"
+          @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :argos)
+          puts "[translate] Translation agent online — auto-translating foreign player chat (argos-translate backend)"
         rescue => e
           warn "[translate] Translation agent disabled: #{e.message}"
           @translation_agent = nil
@@ -301,7 +302,9 @@ class FactorioSniffer
   # finalizes and quits. Later presses are fresh reloads again.
   def handle_interrupt!
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    raise if @last_interrupt && (now - @last_interrupt) <= QUIT_WINDOW
+    # Bare `raise` would re-raise $! (works inside the live Ctrl-C rescue, but
+    # raises RuntimeError when called directly — e.g. the double-tap spec).
+    raise Interrupt if @last_interrupt && (now - @last_interrupt) <= QUIT_WINDOW
     @last_interrupt = now
     reload_code!
   end
@@ -597,6 +600,9 @@ class FactorioSniffer
           # so joins are detected here and leaves via the final
           # heartbeat's PeerDisconnect sync action.
           @agent&.on_player_event(:joined, name)
+          # One targeted RCON query to learn the joiner's locale (rare event;
+          # rides the same heartbeat-confirm that bound their game index).
+          @translation_agent&.note_joined(idx + 1, name)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
         end
@@ -986,6 +992,9 @@ class FactorioSniffer
     return unless @rcon
     # Use player_attributes which now includes locale
     attrs = @rcon.player_attributes
+    # load_player_attrs (same startup call site, back-to-back) reuses this
+    # exact dump instead of re-querying RCON.
+    @attrs_query = attrs
     return if attrs.nil? || attrs.empty?
     connected = attrs.select { |a| a[:connected] }
     return if connected.empty?
@@ -1052,6 +1061,7 @@ class FactorioSniffer
           /model [MODEL]               show or switch LLM model at runtime (Hivemind only)
           /try MODEL [MESSAGE]         one-off dry-run with MODEL — not persisted, not sent to game
           /compact                     distill session into memory, then start fresh
+          /simulate NAME LANG MSG      test the translation backend with MSG in LANG
       HELP
     when '/players'
       puts "online (#{online_players.size}): #{online_players.join(', ')}"
@@ -1088,6 +1098,34 @@ class FactorioSniffer
         msg = parts[2..]&.join(' ')
         msg = nil if msg && msg.strip.empty?
         puts @agent.try_model!(model, msg)
+      end
+    when '/simulate'
+      # Test the translation backend directly: translate MSG from LANG to English.
+      # Usage: /simulate <player_name> <language_code> <message>
+      # (player_name is decorative — the backend has no per-player state.)
+      if @translation_agent.nil?
+        puts 'translation agent not enabled — cannot simulate'
+        return
+      end
+      if parts[1].nil? || parts[2].nil?
+        puts 'usage: /simulate <player_name> <language_code> <message>'
+        puts 'example: /simulate dlruen ru "Zdravstvuyte"'
+        return
+      end
+      player_name = parts[1]
+      lang_code = parts[2]
+      # Rejoin the rest as the message (may contain spaces); strip wrapping
+      # quotes so the documented `... "some text"` form works.
+      msg = parts[3..]&.join(' ')&.gsub(/\A["']|["']\z/, '')
+      if msg.nil? || msg.strip.empty?
+        puts 'usage: /simulate <player_name> <language_code> <message>'
+        return
+      end
+      begin
+        translated = @translation_agent.simulate_translation(player_name, lang_code, msg)
+        puts "[simulate] player=#{player_name} lang=#{lang_code} msg='#{msg}' => translated='#{translated}'"
+      rescue StandardError => e
+        warn "[simulate] error: #{e.class}: #{e.message}"
       end
     when '/compact'
       # Single guard lives in compact_memory! (dummy MemoryStore → enabled?=false
@@ -1150,7 +1188,8 @@ class FactorioSniffer
     return if @attrs_loaded
     @attrs_loaded = true
     return unless @rcon
-    attrs = @rcon.player_attributes
+    attrs = @attrs_query || @rcon.player_attributes
+    @attrs_query = nil
     return if attrs.nil? || attrs.empty?
     attrs.each do |a|
       @attrs.seed(a[:name], index: a[:index], connected: a[:connected],

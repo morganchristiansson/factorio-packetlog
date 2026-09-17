@@ -4,21 +4,19 @@
 #
 # Architecture:
 # - Hooks into FactorioSniffer's chat flow (like HiveMindAgent)
-# - Tracks player locales via RCON (game.players[name].locale) and persists to players.json
-# - Translates incoming messages from foreign players to English (printed to console)
-# - Translates outgoing replies to target players' locales via SINGLE batched RCON command
+# - Resolves player locales from player_db (persisted players.json + the
+#   startup RCON roster dump). NO live RCON locale queries, no refresh
+#   timer, no duplicate locale cache: locale changes are rare and
+#   intentionally ignored for now — packet-level locale tracking can come
+#   later if ever needed.
+# - Translates incoming messages from foreign players to English (console + relayed
+#   in-game to every player whose locale differs from the speaker's)
 # - Supports multiple backends: LibreTranslate API, Bergamot (local), mock
 # - HiveMind outgoing replies are NOT auto-translated (HiveMind handles its own language)
 
 require_relative 'rcon_client'
-require 'net/http'
-require 'uri'
-require 'json'
 
 class TranslationAgent
-  # How often to refresh player locales from RCON (seconds)
-  LOCALE_REFRESH_INTERVAL = 300
-
   # Minimum interval between translations for the same player (anti-spam)
   TRANSLATE_COOLDOWN = 2.0
 
@@ -29,8 +27,9 @@ class TranslationAgent
   BACKEND_LIBRETRANSLATE = :libretranslate
   BACKEND_BERGAMOT = :bergamot
   BACKEND_MOCK = :mock
+  BACKEND_ARGOS = :argos
 
-  attr_reader :rcon, :enabled, :player_db, :backend
+  attr_reader :rcon, :enabled, :player_db, :backend, :translation_service
 
   def initialize(rcon:, player_db:, backend: BACKEND_LIBRETRANSLATE, libretranslate_url: nil, bergamot_url: nil, api_key: nil, enabled: true)
     @rcon = rcon
@@ -41,21 +40,11 @@ class TranslationAgent
     # Initialize translation backend
     @translation_service = create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
 
-    # player_name -> locale (e.g., "pt-BR") — cache from player_db + RCON
-    @player_locales = {}
     # player_name -> last translation time (for cooldown)
     @last_translate = {}
-    # Mutex for locale cache
-    @locale_mutex = Mutex.new
-    # Background refresh thread
-    @refresh_thread = nil
 
     # Track which players we've announced translations for (avoid spam)
     @announced_players = Set.new
-
-    # Seed cache from persisted locales
-    seed_from_db
-    start_locale_refresh if @enabled
   end
 
   # Called by sniffer for each incoming chat message
@@ -67,6 +56,8 @@ class TranslationAgent
     return [true, nil] unless @enabled
     return [true, nil] if message.nil? || message.strip.empty?
     return [true, nil] if message.start_with?('/')  # Commands not translated
+    message = message.delete("\0")  # packet padding/embedded NULs: argos + Lua reject them
+    return [true, nil] if message.empty?
 
     # Get player ID from action (1-indexed game_player matches players.json)
     player_id = act[:game_player]
@@ -76,125 +67,75 @@ class TranslationAgent
     player = @player_db.lookup(player_id)
     return [true, nil] if player.nil? || player.empty? || player.start_with?('Player_')
 
-    # Check if this player needs translation - query FRESH from RCON on join
-    locale = get_player_locale_fresh(player)
+    # Get player's locale from player_db (populated from the startup roster dump;
+    # locale CHANGES are ignored by design — packet-level tracking is TODO).
+    locale = @player_db.get_locale(player_id)
     return [true, nil] unless locale
-    return [true, nil] unless @translation_service.needed?(locale, OUR_LOCALE)
 
-    # Rate limit per player
+    # Rate limit per player (anti-spam: each message costs one argos run per
+    # target locale).
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     return [true, nil] if @last_translate[player] && (now - @last_translate[player]) < TRANSLATE_COOLDOWN
     @last_translate[player] = now
 
-    # Translate to English
-    translated = @translation_service.to_english(message, source_lang: locale)
+    if @translation_service.needed?(locale, OUR_LOCALE)
+      # Foreign speaker: translate to English (console + relay base)
+      translated = @translation_service.to_english(message, source_lang: locale)
 
-    # Announce once per player per session
-    announce_translation(player, locale) unless @announced_players.include?(player)
+      # Announce once per player per session
+      announce_translation(player, locale) unless @announced_players.include?(player)
 
-    # Print translation to console (visible to operator)
-    ts = Time.now.strftime('%H:%M:%S')
-    puts "#{ts}  [translate] #{player} (#{locale} -> en): #{translated}"
+      # Print translation to console (visible to operator)
+      ts = Time.now.strftime('%H:%M:%S')
+      puts "#{ts}  [translate] #{player} (#{locale} -> en): #{translated}"
+    else
+      # English speaker: the message IS the relay base — foreign readers get
+      # it re-localized, en readers already saw the original broadcast.
+      translated = message
+    end
+
+    # Relay IN GAME to everyone who can't read the original: one Lua pass
+    # over game.connected_players (the live roster), printing per player the
+    # relay text re-localized to THEIR locale (en readers take it as-is).
+    relay_to_others(player, locale, translated)
 
     [true, translated]  # Continue processing, also return translated text
   end
 
-  # Batch translate and send a message to multiple players in their languages.
-  # messages: {player_name => english_message} hash
-  # Returns: number of players sent to
-  def broadcast_translated(messages)
-    return 0 unless @enabled && messages.is_a?(Hash) && !messages.empty?
+  # Synthetic relay for the /simulate console command: translate + relay
+  # to the connected players exactly like a real chat message would
+  # (bypasses on_chat's player DB / cooldown path). Returns the EN text.
+  def simulate_translation(player_name, speaker_locale, message)
+    translated = @translation_service.to_english(message, source_lang: speaker_locale)
+    relay_to_others(player_name, speaker_locale, translated)
+    translated
+  end
 
-    # Group players by locale
-    by_locale = {}
-    messages.each do |player, message|
-      next if message.nil? || message.strip.empty?
-      locale = get_player_locale_cached(player)  # Use cached for batch
-      next unless locale
-      next unless @translation_service.needed?(locale, OUR_LOCALE)
-      translated = @translation_service.from_english(message, target_lang: locale)
-      next if translated == message
-      (by_locale[locale] ||= []) << {player: player, text: translated}
+  # Called on a CONFIRMED join: one targeted RCON query to learn the
+  # joiner's locale (joins are rare — not per message, not a timer) and
+  # store it in player_db so every later relay knows it. Locale CHANGES
+  # after the join are ignored by design.
+  def note_joined(game_index, name)
+    return unless @rcon
+    escaped = lua_quote(name)
+    lua = %(do local p = game.players["#{escaped}"] rcon.print(p and p.locale or "nil") end)
+    locale = @rcon.command("/sc #{lua}").strip
+    if locale && !locale.empty? && locale != 'nil' && locale != 'false'
+      @player_db.set_locale_by_id(game_index, locale)
     end
-
-    return 0 if by_locale.empty?
-
-    # Build single RCON command that prints to each player in their locale
-    lua_parts = []
-    by_locale.each do |locale, entries|
-      entries.each do |e|
-        lua_parts << %(game.players["#{lua_quote(e[:player])}"].print("#{lua_quote("[translate] #{e[:text]}")}"))
-      end
-    end
-
-    @rcon.command(%(do #{lua_parts.join(' ')} end))
-    by_locale.values.sum(&:size)
+    locale
   rescue StandardError => e
-    warn "[translation] broadcast_translated error: #{e.class}: #{e.message}"
-    0
+    warn "[translation] locale query failed for #{name}: #{e.class}: #{e.message}"
+    nil
   end
 
-  # Get player's locale - FRESH from RCON (for join/new players)
-  def get_player_locale_fresh(player)
-    # Query RCON directly for fresh locale
-    locale = query_player_locale(player)
-    if locale
-      @locale_mutex.synchronize { @player_locales[player] = locale }
-      id = @player_db.name_to_id(player)
-      @player_db.set_locale_by_id(id, locale) if id
-    end
-    locale
-  end
-
-  # Get player's locale - cached (for batch operations)
-  def get_player_locale_cached(player)
-    @locale_mutex.synchronize do
-      return @player_locales[player] if @player_locales.key?(player)
-    end
-
-    # Try player_db (persisted)
-    id = @player_db.name_to_id(player)
-    locale = id ? @player_db.get_locale(id) : nil
-    if locale
-      @locale_mutex.synchronize { @player_locales[player] = locale }
-      return locale
-    end
-
-    # Not cached, query RCON
-    locale = query_player_locale(player)
-    if locale
-      @locale_mutex.synchronize { @player_locales[player] = locale }
-      @player_db.set_locale_by_id(id, locale) if id
-    end
-    locale
-  end
-
-  # Force refresh a specific player's locale
-  def refresh_player_locale(player)
-    locale = query_player_locale(player)
-    if locale
-      @locale_mutex.synchronize { @player_locales[player] = locale }
-      id = @player_db.name_to_id(player)
-      @player_db.set_locale_by_id(id, locale) if id
-    end
-    locale
-  end
-
-  # Get all known player locales (for debugging)
-  def all_locales
-    @locale_mutex.synchronize { @player_locales.dup }
-  end
-
-  # Enable/disable translation at runtime
+  # Enable/disable translation at runtime (no background threads to manage)
   def enable!
     @enabled = true
-    start_locale_refresh unless @refresh_thread&.alive?
   end
 
   def disable!
     @enabled = false
-    @refresh_thread&.kill
-    @refresh_thread = nil
   end
 
   # Shutdown
@@ -205,72 +146,77 @@ class TranslationAgent
   private
 
   # Create translation service based on backend
+  # Only ONE backend is ever active per agent — load just that file (the
+  # others stay out of memory and off the reload path).
   def create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
     case backend
     when BACKEND_BERGAMOT
+      require_relative 'translation_bergamot'
       BergamotTranslationService.new(bergamot_url || 'http://localhost:8080')
     when BACKEND_MOCK
+      require_relative 'translation_mock'
       MockTranslationService.new
+    when BACKEND_ARGOS
+      require_relative 'translation_argos'
+      ArgosTranslateService.new
     else
+      require_relative 'translation_libre'
       LibreTranslateService.new(libretranslate_url || 'https://libretranslate.de/translate', api_key)
     end
   end
 
-  # Seed locale cache from persisted player_db
-  def seed_from_db
-    @player_db.all_locales.each do |name, locale|
-      @locale_mutex.synchronize { @player_locales[name] = locale }
-    end
-  end
-
-  # Query a single player's locale via RCON
-  def query_player_locale(player)
-    return nil unless @rcon
-
-    escaped = lua_quote(player)
-    lua = %(do local p = game.players["#{escaped}"] rcon.print(p and p.locale or "nil") end)
-    result = @rcon.command(lua).strip
-
-    return nil if result.empty? || result == 'nil' || result == 'false'
-    result
-  rescue StandardError => e
-    warn "[translation] locale query failed for #{player}: #{e.class}: #{e.message}"
-    nil
-  end
-
-  # Background thread to refresh all online player locales
-  def start_locale_refresh
-    @refresh_thread = Thread.new do
-      loop do
-        sleep LOCALE_REFRESH_INTERVAL
-        next unless @enabled
-        refresh_all_locales
-      end
-    rescue StandardError => e
-      warn "[translation] locale refresh thread died: #{e.class}: #{e.message}"
-    end
-    @refresh_thread.name = 'translation-locale-refresh'
-  end
-
-  def refresh_all_locales
-    # Use the bulk player_attributes query which now includes locale
-    attrs = @rcon.player_attributes
-    return unless attrs
-
-    attrs.each do |p|
-      next unless p[:locale]
-      @locale_mutex.synchronize { @player_locales[p[:name]] = p[:locale] }
-      @player_db.set_locale_by_id(p[:index], p[:locale])
-    end
-  rescue StandardError => e
-    warn "[translation] refresh_all_locales error: #{e.class}: #{e.message}"
-  end
+  # Seed locale cache from player_db (persisted + the startup roster dump).
+  # Runs once, lazily, on the first relay — NO RCON query.
 
   # Announce that we're translating for this player (once per session)
   def announce_translation(player, locale)
     @announced_players << player
     ts = Time.now.strftime('%H:%M:%S')
     puts "#{ts}  [translate] Auto-translation enabled for #{player} (#{locale} <-> #{OUR_LOCALE})"
+  end
+
+  # Relay the EN translation to every connected player whose locale differs
+  # from the speaker's, each in their OWN locale. One batched Lua command:
+  # the Ruby side precomputes the EN->X translation for each distinct locale
+  # in the live roster, then Lua dispatches per player:
+  #   t = {['en']="...",['pt']="..."}; for _, p in pairs(game.connected_players)
+  #   do local x = t[p.locale]; if x then p.print("[translate] "..x) end end
+  # Relay the EN translation to every connected player whose locale differs
+  # from the speaker's, each in their OWN locale. One batched Lua command:
+  # the Ruby side precomputes the EN->X translation for each KNOWN locale
+  # (player_db — persisted players.json + the startup roster dump, no live
+  # RCON), then Lua dispatches per player:
+  #   t = {["en"]="...",["pt"]="..."}; for _, p in pairs(game.connected_players)
+  #   do local x = t[p.locale]; if x then p.print("[translate] "..x) end end
+  # The Lua loop IS the connectedness guard — only online players are ever
+  # iterated, so entries for players who aren't connected are harmless.
+  def relay_to_others(speaker_name, speaker_locale, translated)
+    return unless @rcon
+    locales = @player_db.all_locales.values.uniq - [speaker_locale]
+    return if locales.empty?
+
+    entries = locales.filter_map do |loc|
+      text = localize(translated, loc)
+      # No useful translation (missing pack → backend returns the EN text
+      # as-is): the target already saw that same text in the broadcast, so
+      # repeat nothing rather than echo it back.
+      next if loc != OUR_LOCALE && text == translated
+      %([#{loc.inspect}]="#{lua_quote(text)}")
+    end
+    return if entries.empty?
+
+    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then p.print("["..(p.locale:match("^[^-]+") or p.locale).."] "..n..": "..x, ps) end end end)
+    @rcon.command("/sc #{lua}")
+  rescue StandardError => e
+    warn "[translation] in-game relay failed: #{e.class}: #{e.message}"
+  end
+
+  # The relay text is English; 'en' readers take it as-is, everyone else
+  # gets it translated to their locale. The real backends pass en->en
+  # through unchanged anyway; short-circuiting keeps the mock's prefix off
+  # the en entries.
+  def localize(en_text, locale)
+    locale == OUR_LOCALE ? en_text : @translation_service.from_english(en_text, target_lang: locale)
   end
 
   # Lua string escaping
@@ -281,180 +227,5 @@ class TranslationAgent
       out << ((ch == "\n" || ch == "\r") ? ' ' : ch)
     end
     out
-  end
-end
-
-# ─────────────────────────────────────────────────────────────────
-# Translation Service Backends
-# ─────────────────────────────────────────────────────────────────
-
-class LibreTranslateService
-  def initialize(url, api_key = nil)
-    @url = url
-    @api_key = api_key
-    @cache = {}
-    @mutex = Mutex.new
-  end
-
-  def translate(text, source_lang:, target_lang:)
-    return text if text.nil? || text.strip.empty?
-    return text if source_lang == target_lang && source_lang != 'auto'
-
-    cache_key = "#{source_lang}|#{target_lang}|#{text}"
-    @mutex.synchronize { return @cache[cache_key] if @cache.key?(cache_key) }
-
-    result = do_translate(text, source_lang, target_lang)
-    @mutex.synchronize { @cache[cache_key] = result } if result && result != text
-    result
-  rescue StandardError => e
-    warn "[translation] LibreTranslate error: #{e.class}: #{e.message}"
-    text
-  end
-
-  def to_english(text, source_lang:)
-    translate(text, source_lang: normalize_locale(source_lang), target_lang: 'en')
-  end
-
-  def from_english(text, target_lang:)
-    translate(text, source_lang: 'en', target_lang: normalize_locale(target_lang))
-  end
-
-  def needed?(player_locale, our_locale)
-    normalize_locale(player_locale) != normalize_locale(our_locale)
-  end
-
-  def clear_cache!
-    @mutex.synchronize { @cache.clear }
-  end
-
-  private
-
-  def do_translate(text, source_lang, target_lang)
-    uri = URI(@url)
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = (uri.scheme == 'https')
-    http.read_timeout = 10
-    http.open_timeout = 5
-
-    body = {q: text, source: source_lang, target: target_lang, format: 'text'}
-    body[:api_key] = @api_key if @api_key
-
-    req = Net::HTTP::Post.new(uri)
-    req['Content-Type'] = 'application/json'
-    req.body = body.to_json
-
-    response = http.request(req)
-    return text unless response.is_a?(Net::HTTPSuccess)
-
-    parsed = JSON.parse(response.body)
-    parsed['translatedText'] || text
-  rescue JSON::ParserError
-    text
-  end
-
-  def normalize_locale(locale)
-    return 'auto' if locale == 'auto'
-    locale.split('-').first&.downcase || 'en'
-  end
-end
-
-class BergamotTranslationService
-  def initialize(url)
-    @url = url.sub(%r{/+$}, '') + '/translate'
-    @cache = {}
-    @mutex = Mutex.new
-  end
-
-  def translate(text, source_lang:, target_lang:)
-    return text if text.nil? || text.strip.empty?
-    return text if source_lang == target_lang && source_lang != 'auto'
-
-    cache_key = "#{source_lang}|#{target_lang}|#{text}"
-    @mutex.synchronize { return @cache[cache_key] if @cache.key?(cache_key) }
-
-    result = do_translate(text, source_lang, target_lang)
-    @mutex.synchronize { @cache[cache_key] = result } if result && result != text
-    result
-  rescue StandardError => e
-    warn "[translation] Bergamot error: #{e.class}: #{e.message}"
-    text
-  end
-
-  def to_english(text, source_lang:)
-    translate(text, source_lang: normalize_locale(source_lang), target_lang: 'en')
-  end
-
-  def from_english(text, target_lang:)
-    translate(text, source_lang: 'en', target_lang: normalize_locale(target_lang))
-  end
-
-  def needed?(player_locale, our_locale)
-    normalize_locale(player_locale) != normalize_locale(our_locale)
-  end
-
-  def clear_cache!
-    @mutex.synchronize { @cache.clear }
-  end
-
-  private
-
-  def do_translate(text, source_lang, target_lang)
-    # Bergamot API: POST /translate with JSON {q, source, target}
-    # Returns {translatedText: "..."}
-    uri = URI(@url)
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.read_timeout = 30  # Local model may be slower
-    http.open_timeout = 10
-
-    body = {q: text, source: source_lang, target: target_lang}
-
-    req = Net::HTTP::Post.new(uri)
-    req['Content-Type'] = 'application/json'
-    req.body = body.to_json
-
-    response = http.request(req)
-    return text unless response.is_a?(Net::HTTPSuccess)
-
-    parsed = JSON.parse(response.body)
-    parsed['translatedText'] || text
-  rescue JSON::ParserError
-    text
-  end
-
-  def normalize_locale(locale)
-    return 'auto' if locale == 'auto'
-    locale.split('-').first&.downcase || 'en'
-  end
-end
-
-class MockTranslationService
-  def initialize
-    @cache = {}
-    @mutex = Mutex.new
-  end
-
-  def translate(text, source_lang:, target_lang:)
-    return text if text.nil? || text.strip.empty?
-    cache_key = "#{source_lang}|#{target_lang}|#{text}"
-    @mutex.synchronize { return @cache[cache_key] if @cache.key?(cache_key) }
-    result = "[#{target_lang}] #{text}"
-    @mutex.synchronize { @cache[cache_key] = result }
-    result
-  end
-
-  def to_english(text, source_lang:)
-    translate(text, source_lang: source_lang, target_lang: 'en')
-  end
-
-  def from_english(text, target_lang:)
-    translate(text, source_lang: 'en', target_lang: target_lang)
-  end
-
-  def needed?(player_locale, our_locale)
-    player_locale != our_locale
-  end
-
-  def clear_cache!
-    @mutex.synchronize { @cache.clear }
   end
 end

@@ -85,8 +85,8 @@ def run_sniffer(opts)
   # FakePcapWriter injected after construction. The one exception is Test 11
   # (opts[:autoname]), which asserts the auto-naming itself and runs inside
   # its own tmpdir chdir.
-  sniffer = FactorioSniffer.new(opts)
-  sniffer.instance_variable_set(:@pcap_writer, FakePcapWriter.new) unless opts[:autoname] || opts[:pcap_writer]
+  kw = (opts[:autoname] || opts[:pcap_writer]) ? {} : { pcap_writer: FakePcapWriter.new }
+  sniffer = FactorioSniffer.new(opts, **kw)
   begin
     yield sniffer
   ensure
@@ -99,9 +99,11 @@ end
 # in-memory FakePcapWriter — no test ever touches the repo's captures/ or
 # spawns a real flusher thread.
 def make_test_sniffer(opts = {})
-  FactorioSniffer.new(opts.merge(pcap_writer: FakePcapWriter.new))
+  # pcap_writer is a KEYWORD param of new — inside the opts hash it is
+  # inert, and swapping the ivar post-hoc orphans the real writer (banner +
+  # flusher thread + real files). Pass it as the keyword it is.
+  FactorioSniffer.new(opts, pcap_writer: FakePcapWriter.new)
 end
-
 $pass = 0
 $fail = 0
 def check(cond, label)
@@ -307,8 +309,8 @@ attrs = RconClient.parse_player_attrs(
   "[{\"a\":true,\"c\":true,\"i\":1,\"k\":722,\"n\":\"morganc\",\"o\":7142576},{\"a\":false,\"c\":false,\"i\":2,\"k\":0,\"n\":\"bob\",\"o\":500}]\n"
 )
 check(attrs == [
-  { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722 },
-  { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0 },
+  { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722, locale: nil },
+  { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0, locale: nil },
 ], 'parse_player_attrs + afk_time')
 check(RconClient.parse_player_attrs('garbage').nil?, 'non-JSON payload → nil')
 
@@ -334,8 +336,9 @@ end
 # the packet stream, no periodic refresh)
 sr = make_test_sniffer(server: true, server_ip: SERVER_IP)
 fake = Object.new
-fake.define_singleton_method(:connected_players) do
-  [{ index: 1, name: 'morganc' }, { index: 2, name: 'bob' }]
+fake.define_singleton_method(:player_attributes) do
+  [{ index: 1, name: 'morganc', connected: true, admin: true, online_time: 0, afk_time: 0, locale: nil },
+   { index: 2, name: 'bob', connected: true, admin: true, online_time: 0, afk_time: 0, locale: nil }]
 end
 sr.instance_variable_set(:@rcon, fake)
 out = StringIO.new
@@ -349,7 +352,7 @@ check(sr.instance_variable_get(:@player_db).lookup(1) == 'morganc' &&
 
 # empty server / failed query: no crash, no output
 fake2 = Object.new
-fake2.define_singleton_method(:connected_players) { nil }
+fake2.define_singleton_method(:player_attributes) { nil }
 sr2 = make_test_sniffer(server: true, server_ip: SERVER_IP)
 sr2.instance_variable_set(:@rcon, fake2)
 out = StringIO.new
@@ -362,16 +365,17 @@ check(out.string.empty?, 'failed roster query is silent')
 # after Ctrl-C reload (snapshot carries state.roster_loaded over)
 queries = 0
 fake3 = Object.new
-fake3.define_singleton_method(:connected_players) do
+fake3.define_singleton_method(:player_attributes) do
   queries += 1
-  [{ index: 1, name: 'morganc' }]
+  [{ index: 1, name: 'morganc', connected: true, admin: true, online_time: 0, afk_time: 0, locale: nil }]
 end
 sr3 = make_test_sniffer(server: true, server_ip: SERVER_IP)
 sr3.instance_variable_set(:@rcon, fake3)
 sr3.send(:load_roster)              # startup query
+sr3.send(:load_player_attrs)        # attrs seed — must REUSE the roster dump, not re-query
 sr3.handle_interrupt!               # in-place reload (loads libs)
 sr3.send(:load_roster)              # run() resumes → re-seeds
-check(queries == 2, 'roster re-queried after reload (re-seed heals drift)')
+check(queries == 2, 'roster re-queried after reload; attrs seed reuses the same dump (no 3rd query)')
 
 # ── Test 7: capture filters (keepalives, directions, full-capture) ────
 puts "\nTest 7: capture filters"
@@ -548,12 +552,12 @@ Dir.mktmpdir do |dir|
   path = File.join(dir, 'players.json')
   db2 = PlayerDatabase.new(path)
   db2.add(1, 'alice')
-  db2.instance_variable_get(:@players)[2] = "sévérin".b   # legacy poison
+  db2.instance_variable_get(:@players)[2] = { name: "sévérin".b, locale: nil }   # legacy poison
   db2.save
   raw = File.read(path)
   parsed = JSON.parse(raw)
-  check(parsed['2'] == 'sévérin', 'legacy binary entry sanitized at save (no GeneratorError)')
-  check(parsed['1'] == 'alice', 'clean entry survives')
+  check(parsed['2']['name'] == 'sévérin', 'legacy binary entry sanitized at save (no GeneratorError)')
+  check(parsed['1']['name'] == 'alice', 'clean entry survives')
 end
 
 # ── Heartbeat timeout: crashed/offline players are dropped ──

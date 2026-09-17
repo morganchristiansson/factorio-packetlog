@@ -40,9 +40,9 @@ class RconClient
   # ~50 players.
   PLAYER_ATTRS_FILENAME = 'factorio-sniffer-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
+    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
-    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end rcon.print(helpers.table_to_json(t))'
+    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -129,10 +129,11 @@ class RconClient
     self.class.parse_roster(json_query(ROSTER_FILENAME, ROSTER_WRITE_LUA, ROSTER_PRINT_LUA))
   end
 
-  # [{index:, name:, connected:, admin:, online_time:, afk_time:}] for ALL
-  # known players (incl. offline), or nil if the query failed. Same
-  # write_file-first path as the roster (attrs exceed 4KB beyond ~50
-  # players).
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}] for
+  # the CONNECTED players, or nil if the query failed. Same write_file-first
+  # path as the roster (attrs exceed 4KB beyond ~50 players). Connected-only:
+  # every consumer filters on :connected or targets connected players, and a
+  # game.players dump keeps growing with every player who ever joined.
   def player_attributes
     self.class.parse_player_attrs(json_query(PLAYER_ATTRS_FILENAME, PLAYER_ATTRS_WRITE_LUA, PLAYER_ATTRS_PRINT_LUA))
   end
@@ -203,6 +204,7 @@ class RconClient
   # model passes full commands like "/players" or "/sc rcon.print(...)".
   # Reconnects once on failure, same as #execute.
   def command(cmd)
+    log_rcon_command(cmd)
     body = nil
     @mutex.synchronize { body = @client.execute(cmd).body.to_s }
     body
@@ -240,6 +242,7 @@ class RconClient
   end
 
   def execute(cmd)
+    log_rcon_command("/sc #{cmd}")
     body = nil
     @mutex.synchronize { body = @client.execute("/sc #{cmd}").body.to_s }
     body
@@ -252,5 +255,13 @@ class RconClient
       warn "RCON execute failed: #{e2.class}: #{e2.message}"
       ''
     end
+  end
+
+  # Every outgoing RCON command (relay Lua, locale queries, hivemind replies,
+  # tag writes, …) is echoed to the operator console so there is never a
+  # question what ran. Response bodies still go to the caller as before.
+  def log_rcon_command(cmd)
+    ts = Time.now.strftime('%H:%M:%S')
+    puts "#{ts}  [rcon]> #{cmd}"
   end
 end

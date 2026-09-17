@@ -35,14 +35,8 @@ class PcapWriter
     end
     @file = open_file(@path)
     write_global_header
-    # Buffered writes flushed by a BACKGROUND thread: the capture loop only
-    # appends to the buffer (fast, non-blocking). Flushing on the capture
-    # thread stalls it on disk I/O (the workspace is a Docker bind mount),
-    # which overflowed the kernel capture buffer during map downloads.
-    @mutex = Mutex.new
-    @buf = +''.b
-    @closed = false
-    @flush_thread = Thread.new { flush_loop }
+    # Ruby IO (or GzipWriter) and the kernel buffer writes. No per-record
+    # flush/fsync; close on rotation/shutdown finalizes the buffered stream.
   end
 
   def write_packet(ip_payload)
@@ -56,19 +50,11 @@ class PcapWriter
   end
 
   def close
-    @closed = true
-    @flush_thread.join(2)
-    @mutex.synchronize do
-      @file.write(@buf) unless @buf.empty?
-      @buf = +''.b
-      @file.close if @file
-      @file = nil
-      # Timestamped mode opens a new file per run — don't leave a
-      # header-only (zero-packet) file behind when nothing was captured.
-      if @timestamped && File.exist?(@path) && File.size(@path) <= 24
-        File.delete(@path)
-      end
-    end
+    return unless @file
+    @file.close
+    @file = nil
+    # Logical bytes also identify an empty gzip stream correctly.
+    File.delete(@path) if @timestamped && @bytes_written == 24 && File.exist?(@path)
   end
 
   private
@@ -82,11 +68,10 @@ class PcapWriter
     ts_sec = ts.to_i
     ts_usec = ((ts.to_f - ts_sec) * 1_000_000).to_i
     hdr = [ts_sec, ts_usec, data.bytesize, data.bytesize].pack('VVVV')
-    @mutex.synchronize do
-      return if @closed || @file.nil?
-      rotate_if_due
-      @buf << hdr << data.b
-    end
+    return unless @file
+    rotate_if_due
+    @file.write(hdr + data.b)
+    @bytes_written += hdr.bytesize + data.bytesize
   end
 
   # If @path already holds a capture (previous run / restart), rename it
@@ -109,18 +94,15 @@ class PcapWriter
   # Hourly and/or size-based rotation + retention: close the finished
   # file and open a fresh timestamped one (timestamped mode — nothing to
   # rename; the finished file's name was final from the start), then prune
-  # beyond the retention bounds. Runs under the write mutex (once per hour
-  # / per size threshold — a few ms of disk I/O on the capture thread is
-  # negligible off-burst).
+  # beyond the retention bounds. Single owner: the capture thread.
+  # Size rotation counts uncompressed bytes, including buffered data; for
+  # gzip this is conservative. Retention still counts actual file sizes.
   def rotate_if_due
     due = @keep_hours && (Time.now - @file_start) >= 3600
     if @max_size_bytes
-      sz = (File.size(@path) rescue 0) + @buf.bytesize
-      due = true if sz >= @max_size_bytes
+      due = true if @bytes_written >= @max_size_bytes
     end
     return unless due
-    @file.write(@buf) unless @buf.empty?
-    @buf = +''.b
     @file.close
     @file = nil
     if @timestamped
@@ -138,6 +120,7 @@ class PcapWriter
   # Pcap global header on every freshly opened file (init AND rotation —
   # the old code forgot the rotation case, leaving headerless files).
   def write_global_header
+    @bytes_written = 24
     # Written directly (avoids pack issues)
     @file.write([0xd4, 0xc3, 0xb2, 0xa1].pack('C4'))  # magic LE
     @file.write([2, 4].pack('v2'))  # version
@@ -196,19 +179,6 @@ class PcapWriter
     Dir.glob(File.join(File.dirname(@base_path), "#{stem}-*#{ext}")) - [@path]
   end
 
-  def flush_loop
-    until @closed
-      sleep 0.2
-      @mutex.synchronize do
-        next if @buf.empty? || @file.nil?
-        chunk = @buf
-        @buf = +''.b
-        @file.write(chunk)
-      end
-    end
-  rescue IOError
-    # file closed
-  end
 end
 
 # PCAP Reader

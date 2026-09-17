@@ -20,6 +20,7 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1.define_singleton_method(:greet_join) { |*args, **kwargs| }
       a1.on_chat('alice', 'goals: build the bus first')
       a1.on_player_event(:joined, 'bob')
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')

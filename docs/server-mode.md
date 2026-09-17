@@ -4,6 +4,25 @@ Operational notes for running the sniffer on the game server host (the
 current setup — dedicated server + RCON). Protocol internals live in
 `docs/protocol-notes.md`; player mapping in `docs/player-mapping.md`.
 
+## Capture-loop work
+
+Decoding stays on the capture thread. Hivemind and translation receive events
+through independent bounded worker queues (see `ai-agent.md`). Original chat
+prints before either agent runs.
+
+Heartbeat timeouts are checked after incoming packet processing, at most once
+per monotonic second, only in live server mode. No watchdog thread: complete
+traffic silence delays timeout announcements until another packet arrives.
+
+Pcap records go directly to buffered Ruby IO/GzipWriter; no custom buffer,
+flush thread, per-record flush, or fsync. Close/rotation finalizes the stream.
+Live readers may see buffered batches. Rotation counts uncompressed bytes
+(conservative for gzip); retention counts actual disk sizes. Slow storage
+can still block capture—this is not a lossless-capture guarantee.
+
+**Restart fully when installing this threading change.** Existing objects
+retain the old writer/watchdog state across hot reloads.
+
 ## Server Mode (`--server`)
 
 Run the sniffer ON the game server host.

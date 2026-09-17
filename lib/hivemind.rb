@@ -17,6 +17,7 @@ require_relative 'hivemind_persistence'
 require_relative 'hivemind_compaction'
 require_relative 'hivemind_followups'
 require_relative 'log_tail'
+require_relative 'agent_events'
 
 # HiveMind agent — an LLM persona that lives inside the Factorio sniffer.
 #
@@ -36,6 +37,7 @@ require_relative 'log_tail'
 # lookups) can be added the same way as HivemindReply — they get access to
 # the rcon client / the sniffer's item/player DBs via the tool constructor.
 class HiveMindAgent
+  include AgentEvents
   include HiveMindPrompts     # DEFAULT_SOUL / SYSTEM_PROMPT / COMPACTION_PROMPT
   include HiveMindPersistence  # session file: load_session / persist!
   include HiveMindCompaction   # long-term memory distillation (/compact)
@@ -241,13 +243,10 @@ class HiveMindAgent
     @last_log_event = 0.0       # last log-event turn time (LOG_EVENT_INTERVAL rate limit)
     @log_watcher = nil          # log-tail thread (survives hot reloads; revived if dead)
     @mutex = Mutex.new
-    # Rate-limit state lives on ITS OWN mutex: the limiters run on the
-    # PACKET THREAD (handle/greet_join), while @mutex is held across whole
-    # LLM completions incl. retry sleeps (minutes during an outage). One
-    # slow provider call must never stall packet processing.
+    # Separate rate-limit state from completions and log-watcher callbacks.
     @rate_mutex = Mutex.new
     # Serializes session-file writes across persist!/persist_queue!
-    # (worker threads AND the packet thread share one .tmp path).
+    # (event worker, scheduler and log watcher share one .tmp path).
     @persist_mutex = Mutex.new
     @chat = nil
     # Pending scheduled follow-ups (schedule_followup tool) + their mutex
@@ -355,6 +354,7 @@ class HiveMindAgent
     hook_chat_observers if @chat
     load_session if @session_path
     start_scheduler
+    initialize_events
   end
 
   # ── Console logging / LLM-run observation ─────────────────────────
@@ -461,12 +461,12 @@ class HiveMindAgent
   # outputs, /shout echoes, etc.), and in-game chat can never begin with
   # `/`. They're excluded entirely: never queued into the console context
   # and never trigger the agent.
-  def on_chat(player, message)
+  def on_chat(player, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
     return if message.start_with?('/')
     append_history(player, message)
-    handle(player, message)
+    handle(player, message, now: now)
   end
 
   # Feed a join/leave event (player came online / went offline). Appended
@@ -474,7 +474,7 @@ class HiveMindAgent
   # Joins include the player's total play time from RCON (online_time,
   # ticks — formatted as days/hours like the context snapshot) and get an
   # LLM-generated personal greeting (see greet_join).
-  def on_player_event(kind, player)
+  def on_player_event(kind, player, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     name = clean_text(player)
     return if name.empty?
     case kind
@@ -487,7 +487,7 @@ class HiveMindAgent
       # event reaches the model only once (via this enqueue).
       line = played ? "#{name} joined the game (#{played} played)" : "#{name} joined the game"
       append_history(nil, line)
-      greet_join(name, line, attrs)
+      greet_join(name, line, attrs, now: now)
     when :left
       append_history(nil, "#{name} left the game")
     when :timeout
@@ -500,38 +500,32 @@ class HiveMindAgent
 
   # Personal, LLM-generated welcome for a joining player, informed by the
   # console context (recent chat, who's online, their play history). Runs
-  # off the packet loop (seconds of latency); has its OWN rate limit so a
-  # join burst can't block chat questions. Records the sent greeting.
+  # on the event worker with its own arrival-time rate limit.
+  # A greeting can delay subsequent agent events, never packet decoding.
   # `line` is the exact join console line (greet_join's exclude must match
   # it so the event reaches the model only via the instruction), `attrs`
   # the player's attribute snapshot (play time + admin) or nil. The
   # player's long-term memory is injected into the greeting prompt (once
   # per session) so the welcome is informed by who they are.
-  def greet_join(name, line, attrs = nil)
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    # Packet thread — rate_mutex only, never @mutex (see initialize).
+  def greet_join(name, line, attrs = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     rate_mutex.synchronize do
       return if now - @last_greet < GREET_INTERVAL
       @last_greet = now
     end
-    Thread.new do
-      begin
-        prompt = turn_prompt(
-          "#{name} just joined the game. Greet them personally and briefly " \
-          "(one or two short sentences, under 150 characters), informed by " \
-          "what is happening right now: the recent console lines, who else " \
-          "is online, and their play history" \
-          "#{join_facts(attrs)}. " \
-          'Call the reply tool with your greeting.',
-          exclude: [nil, line],
-          player: name
-        )
-        reply = complete(prompt)
-        send_reply(reply)
-      rescue StandardError => e
-        log_error('greeting error', e)
-      end
-    end
+    prompt = turn_prompt(
+      "#{name} just joined the game. Greet them personally and briefly " \
+      "(one or two short sentences, under 150 characters), informed by " \
+      "what is happening right now: the recent console lines, who else " \
+      "is online, and their play history" \
+      "#{join_facts(attrs)}. " \
+      'Call the reply tool with your greeting.',
+      exclude: [nil, line],
+      player: name
+    )
+    reply = complete(prompt)
+    send_reply(reply)
+  rescue StandardError => e
+    log_error('greeting error', e)
   end
 
   # ── Game server log watcher ────────────────────────────────────
@@ -576,7 +570,7 @@ class HiveMindAgent
       @last_log_event = now
     end
     return run_log_event_turn(text) unless async
-    Thread.new { run_log_event_turn(text) }
+    enqueue(:run_log_event_turn, text)
     nil
   end
 
@@ -974,21 +968,14 @@ class HiveMindAgent
     TRIGGERS.any? { |t| msg.match?(/\b#{Regexp.escape(t)}\b/i) }
   end
 
-  def handle(player, message)
+  def handle(player, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
 
     msg = message.to_s.strip
     return false if msg.empty?
     return false unless trigger_match?(msg)
 
-    # Per-player rate limiter: only the SAME player is throttled within
-    # MIN_INTERVAL (spam collapse). Different players are never dropped —
-    # their threads queue on the completion path, so each gets a sequential
-    # turn whose prompt includes the previous Q&A (the shared chat object).
-    # Runs on the PACKET THREAD: rate_mutex only — @mutex is held across
-    # whole LLM completions (complete) and must never back-pressure packet
-    # processing (regression: a hung provider call used to block every new
-    # chat line here for minutes).
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    # Rate-limit by event arrival, not execution time: a slow completion
+    # must not turn a queued spam burst into separately accepted triggers.
     rate_mutex.synchronize do
       last = @last_ask_at[player]
       return false if last && now - last < MIN_INTERVAL
@@ -997,14 +984,12 @@ class HiveMindAgent
 
     @last_trigger = [player, msg]
 
-    # LLM calls run off the sniffer's packet loop (seconds of latency).
-    Thread.new do
-      begin
-        reply = ask_llm(player, msg)
-        send_reply(reply)
-      rescue StandardError => e
-        log_error("error responding to #{player}", e)
-      end
+    # Already on the agent's FIFO worker; never spawn a thread per trigger.
+    begin
+      reply = ask_llm(player, msg)
+      send_reply(reply)
+    rescue StandardError => e
+      log_error("error responding to #{player}", e)
     end
     true
   end

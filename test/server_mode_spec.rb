@@ -425,6 +425,7 @@ fake_agent_class = Class.new do
   define_method(:initialize) { @events = [] }
   define_method(:on_player_event) { |kind, name| @events << [kind, name] }
   define_method(:on_chat) { |_p, _m| }
+  define_method(:enqueue) { |method, *args, **_| public_send(method, *args) }
 end
 
 # Server mode: joins are detected at the msg4 + first-C→S-heartbeat confirm
@@ -487,6 +488,7 @@ fake_agent_class2 = Class.new do
   define_method(:on_chat) { |_p, m| @msgs << m }
   define_method(:on_player_event) { |_k, _n| }
   attr_reader :msgs
+  define_method(:enqueue) { |method, *args, **_| public_send(method, *args) }
 end
 _, sn = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
   agent = fake_agent_class2.new
@@ -577,6 +579,7 @@ check(s_wd.instance_variable_get(:@timeout_watchdog).nil?,
       'no watchdog thread in tests (no :interface)')
 agent = Object.new
 agent.define_singleton_method(:on_player_event) { |kind, name| wd_events << [kind, name] }
+agent.define_singleton_method(:enqueue) { |method, *args, **_| public_send(method, *args) }
 s_wd.instance_variable_set(:@agent, agent)
 s_wd.instance_variable_set(:@show_players, [])
 s_wd.instance_variable_set(:@debug, false)

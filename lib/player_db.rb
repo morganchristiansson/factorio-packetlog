@@ -14,6 +14,7 @@ class PlayerDatabase
 
   def initialize(path = nil)
     @path = path
+    @save_mutex = Mutex.new
     @players = {}  # id -> {name:, locale:}
     @id_by_name = {}  # name -> id
     load if @path && File.exist?(@path)
@@ -95,19 +96,21 @@ class PlayerDatabase
 
   # All known locales (for debugging)
   def all_locales
-    @players.transform_values { |p| p[:locale] }.compact
+    @players.dup.transform_values { |p| p[:locale] }.compact
   end
 
   def save
     return unless @path
     # Defensive sanitize: never let a legacy binary-flagged name (from
     # reloaded state) poison the write.
-    safe = @players.transform_values { |p| {name: clean(p[:name]), locale: p[:locale]} }
-    # Atomic write (tmp + rename): players.json is now written on every
-    # join, so a crash mid-write must not be able to truncate/corrupt it.
-    tmp = "#{@path}.tmp"
-    File.write(tmp, JSON.pretty_generate(safe))
-    File.rename(tmp, @path)
+    # Capture learns names while the translation worker learns locales.
+    # Serialize snapshot + replacement: both writers share one temp path.
+    @save_mutex.synchronize do
+      safe = @players.dup.transform_values { |p| {name: clean(p[:name]), locale: p[:locale]} }
+      tmp = "#{@path}.tmp"
+      File.write(tmp, JSON.pretty_generate(safe))
+      File.rename(tmp, @path)
+    end
   rescue StandardError => e
     warn "players.json save failed: #{e.class}: #{e.message}"
   end

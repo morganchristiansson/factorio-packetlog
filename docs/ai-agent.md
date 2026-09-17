@@ -18,14 +18,20 @@ and a fresh restart re-seeds it from the current memory files.
 
 ## Threading contract (capture must never wait on the LLM)
 
-`on_chat`/`on_player_event` run on the **packet thread**. LLM completions
-serialize on `@mutex`, which is held across a whole call INCLUDING retry
-sleeps (5/15/30/60s — minutes during an outage). Everything the packet
-thread touches therefore lives on separate locks: rate limiters on
-`@rate_mutex`, console history on `@console_mutex`, and the session-file
-disk write happens outside `@console_mutex` (serialized by `@persist_mutex`
-against `persist!`). Asks and greetings themselves run in background
-threads (`Thread.new` in `handle`/`greet_join`) — never inline. Regression:
+Capture enqueues decoded chat/join/leave events through `AgentEvents`.
+Hivemind and translation each own one FIFO worker and a `SizedQueue` of 100
+pending events. Enqueue never blocks: overflow rejects the newest event with
+a warning. Original chat and player-state updates stay on the capture thread.
+Handlers (including RCON lookups and session persistence) run on the worker;
+Hivemind asks/greetings no longer spawn a thread per trigger. Rate limits use
+monotonic event-arrival time, not execution time. Events arriving during a
+completion wait for their turn before entering Hivemind's console context.
+
+Completions still serialize on `@mutex` with scheduled follow-ups and manual
+compaction. Log-event reaction turns use the event worker too. Queues survive
+ordinary hot reloads; this threading migration requires a full restart.
+Shutdown closes each queue and allows two seconds to drain; unfinished work
+is reported, not persisted. Regression: `test/agent_events_spec.rb` and
 `test_hung_llm_call_does_not_block_packet_thread`.
 
 ## Long-term memory (compaction)

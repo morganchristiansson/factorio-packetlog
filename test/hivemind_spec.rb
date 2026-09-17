@@ -18,6 +18,7 @@ class TestHiveMindAgent < Minitest::Test
   # ── Rolling chat history ──────────────────────────────────────
 
   def test_on_chat_appends_to_history
+    @agent.define_singleton_method(:handle) { |*args, **kwargs| false }
     @agent.on_chat('alice', 'hey hivemind')
     @agent.on_chat('bob', 'nice base')
     history = @agent.instance_variable_get(:@console_queue)
@@ -75,6 +76,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_on_chat_cleans_binary_flagged_player_name
+    @agent.define_singleton_method(:handle) { |*args, **kwargs| false }
     @agent.on_chat("sévérin".b, 'hey hivemind')
     player, _msg = @agent.instance_variable_get(:@console_queue).last
     assert_equal Encoding::UTF_8, player.encoding
@@ -102,6 +104,7 @@ class TestHiveMindAgent < Minitest::Test
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent.define_singleton_method(:handle) { |*args, **kwargs| false }
     agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
     agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
     queue = agent.instance_variable_get(:@console_queue)
@@ -134,6 +137,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_turn_prompt_includes_snapshot_and_console
+    @agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     @agent.on_player_event(:joined, 'alice')
     @agent.on_player_event(:left, 'bob')
     prompt = @agent.send(:turn_prompt, 'INSTRUCTION')
@@ -165,6 +169,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_on_player_event_appends_join_and_leave
+    @agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     @agent.on_player_event(:joined, 'alice')
     @agent.on_player_event(:left, 'bob')
     history = @agent.instance_variable_get(:@console_queue)
@@ -185,7 +190,7 @@ class TestHiveMindAgent < Minitest::Test
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
     agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.define_singleton_method(:complete) { |_p| '' }
+    agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     agent.on_player_event(:joined, 'alice')
     assert_equal [nil, 'alice joined the game (2d3h played)'],
                  agent.instance_variable_get(:@console_queue)[0]
@@ -196,7 +201,7 @@ class TestHiveMindAgent < Minitest::Test
   # is known, so the join line carries no "(... played)" suffix.
   def test_on_player_event_playtime_absent_without_rcon_attrs
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
-    agent.define_singleton_method(:complete) { |_p| '' }
+    agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     agent.on_player_event(:joined, 'bob')
     assert_equal [nil, 'bob joined the game'],
                  agent.instance_variable_get(:@console_queue)[0]
@@ -293,6 +298,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_ask_llm_includes_events
+    @agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     @agent.on_player_event(:joined, 'alice')
     prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'bob', 'hivemind hi') }
     assert_includes prompt, 'alice joined the game'
@@ -457,16 +463,17 @@ class TestHiveMindAgent < Minitest::Test
       mutex.synchronize { gate.pop }
       ''
     end
-    agent.on_chat('alice', 'hivemind hang')
-    sleep 0.3  # let alice's worker thread enter the stuck completion (@mutex held)
+    agent.enqueue(:on_chat, 'alice', 'hivemind hang')
+    sleep 0.01
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    triggered = agent.on_chat('bob', 'hivemind ping')
+    triggered = agent.enqueue(:on_chat, 'bob', 'hivemind ping')
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
     assert triggered, 'another player still triggers while an LLM call hangs'
     assert_operator elapsed, :<, 1.0,
                     'packet-thread on_chat must never queue behind a hung LLM call'
-    2.times { gate << :go }  # release both workers (alice + bob)
-    sleep 0.2
+  ensure
+    2.times { gate << :go }  # release both turns even when an assertion fails
+    agent.close_events
   end
 
 

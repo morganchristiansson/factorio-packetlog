@@ -41,7 +41,7 @@ class FactorioSniffer
   # each file (redefining classes); `require` would only load once.
   # Constant-redefinition warnings are expected and silenced during load.
   RELOADABLE_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail agent_events memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_sniffer
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -108,8 +108,7 @@ class FactorioSniffer
     # The live roster + liveness live entirely in @attrs (PlayerAttrs):
     # "online" == record with :connected, whose :hb field drives the timeout
     # watchdog. One structure, one lock — no parallel copies to drift.
-    @timeout_watchdog = nil
-    ensure_timeout_watchdog
+    @last_timeout_check = 0.0
     # src_ip → [name, confirmed]: every player seen connecting (msg 4
     # username), flipped to confirmed once their first C→S heartbeat action
     # binds a game index. Lets liveness touches and clean-quit signals
@@ -290,6 +289,8 @@ class FactorioSniffer
   # Finalize the session: summary, persist player names, close writers.
   # Memory is NOT distilled here — compaction is manual only (`/compact`).
   def finish
+    @agent&.close_events
+    @translation_agent&.close_events
     print_summary
     @player_db.save
     @pcap_writer&.close
@@ -331,9 +332,7 @@ class FactorioSniffer
     select_protocol_version
     @agent&.ensure_followup_scheduler
     @agent&.ensure_log_watcher(ServerDetect.log_path)
-    # Translation agent persists as an ivar; its refresh thread survives reload.
-    # No re-initialization needed unless the thread died.
-    @translation_agent&.enable! if @translation_agent && !@translation_agent.enabled
+    # Agent event queues/workers persist on the same objects across reloads.
   end
 
   private
@@ -533,7 +532,7 @@ class FactorioSniffer
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
         unless @self_name == sa[:username]
-          @agent&.on_player_event(:joined, sa[:username])
+          @agent&.enqueue(:on_player_event, :joined, sa[:username], now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
           puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})" if player_visible?(sa[:username])
         end
       end
@@ -542,7 +541,7 @@ class FactorioSniffer
           # S→C broadcast form (client mode): names the departed peer.
           pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
           @attrs.disconnect(pname, @game_tick) if pname
-          @agent&.on_player_event(:left, pname) if pname
+          @agent&.enqueue(:on_player_event, :left, pname) if pname
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
         else
@@ -599,10 +598,10 @@ class FactorioSniffer
           # analysis (NewPeerInfo/PeerDisconnect broadcasts are dropped),
           # so joins are detected here and leaves via the final
           # heartbeat's PeerDisconnect sync action.
-          @agent&.on_player_event(:joined, name)
+          @agent&.enqueue(:on_player_event, :joined, name, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
           # One targeted RCON query to learn the joiner's locale (rare event;
           # rides the same heartbeat-confirm that bound their game index).
-          @translation_agent&.note_joined(idx + 1, name)
+          @translation_agent&.enqueue(:note_joined, idx + 1, name)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
         end
@@ -644,6 +643,9 @@ class FactorioSniffer
         log_action(ts, act, hdr[:msg_type] == 7, ghost: @ghost_mode)
       end
     end
+  ensure
+    # Check AFTER this packet refreshes liveness, including sender-index binding.
+    check_timeouts_if_due
   end
 
   # Build a minimal Ethernet+IP+UDP packet for pcap storage.
@@ -925,9 +927,10 @@ class FactorioSniffer
       if data
         msg = FactorioProtocol.decode_chat(data)
         if msg
-          @agent&.on_chat(pname, msg)
-          @translation_agent&.on_chat(act, msg)
           puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
+          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          @agent&.enqueue(:on_chat, pname, msg, now: now)
+          @translation_agent&.enqueue(:on_chat, { game_player: act[:game_player] }, msg, now: now)
         end
       end
       return
@@ -1221,7 +1224,7 @@ class FactorioSniffer
     name = entry && entry[0]
     return unless name
     @attrs.disconnect(name, @game_tick)
-    @agent&.on_player_event(:left, name)
+    @agent&.enqueue(:on_player_event, :left, name)
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} left the game" if player_visible?(name)
   end
@@ -1266,28 +1269,21 @@ class FactorioSniffer
     # Refreshed since the scan → still alive.
     return unless @attrs.still_stale?(name, HEARTBEAT_TIMEOUT)
     @attrs.disconnect(name, @game_tick)
-    @agent&.on_player_event(:timeout, name)
+    @agent&.enqueue(:on_player_event, :timeout, name)
     ts_str = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} timed out (no heartbeat for #{idle.round}s) — likely crashed or disconnected; may re-join" if player_visible?(name)
   end
 
-  # One watchdog thread for the process: started on construction in live
-  # SERVER mode; stored in state so a hot reload (threads keep running
-  # across `load`) doesn't spawn a duplicate. The thread calls this object's
-  # method, which after a reload resolves to the NEW class definition while
-  # operating on the SAME shared state objects (@attrs records etc.).
-  def ensure_timeout_watchdog
+  # ponytail: total silence delays timeout announcements until the next packet;
+  # restore a timer only if detecting silence independently becomes important.
+  def check_timeouts_if_due
     return unless @options[:server] && @options[:interface] && !@options[:pcap]
-    return if @timeout_watchdog&.alive?
-    @timeout_watchdog = Thread.new do
-      Thread.current.name = 'heartbeat-watchdog'
-      loop do
-        sleep 1.0
-        check_heartbeat_timeouts
-      rescue StandardError => e
-        warn "#{Time.now.strftime('%H:%M:%S')}  heartbeat watchdog error: #{e.class}: #{e.message}"
-      end
-    end
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    return if now - @last_timeout_check < 1.0
+    @last_timeout_check = now
+    check_heartbeat_timeouts
+  rescue StandardError => e
+    warn "heartbeat timeout check failed: #{e.class}: #{e.message}"
   end
 
   # Reassemble a chat message split across input-action segments. The

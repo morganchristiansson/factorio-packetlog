@@ -14,9 +14,12 @@
 # - Supports multiple backends: LibreTranslate API, Bergamot (local), mock
 # - HiveMind outgoing replies are NOT auto-translated (HiveMind handles its own language)
 
+require 'set'
 require_relative 'rcon_client'
+require_relative 'agent_events'
 
 class TranslationAgent
+  include AgentEvents
   # Minimum interval between translations for the same player (anti-spam)
   TRANSLATE_COOLDOWN = 2.0
 
@@ -45,6 +48,7 @@ class TranslationAgent
 
     # Track which players we've announced translations for (avoid spam)
     @announced_players = Set.new
+    initialize_events
   end
 
   # Called by sniffer for each incoming chat message
@@ -52,7 +56,7 @@ class TranslationAgent
   # message: decoded chat text
   # Returns: [should_continue, translated_text] where should_continue=true means
   # the message should also be processed by other handlers (e.g., HiveMind)
-  def on_chat(act, message)
+  def on_chat(act, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     return [true, nil] unless @enabled
     return [true, nil] if message.nil? || message.strip.empty?
     return [true, nil] if message.start_with?('/')  # Commands not translated
@@ -74,7 +78,7 @@ class TranslationAgent
 
     # Rate limit per player (anti-spam: each message costs one argos run per
     # target locale).
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    # Arrival time preserves spam limits even when translations take seconds.
     return [true, nil] if @last_translate[player] && (now - @last_translate[player]) < TRANSLATE_COOLDOWN
     @last_translate[player] = now
 
@@ -121,7 +125,7 @@ class TranslationAgent
     lua = %(do local p = game.players["#{escaped}"] rcon.print(p and p.locale or "nil") end)
     locale = @rcon.command("/sc #{lua}").strip
     if locale && !locale.empty? && locale != 'nil' && locale != 'false'
-      @player_db.set_locale_by_id(game_index, locale)
+      @player_db.set_locale_by_id(game_index, locale) if @player_db.lookup(game_index) == name
     end
     locale
   rescue StandardError => e
@@ -140,6 +144,7 @@ class TranslationAgent
 
   # Shutdown
   def shutdown
+    close_events
     disable!
   end
 

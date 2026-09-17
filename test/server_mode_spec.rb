@@ -640,5 +640,32 @@ s_wd.send(:touch_heartbeat, '10.0.0.77')
 s_wd.send(:check_heartbeat_timeouts)
 check(wd_attrs.online_names.include?('ripe'), 'src_ip touch keeps the player alive')
 
+# RCON is authoritative for timeouts: a coffeeowl-style false positive
+# (roster-seeded + idle → no attributable packets) must NOT fire while the
+# game server still reports the player connected.
+wd_rcon_rows = [{ index: 9, name: 'phantom', connected: true, admin: false, online_time: 0, afk_time: 0, locale: nil }]
+wd_rcon = Object.new
+wd_rcon.define_singleton_method(:player_attributes) { wd_rcon_rows }
+s_wd.instance_variable_set(:@rcon, wd_rcon)
+wd_attrs.roster_online('phantom', 9)
+wd_players['phantom'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
+
+# RCON-confirmed-gone player must still fire the timeout (the guard must
+# not swallow real departures).
+wd_rcon_rows << { index: 10, name: 'gone', connected: false, admin: false, online_time: 0, afk_time: 0, locale: nil }
+wd_attrs.roster_online('gone', 10)
+wd_players['gone'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
+wd_events.clear
+$stdout = wd_out
+begin
+  s_wd.send(:check_heartbeat_timeouts)
+ensure
+  $stdout = old_stdout
+end
+check(wd_attrs.online_names.include?('phantom'), 'RCON-connected player survives packet silence (no false timeout)')
+check(wd_events.include?([:timeout, 'gone']), 'RCON-confirmed-gone player still fires the timeout')
+check(!wd_attrs.online_names.include?('gone'), 'RCON-confirmed-gone player removed from roster')
+check(!wd_events.include?([:timeout, 'phantom']), 'no timeout event for the RCON-connected player')
+
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

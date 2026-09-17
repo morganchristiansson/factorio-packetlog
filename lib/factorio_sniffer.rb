@@ -1268,6 +1268,19 @@ class FactorioSniffer
   def timeout_player(name, idle)
     # Refreshed since the scan → still alive.
     return unless @attrs.still_stale?(name, HEARTBEAT_TIMEOUT)
+    # Packets can't prove life for players we can't attribute (roster-seeded
+    # with no learned src_ip, NAT'd, idle: keepalive-only heartbeats carry no
+    # index). Capture silence ≠ gone: confirm with RCON (authoritative) —
+    # never drop a player the game server still reports connected.
+    if @rcon
+      attrs = @rcon.player_attributes
+      return unless attrs # query failed → assume still online, retry next scan
+      row = attrs.find { |a| a[:name] == name }
+      if row && row[:connected]
+        @attrs.touch(name) # game says online → our silence was an attribution blind spot; hb refreshed, re-check ≥60s out
+        return
+      end
+    end
     @attrs.disconnect(name, @game_tick)
     @agent&.enqueue(:on_player_event, :timeout, name)
     ts_str = Time.now.strftime('%H:%M:%S.%L')

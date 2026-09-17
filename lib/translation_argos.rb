@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'set'
+
 # ArgosTranslateService — uses the argos-translate CLI binary (installed on
 # the server under /opt/argos — NOT on PATH). Requires language packs
 # installed (en-ru, ru-en, pt-en, en-pt). The path: keyword exists for tests.
@@ -10,6 +12,7 @@ class ArgosTranslateService
     @path = path
     @cache = {}
     @mutex = Mutex.new
+    @supported_langs = load_installed_langs
   end
 
   def translate(text, source_lang:, target_lang:)
@@ -36,7 +39,12 @@ class ArgosTranslateService
   end
 
   def needed?(player_locale, our_locale)
-    normalize_locale(player_locale) != normalize_locale(our_locale)
+    norm = normalize_locale(player_locale)
+    norm != normalize_locale(our_locale) && supported?(norm)
+  end
+
+  def supported?(locale)
+    @supported_langs.include?(normalize_locale(locale))
   end
 
   def clear_cache!
@@ -59,6 +67,27 @@ class ArgosTranslateService
                       err: :close, &:read)
     return text if $?.exitstatus != 0 || output.nil? || output.strip.empty?
     output.strip
+  end
+
+  # Read argospm list once at init to avoid burning CPU on unsupported locales.
+  def load_installed_langs
+    argospm = File.join(File.dirname(@path), 'argospm')
+    return Set.new unless File.exist?(argospm)
+
+    output = IO.popen([argospm, 'list'], err: :close, &:read)
+    return Set.new if output.nil? || output.strip.empty?
+
+    langs = Set.new
+    output.each_line do |line|
+      if line.strip =~ /^translate-([a-z]+)_([a-z]+)$/
+        langs << $1
+        langs << $2
+      end
+    end
+    langs
+  rescue StandardError => e
+    warn "[translation] argospm list failed: #{e.class}: #{e.message}"
+    Set.new
   end
 
   def normalize_locale(locale)

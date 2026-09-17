@@ -26,11 +26,13 @@ class TranslationAgent
   # Our locale (what we translate TO for incoming, FROM for outgoing)
   OUR_LOCALE = 'en'
 
+  # Only these non-English locales get translated. Others (fr, hu, …) are
+  # treated as English: no translation, no relay from them, but they still
+  # receive EN relay text when a whitelisted speaker talks.
+  WHITELIST = Set.new(%w[pt ru])
+
   # Backend types
-  BACKEND_LIBRETRANSLATE = :libretranslate
-  BACKEND_BERGAMOT = :bergamot
-  BACKEND_MOCK = :mock
-  BACKEND_ARGOS = :argos
+  # Available backends: :libretranslate, :bergamot, :mock, :argos, :google, :hybrid
 
   attr_reader :rcon, :enabled, :player_db, :backend, :translation_service
 
@@ -75,6 +77,7 @@ class TranslationAgent
     # locale CHANGES are ignored by design — packet-level tracking is TODO).
     locale = @player_db.get_locale(player_id)
     return [true, nil] unless locale
+    return [true, nil] unless whitelisted?(locale)
 
     # Rate limit per player (anti-spam: each message costs one argos run per
     # target locale).
@@ -155,15 +158,21 @@ class TranslationAgent
   # others stay out of memory and off the reload path).
   def create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
     case backend
-    when BACKEND_BERGAMOT
+    when :bergamot
       require_relative 'translation_bergamot'
       BergamotTranslationService.new(bergamot_url || 'http://localhost:8080')
-    when BACKEND_MOCK
+    when :mock
       require_relative 'translation_mock'
       MockTranslationService.new
-    when BACKEND_ARGOS
+    when :argos
       require_relative 'translation_argos'
       ArgosTranslateService.new
+    when :google
+      require_relative 'translation_google'
+      GoogleCloudTranslateService.new(api_key)
+    when :hybrid
+      require_relative 'translation_hybrid'
+      HybridTranslationService.new(api_key)
     else
       require_relative 'translation_libre'
       LibreTranslateService.new(libretranslate_url || 'https://libretranslate.de/translate', api_key)
@@ -180,48 +189,46 @@ class TranslationAgent
     puts "#{ts}  [translate] Auto-translation enabled for #{player} (#{locale} <-> #{OUR_LOCALE})"
   end
 
-  # Relay the EN translation to every connected player whose locale differs
-  # from the speaker's, each in their OWN locale. One batched Lua command:
-  # the Ruby side precomputes the EN->X translation for each distinct locale
-  # in the live roster, then Lua dispatches per player:
-  #   t = {['en']="...",['pt']="..."}; for _, p in pairs(game.connected_players)
-  #   do local x = t[p.locale]; if x then p.print("[translate] "..x) end end
-  # Relay the EN translation to every connected player whose locale differs
-  # from the speaker's, each in their OWN locale. One batched Lua command:
-  # the Ruby side precomputes the EN->X translation for each KNOWN locale
-  # (player_db — persisted players.json + the startup roster dump, no live
-  # RCON), then Lua dispatches per player:
+  # Relay the EN translation to English readers and whitelisted locales.
+  # Only EN and whitelisted locales (pt/ru) appear in the Lua table — fr/hu/zh
+  # etc. already saw the original English chat broadcast. One batched Lua:
   #   t = {["en"]="...",["pt"]="..."}; for _, p in pairs(game.connected_players)
-  #   do local x = t[p.locale]; if x then p.print("[translate] "..x) end end
-  # The Lua loop IS the connectedness guard — only online players are ever
-  # iterated, so entries for players who aren't connected are harmless.
+  #   do local x = t[p.locale]; if x then p.print("[pt] name: text", ps) end end
+  # Lua's connected_players loop is the guard — offline players are skipped.
   def relay_to_others(speaker_name, speaker_locale, translated)
     return unless @rcon
-    locales = @player_db.all_locales.values.uniq - [speaker_locale]
+    locales = (@player_db.all_locales.values.uniq - [speaker_locale]).select { |loc|
+      norm = loc.to_s.split('-').first&.downcase
+      norm == OUR_LOCALE || WHITELIST.include?(norm)
+    }
     return if locales.empty?
 
     entries = locales.filter_map do |loc|
       text = localize(translated, loc)
-      # No useful translation (missing pack → backend returns the EN text
-      # as-is): the target already saw that same text in the broadcast, so
-      # repeat nothing rather than echo it back.
+      # A whitelisted locale that returned the EN text unchanged (missing
+      # pack or backend failure) gets skipped — the target already saw it.
       next if loc != OUR_LOCALE && text == translated
       %([#{loc.inspect}]="#{lua_quote(text)}")
     end
     return if entries.empty?
 
-    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then p.print("["..(p.locale:match("^[^-]+") or p.locale).."] "..n..": "..x, ps) end end end)
+    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local sl = "#{lua_quote(speaker_locale)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then local pl = p.locale:match("^[^-]+") or p.locale; local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl); p.print("["..tag.."] "..n..": "..x, ps) end end end)
     @rcon.command("/sc #{lua}")
   rescue StandardError => e
     warn "[translation] in-game relay failed: #{e.class}: #{e.message}"
   end
 
-  # The relay text is English; 'en' readers take it as-is, everyone else
-  # gets it translated to their locale. The real backends pass en->en
-  # through unchanged anyway; short-circuiting keeps the mock's prefix off
-  # the en entries.
+  # The relay text is English; 'en' readers take it as-is, whitelisted
+  # locales get it translated, everyone else gets the raw EN text.
   def localize(en_text, locale)
-    locale == OUR_LOCALE ? en_text : @translation_service.from_english(en_text, target_lang: locale)
+    return en_text if locale == OUR_LOCALE
+    return en_text unless whitelisted?(locale)
+    @translation_service.from_english(en_text, target_lang: locale)
+  end
+
+  def whitelisted?(locale)
+    norm = locale.to_s.split('-').first&.downcase
+    norm == OUR_LOCALE || WHITELIST.include?(norm)
   end
 
   # Lua string escaping

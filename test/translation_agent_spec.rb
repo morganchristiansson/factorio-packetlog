@@ -52,13 +52,29 @@ check(agent.translation_service.instance_variable_get(:@path) == ArgosTranslateS
       'default binary path points at the server install (/opt/argos/bin)')
 check(TranslationAgent.new(rcon: nil, player_db: player_db, backend: :mock).translation_service.is_a?(MockTranslationService),
       'backend :mock wires a MockTranslationService')
+# Google backend wiring (no live key — just instantiate)
+google_agent = TranslationAgent.new(rcon: nil, player_db: player_db, backend: :google, api_key: 'fake-key')
+check(google_agent.translation_service.is_a?(GoogleCloudTranslateService),
+      'backend :google wires a GoogleCloudTranslateService')
+
+# Hybrid backend wiring (argos + google)
+hybrid_agent = TranslationAgent.new(rcon: nil, player_db: player_db, backend: :hybrid, api_key: 'fake-key')
+check(hybrid_agent.translation_service.is_a?(HybridTranslationService),
+      'backend :hybrid wires a HybridTranslationService')
+check(hybrid_agent.translation_service.instance_variable_get(:@argos).is_a?(ArgosTranslateService),
+      'hybrid carries an ArgosTranslateService')
+check(hybrid_agent.translation_service.instance_variable_get(:@google).is_a?(GoogleCloudTranslateService),
+      'hybrid carries a GoogleCloudTranslateService')
 
 # ── Test 3: argos CLI call — argv pass-through, no shell injection ───
 Dir.mktmpdir do |dir|
   script = File.join(dir, 'fake-argos')
+  argospm = File.join(dir, 'argospm')
   log = File.join(dir, 'args.log')
   File.write(script, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"#{log}\"\nprintf 'PEREVOD\\n'\n")
   File.chmod(0o755, script)
+  File.write(argospm, "#!/bin/sh\necho 'translate-ru_en'\necho 'translate-en_ru'\n")
+  File.chmod(0o755, argospm)
 
   svc = ArgosTranslateService.new(path: script)
   text = "Zdravstvuyte $(touch injected) `touch backticked`"
@@ -82,6 +98,12 @@ Dir.mktmpdir do |dir|
   noisy_svc = ArgosTranslateService.new(path: noisy)
   check(noisy_svc.to_english('x', source_lang: 'ru') == 'PEREVOD',
         'stderr log lines are not captured as the translation')
+
+  # supported? is seeded from argospm list; ru is present, hu is not
+  check(svc.supported?('ru') && svc.supported?('RU') && svc.supported?('ru-RU'),
+        'ru and its variants are reported as supported')
+  check(!svc.supported?('hu') && !svc.supported?('hu-HU'),
+        'hu is not in fake argospm list → unsupported')
 end
 
 # A missing binary falls back to the original text instead of raising
@@ -114,7 +136,9 @@ check(!ru_cmd.include?('["ru"]='), 'speaker locale excluded — ru readers alrea
 check(ru_cmd.include?('local x = t[p.locale]') && ru_cmd.include?('p.print("["..'),
       'relay dispatches per player on their locale')
 check(ru_cmd.include?('local n = "ivan"'), 'relay carries the speaker name')
-check(ru_cmd.include?('p.locale:match("^[^-]+")'), 'relay tags each print with the short target locale')
+check(ru_cmd.include?('p.locale:match("^[^-]+")'), 'relay tags each print with the short locale')
+check(ru_cmd.include?('local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl)'),
+      'relay tag format is [from->to] based on speaker locale')
 check(ru_cmd.include?('] "..n..": "..x, ps)'), 'relay prints as [tag] name: text')
 check(ru_cmd.include?('local s = game.players[n]') && ru_cmd.include?('s.chat_color or s.color'),
       'relay picks up the speaker chat_color (falling back to color)')
@@ -156,27 +180,41 @@ jdb2.add(6, 'Unknown')
 TranslationAgent.new(rcon: nil_rcon, player_db: jdb2, backend: :mock).note_joined(6, 'Unknown')
 check(jdb2.get_locale(6).nil?, 'unknown locale is not stored')
 
-# ── Test 6: no fallback duplication; NUL bytes scrubbed ──────────────
-# A locale whose pack is missing (backend returns the EN text as-is) must
-# get NO relay line — the target already saw that EN text in the broadcast.
+# ── Test 6: no fallback duplication; whitelist; NUL bytes scrubbed ──────
+# A whitelisted locale whose pack is missing (backend returns the EN text
+# as-is) must get NO relay line — the target already saw that EN text.
 class MissingPackService < MockTranslationService
   def from_english(text, target_lang:)
-    target_lang == 'fr' ? text : super
+    target_lang == 'pt' ? text : super
   end
 end
 fdb = PlayerDatabase.new(nil)
 fdb.add(1, 'ivan', locale: 'ru')
 fdb.add(2, 'bob', locale: 'en')
-fdb.add(3, 'fifi', locale: 'fr')
+fdb.add(3, 'pedro', locale: 'pt')
 fcmds = []
-fr_rcon = Object.new
-fr_rcon.define_singleton_method(:command) { |lua| fcmds << lua; '' }
-fr_agent = TranslationAgent.new(rcon: fr_rcon, player_db: fdb, backend: :mock)
-fr_agent.instance_variable_set(:@translation_service, MissingPackService.new)
-fr_agent.on_chat({ game_player: 1 }, "привет\0\0")
-check(fcmds.first.include?('["en"]=') && !fcmds.first.include?('["fr"]='),
-      'locale with no usable translation is skipped (no duplicated EN text)')
+pt_rcon = Object.new
+pt_rcon.define_singleton_method(:command) { |lua| fcmds << lua; '' }
+pt_agent = TranslationAgent.new(rcon: pt_rcon, player_db: fdb, backend: :mock)
+pt_agent.instance_variable_set(:@translation_service, MissingPackService.new)
+pt_agent.on_chat({ game_player: 1 }, "привет\0\0")
+check(fcmds.first.include?('["en"]=') && !fcmds.first.include?('["pt"]='),
+      'whitelisted locale with unchanged translation is skipped (no duplicated EN text)')
 check(!fcmds.first.include?("\0"), 'NUL bytes scrubbed before the relay Lua is built')
+
+# Non-whitelisted locale (fr) — no relay entry; fr readers already saw the
+# original EN broadcast. Only en (and whitelisted) locales appear in the relay.
+nw_cmds = []
+nw_rcon = Object.new
+nw_rcon.define_singleton_method(:command) { |lua| nw_cmds << lua; '' }
+nw_db = PlayerDatabase.new(nil)
+nw_db.add(1, 'ivan', locale: 'ru')
+nw_db.add(2, 'bob', locale: 'en')
+nw_db.add(3, 'pierre', locale: 'fr')
+nw_agent = TranslationAgent.new(rcon: nw_rcon, player_db: nw_db, backend: :mock)
+nw_agent.on_chat({ game_player: 1 }, 'привет')
+check(nw_cmds.first&.include?('["en"]=') && !nw_cmds.first&.include?('["fr"]='),
+      'non-whitelisted locale gets no relay entry; en readers still do')
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

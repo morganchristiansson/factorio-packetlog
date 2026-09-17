@@ -53,6 +53,19 @@ class TestAgentEvents < Minitest::Test
     translation&.close_events
   end
 
+  def test_legacy_agent_without_queue_self_heals_and_never_crashes_shutdown
+    legacy = Recorder.allocate
+    legacy.instance_variable_set(:@events, [])
+    capture_io do
+      # enqueue lazily creates the worker (old hot-reloaded objects)
+      assert legacy.enqueue(:on_chat, 'late')
+      legacy.close_events
+      assert_equal [['late']], legacy.events
+      # a never-initialized object shuts down cleanly too
+      Recorder.allocate.tap(&:close_events)
+    end
+  end
+
   def test_overflow_is_nonblocking_errors_do_not_kill_worker_and_close_drains
     agent = Recorder.new
     entered, release = Queue.new, Queue.new

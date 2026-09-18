@@ -159,6 +159,10 @@ check(sim_translated == '[en] привет', 'simulate_translation returns the E
 check(cmds.last.include?('for _, p in pairs(game.connected_players)'),
       'simulate_translation relays the in-game print (what /simulate runs)')
 
+rel.simulate_translation('pedro', 'pt-BR', 'olá')
+check(cmds.last.include?('local sl = "pt";') && !cmds.last.include?('local sl = "pt-BR";'),
+      'regional speaker locale is shortened in the relay tag (pt-BR -> pt)')
+
 # ── Test 5: join-time locale capture (one targeted RCON query) ───────
 join_cmds = []
 join_rcon = Object.new

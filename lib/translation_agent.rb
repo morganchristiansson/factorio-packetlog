@@ -212,7 +212,8 @@ class TranslationAgent
     end
     return if entries.empty?
 
-    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local sl = "#{lua_quote(speaker_locale)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then local pl = p.locale:match("^[^-]+") or p.locale; local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl); p.print("["..tag.."] "..n..": "..x, ps) end end end)
+    sl = speaker_locale.to_s.split('-').first || 'en'
+    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local sl = "#{lua_quote(sl)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then local pl = p.locale:match("^[^-]+") or p.locale; local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl); p.print("["..tag.."] "..n..": "..x, ps) end end end)
     @rcon.command("/sc #{lua}")
   rescue StandardError => e
     warn "[translation] in-game relay failed: #{e.class}: #{e.message}"

@@ -219,10 +219,10 @@ class FactorioSniffer
       if @rcon
         begin
           if (google_key = ENV['GOOGLE_TRANSLATE_API_KEY'])
-            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :hybrid, api_key: google_key)
+            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :hybrid, api_key: google_key, roster: -> { @attrs.roster_pairs })
             puts "[translate] Translation agent online — auto-translating foreign player chat (hybrid: argos + google cloud fallback)"
           else
-            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :argos)
+            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :argos, roster: -> { @attrs.roster_pairs })
             puts "[translate] Translation agent online — auto-translating foreign player chat (argos-translate backend)"
           end
         rescue => e
@@ -1070,6 +1070,8 @@ class FactorioSniffer
           /try MODEL [MESSAGE]         one-off dry-run with MODEL — not persisted, not sent to game
           /compact                     distill session into memory, then start fresh
           /simulate NAME LANG MSG      test the translation backend with MSG in LANG
+          /locales                     list per-player language overrides
+          /locales NAME LANG[,...]     set a player's languages (- clears) e.g. /locales KrlosUltimate en,pt
       HELP
     when '/players'
       puts "online (#{online_players.size}): #{online_players.join(', ')}"
@@ -1134,6 +1136,31 @@ class FactorioSniffer
         puts "[simulate] player=#{player_name} lang=#{lang_code} msg='#{msg}' => translated='#{translated}'"
       rescue StandardError => e
         warn "[simulate] error: #{e.class}: #{e.message}"
+      end
+    when '/locales'
+      if @player_db.nil?
+        puts 'no player db — cannot manage locale overrides'
+      elsif parts[1].nil?
+        # bare /locales: list every override
+        all = @player_db.all_locale_overrides
+        puts all.empty? ? 'no locale overrides' : all.map { |n, l| "#{n}: #{l.join(',')}" }.join("\n")
+      elsif parts[2].nil?
+        # /locales NAME: show the override
+        langs = @player_db.locale_overrides(parts[1])
+        puts langs.to_a.empty? ? "#{parts[1]}: no override (game locale used)" : "#{parts[1]}: #{langs.join(',')}"
+      else
+        # /locales NAME en,pt   or   /locales NAME - (clear)
+        if parts[2] == '-'
+          @player_db.set_locale_overrides(parts[1], [])
+          puts "/locales #{parts[1]}: cleared"
+        else
+          langs = parts[2..].join(',').split(',').filter_map { |l|
+            b = l.split('-').first&.downcase&.strip
+            b unless b.empty?
+          }.uniq
+          @player_db.set_locale_overrides(parts[1], langs)
+          puts "/locales #{parts[1]}: #{langs.join(',')}"
+        end
       end
     when '/compact'
       # Single guard lives in compact_memory! (dummy MemoryStore → enabled?=false

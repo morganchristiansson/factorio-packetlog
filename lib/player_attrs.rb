@@ -235,6 +235,15 @@ class PlayerAttrs
     @mutex.synchronize { @players.select { |_, p| p[:connected] }.keys.sort }
   end
 
+  # Connected players as [{index:, name:}] pairs — the live roster the
+  # translation agent relay keys its per-player texts by (game index — Lua
+  # can't see language overrides, so Ruby addresses each reader by index).
+  def roster_pairs
+    @mutex.synchronize do
+      @players.filter_map { |name, p| { index: p[:index], name: name } if p[:connected] && p[:index] }
+    end
+  end
+
   # RCON roster seed (load_roster): authoritative live-roster entry —
   # connected + index + fresh hb — WITHOUT touching time accounting
   # (session/afk anchoring is player_attributes' job).

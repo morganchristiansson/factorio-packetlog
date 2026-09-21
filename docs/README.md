@@ -90,7 +90,7 @@ structure and lossless-capture fixes.
 ## Player ID Conventions
 
 - **Game player indexes** (what heartbeat actions carry, 0-indexed in the
-  protocol) are the index into `game.players`; `players.json` uses
+  protocol) are the index into `game.players`; `players-cache.json` uses
   1-indexed values. Add +1 to decoded values.
 - **Network peer ids** (ConnectionAcceptOrDeny `clientPeerInfo`, NewPeerInfo
   sync peer_id) are a separate connection counter. They only equal game

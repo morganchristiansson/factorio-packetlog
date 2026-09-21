@@ -4,6 +4,9 @@ captures/
 logs/
 
 # Runtime state
+players-cache.json
+players-locale.json
+# legacy pre-rename name (migrated on first load)
 players.json
 
 # Large game reference dumps (external/ is downloaded/generated)

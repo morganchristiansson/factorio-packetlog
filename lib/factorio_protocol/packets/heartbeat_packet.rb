@@ -386,7 +386,7 @@ module FactorioProtocol
             sa[:hit_unknown] = true
           else
             # Force UTF-8: a Unicode name must not stay binary-flagged (that
-            # taints the hivemind prompt / players.json / console output).
+            # taints the hivemind prompt / players-cache.json / console output).
             sa[:username] = raw.force_encoding('UTF-8').scrub('?')
             offset = s_off + s_len
           end

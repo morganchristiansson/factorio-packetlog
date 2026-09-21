@@ -18,7 +18,7 @@
 #     segment type decodes as write_to_console (104 vs 106) on a sample;
 #     --protocol-version overrides.
 #   * player names: msg-4 username + first C→S heartbeat index binding
-#     (same as server mode), falling back to players.json, then
+#     (same as server mode), falling back to players-cache.json, then
 #     Player_<index>.
 #
 # Usage:
@@ -89,10 +89,10 @@ puts "# files: #{files.join(', ')}"
 
 # ── Name resolution ─────────────────────────────────────────────────
 
-# Player index (0-indexed game index +1 → players.json key) → name.
+# Player index (0-indexed game index +1 → players-cache.json key) → name.
 # pcap-derived bindings (msg-4 username + first C→S heartbeat index) win
-# over players.json (which may be stale / missing recent joiners).
-db = PlayerDatabase.new(File.join(__dir__, '..', 'players.json'))
+# over players-cache.json (which may be stale / missing recent joiners).
+db = PlayerDatabase.new(File.join(__dir__, '..', 'players-cache.json'))
 index_name = {}
 ip_index = {}   # src_ip → 0-indexed game index (bound by first real action)
 ip_name = {}    # src_ip → username (from msg 4 ConnectionRequestReplyConfirm)

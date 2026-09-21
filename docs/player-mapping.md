@@ -6,7 +6,7 @@ names. Save-file internals are detailed in `docs/save/`.
 ## Peer IDs vs Game Player Indexes — CRITICAL
 
 - **Game player index** (what heartbeat action player fields carry,
-  0-indexed in protocol; `players.json` uses 1-indexed) = index into
+  0-indexed in protocol; `players-cache.json` uses 1-indexed) = index into
   `game.players`. Learn it from actions, e.g. the user's own C→S heartbeats.
 - **Network peer id** (ConnectionAcceptOrDeny `clientPeerInfo` entry ids,
   `new_peer_id`, and NewPeerInfo sync peer_id) is a per-connection counter.

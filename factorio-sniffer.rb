@@ -17,7 +17,7 @@ end
 #   Live capture: sudo ruby factorio-sniffer.rb -i eth0 -p 34197
 #   Server mode:  sudo ruby factorio-sniffer.rb          (auto-detects IP/port/interface from the running factorio process)
 #   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
-#   Save player db: ... --player-db players.json
+#   Player cache (hardcoded): players-cache.json next to the process cwd
 #   Capture: always on for live capture — auto-named captures/server-<port>-<ts>.pcap
 #     (server), latest file is the live one, rotation + retention always on
 #     (defaults 72h / 256 MB, --keep / --max-size override); --save-capture-gz to compress.
@@ -37,7 +37,9 @@ require_relative 'lib/factorio_sniffer'
 # Configuration
 # ─────────────────────────────────────────────────────────────────────
 DEFAULT_PORT = 34_197
-DEFAULT_PLAYER_DB = 'players.json'
+# Player cache is hardcoded (per config-surface policy): the data is
+# re-seeded from RCON anyway, and a knob would only invite divergence.
+DEFAULT_PLAYER_DB = PlayerDatabase::DEFAULT_CACHE_BASENAME
 # Console history files older than this are pruned at startup (hardcoded —
 # text output is tiny, but unbounded is never an option).
 LOG_KEEP_DAYS = 7
@@ -140,7 +142,6 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('-r', '--read PCAP', 'Read from pcap file') { |v| options[:pcap] = v }
     opts.separator ''
     opts.on('-p', '--port PORT', Integer, "UDP port (default: #{DEFAULT_PORT})") { |v| options[:port] = v }
-    opts.on('--player-db PATH', "Player database file (default: #{DEFAULT_PLAYER_DB})") { |v| options[:player_db] = v }
     opts.on('--local-ip IP', 'Client mode: only show outgoing packets from this IP (filters out all server broadcasts)') { |v| options[:local_ip] = v }
     opts.on('--server', 'Server mode: run on the game server host (auto-enabled when a factorio server is detected on this host). Analyzes only incoming (client→server) packets — no broadcast duplicates — and excludes map-download save packets (msg 13) from analysis and capture.') { |v| options[:server] = true }
     opts.on('--server-ip IP', 'Server IP for --server mode (default: auto-detected from local interfaces)') { |v| options[:server_ip] = v }

@@ -4,13 +4,25 @@
 #
 # Architecture:
 # - Hooks into FactorioSniffer's chat flow (like HiveMindAgent)
-# - Resolves player locales from player_db (persisted players.json + the
-#   startup RCON roster dump). NO live RCON locale queries, no refresh
-#   timer, no duplicate locale cache: locale changes are rare and
-#   intentionally ignored for now — packet-level locale tracking can come
-#   later if ever needed.
-# - Translates incoming messages from foreign players to English (console + relayed
-#   in-game to every player whose locale differs from the speaker's)
+# - Resolves player locales from player_db (persisted players-cache.json +
+#   the startup RCON roster dump) plus name-keyed language OVERRIDES from
+#   players-locale.json (the /locales console command). NO live RCON locale
+#   queries, no refresh timer, no duplicate locale cache: locale changes
+#   are rare and intentionally ignored for now.
+# - A player's effective languages = [Factorio locale] + overrides. An
+#   override listing 'en' means the player writes English even if their
+#   Factorio locale says otherwise (KrlosUltimate: pt-BR interface, writes
+#   en) — such players are treated as English speakers on the relay side
+#   and never receive per-locale relay lines for en or their locale.
+# - Translates incoming messages from foreign players to English (console +
+#   relayed in-game to every player who can't read the original).
+# - The relay target decision lives in RUBY (it knows the overrides; the
+#   Factorio Lua API only sees LuaPlayer.locale). One batched Lua command
+#   loops game.connected_players (the live-roster guard) and prints the
+#   precomputed text for each player's game INDEX:
+#     t = {[2]="[pt>en] ivan: hi",[5]="[en->pt] ivan: ola"}
+#     for _, p in pairs(game.connected_players) do
+#       local x = t[p.index]; if x then p.print(x, ps) end end
 # - Supports multiple backends: LibreTranslate API, Bergamot (local), mock
 # - HiveMind outgoing replies are NOT auto-translated (HiveMind handles its own language)
 
@@ -30,17 +42,24 @@ class TranslationAgent
   # treated as English: no translation, no relay from them, but they still
   # receive EN relay text when a whitelisted speaker talks.
   WHITELIST = Set.new(%w[pt ru])
+  WHITELIST_ARR = %w[pt ru]
 
   # Backend types
   # Available backends: :libretranslate, :bergamot, :mock, :argos, :google, :hybrid
 
   attr_reader :rcon, :enabled, :player_db, :backend, :translation_service
 
-  def initialize(rcon:, player_db:, backend: BACKEND_LIBRETRANSLATE, libretranslate_url: nil, bergamot_url: nil, api_key: nil, enabled: true)
+  # roster: a callable returning the CURRENT connected players as
+  # [{index:, name:}] (the sniffer's live roster). Used by the relay to
+  # decide per-player who needs a translated line and address them by game
+  # index — Lua can't see the language overrides, so the decision is made
+  # here and Lua just prints to the computed indexes.
+  def initialize(rcon:, player_db:, backend: BACKEND_LIBRETRANSLATE, libretranslate_url: nil, bergamot_url: nil, api_key: nil, enabled: true, roster: nil)
     @rcon = rcon
     @player_db = player_db
     @backend = backend
     @enabled = enabled && !@rcon.nil? && !@player_db.nil?
+    @roster = roster
 
     # Initialize translation backend
     @translation_service = create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
@@ -54,7 +73,7 @@ class TranslationAgent
   end
 
   # Called by sniffer for each incoming chat message
-  # act: the decoded action hash (has :game_player = 1-indexed game index, matching players.json)
+  # act: the decoded action hash (has :game_player = 1-indexed game index, matching players-cache.json)
   # message: decoded chat text
   # Returns: [should_continue, translated_text] where should_continue=true means
   # the message should also be processed by other handlers (e.g., HiveMind)
@@ -65,7 +84,7 @@ class TranslationAgent
     message = message.delete("\0")  # packet padding/embedded NULs: argos + Lua reject them
     return [true, nil] if message.empty?
 
-    # Get player ID from action (1-indexed game_player matches players.json)
+    # Get player ID from action (1-indexed game_player matches players-cache.json)
     player_id = act[:game_player]
     return [true, nil] unless player_id
 
@@ -73,11 +92,16 @@ class TranslationAgent
     player = @player_db.lookup(player_id)
     return [true, nil] if player.nil? || player.empty? || player.start_with?('Player_')
 
-    # Get player's locale from player_db (populated from the startup roster dump;
-    # locale CHANGES are ignored by design — packet-level tracking is TODO).
+    # The player's languages: Factorio locale (base) + /locales overrides.
+    # The speaker's MESSAGE language: 'en' when the player reads/writes
+    # English (an override listing en, e.g. KrlosUltimate), else their
+    # Factorio locale. No per-message language detection — a player with an
+    # 'en' override who writes pt won't be translated (accepted quirk).
+    langs = languages(player)
+    return [true, nil] if langs.empty?
     locale = @player_db.get_locale(player_id)
-    return [true, nil] unless locale
-    return [true, nil] unless whitelisted?(locale)
+    msg_lang = langs.include?(OUR_LOCALE) ? OUR_LOCALE : base(locale)
+    return [true, nil] unless whitelisted?(msg_lang)
 
     # Rate limit per player (anti-spam: each message costs one argos run per
     # target locale).
@@ -85,26 +109,27 @@ class TranslationAgent
     return [true, nil] if @last_translate[player] && (now - @last_translate[player]) < TRANSLATE_COOLDOWN
     @last_translate[player] = now
 
-    if @translation_service.needed?(locale, OUR_LOCALE)
+    if @translation_service.needed?(msg_lang, OUR_LOCALE)
       # Foreign speaker: translate to English (console + relay base)
-      translated = @translation_service.to_english(message, source_lang: locale)
+      translated = @translation_service.to_english(message, source_lang: msg_lang)
 
       # Announce once per player per session
-      announce_translation(player, locale) unless @announced_players.include?(player)
+      announce_translation(player, msg_lang) unless @announced_players.include?(player)
 
       # Print translation to console (visible to operator)
       ts = Time.now.strftime('%H:%M:%S')
-      puts "#{ts}  [translate] #{player} (#{locale} -> en): #{translated}"
+      puts "#{ts}  [translate] #{player} (#{msg_lang} -> en): #{translated}"
     else
       # English speaker: the message IS the relay base — foreign readers get
       # it re-localized, en readers already saw the original broadcast.
       translated = message
     end
 
-    # Relay IN GAME to everyone who can't read the original: one Lua pass
-    # over game.connected_players (the live roster), printing per player the
-    # relay text re-localized to THEIR locale (en readers take it as-is).
-    relay_to_others(player, locale, translated)
+    # Relay IN GAME to everyone who can't read the original: decided per
+    # player in Ruby (locale + overrides), one Lua pass over
+    # game.connected_players (the live roster) printing each computed
+    # index's text.
+    relay_to_others(player, msg_lang, translated)
 
     [true, translated]  # Continue processing, also return translated text
   end
@@ -113,8 +138,9 @@ class TranslationAgent
   # to the connected players exactly like a real chat message would
   # (bypasses on_chat's player DB / cooldown path). Returns the EN text.
   def simulate_translation(player_name, speaker_locale, message)
-    translated = @translation_service.to_english(message, source_lang: speaker_locale)
-    relay_to_others(player_name, speaker_locale, translated)
+    msg_lang = base(speaker_locale)
+    translated = @translation_service.to_english(message, source_lang: msg_lang)
+    relay_to_others(player_name, msg_lang, translated)
     translated
   end
 
@@ -179,8 +205,21 @@ class TranslationAgent
     end
   end
 
-  # Seed locale cache from player_db (persisted + the startup roster dump).
-  # Runs once, lazily, on the first relay — NO RCON query.
+  # A player's effective languages: [Factorio locale base] + any /locales
+  # overrides. The locale (their interface language) always comes first so
+  # target selection prefers it for relay translations.
+  def languages(name)
+    id = @player_db.name_to_id(name)
+    locale = id && @player_db.get_locale(id)
+    langs = [base(locale)]
+    langs += @player_db.locale_overrides(name) || []
+    langs.compact.uniq
+  end
+
+  def base(locale)
+    b = locale.to_s.split('-').first&.downcase&.strip
+    b.empty? ? nil : b
+  end
 
   # Announce that we're translating for this player (once per session)
   def announce_translation(player, locale)
@@ -189,31 +228,43 @@ class TranslationAgent
     puts "#{ts}  [translate] Auto-translation enabled for #{player} (#{locale} <-> #{OUR_LOCALE})"
   end
 
-  # Relay the EN translation to English readers and whitelisted locales.
-  # Only EN and whitelisted locales (pt/ru) appear in the Lua table — fr/hu/zh
-  # etc. already saw the original English chat broadcast. One batched Lua:
-  #   t = {["en"]="...",["pt"]="..."}; for _, p in pairs(game.connected_players)
-  #   do local x = t[p.locale]; if x then p.print("[pt] name: text", ps) end end
-  # Lua's connected_players loop is the guard — offline players are skipped.
-  def relay_to_others(speaker_name, speaker_locale, translated)
+  # Relay the EN translation to every connected player who can't read the
+  # original. The READER decision (per player: locale + overrides) happens
+  # in Ruby; Lua only prints the precomputed text for each player's game
+  # index, still guarded by game.connected_players (offline players are
+  # never in the roster and the Lua loop skips drift). One batched Lua:
+  #   t = {[2]="[pt>en] ivan: hi",[5]="[en->pt] ivan: ola"}
+  #   for _, p in pairs(game.connected_players) do
+  #     local x = t[p.index]; if x then p.print(x, ps) end end
+  def relay_to_others(speaker_name, msg_lang, translated)
     return unless @rcon
-    locales = (@player_db.all_locales.values.uniq - [speaker_locale]).select { |loc|
-      norm = loc.to_s.split('-').first&.downcase
-      norm == OUR_LOCALE || WHITELIST.include?(norm)
-    }
-    return if locales.empty?
+    roster = @roster&.call || []
+    return if roster.empty?
 
-    entries = locales.filter_map do |loc|
-      text = localize(translated, loc)
+    entries = []
+    texts = {}  # target -> localized text (one backend call per target lang)
+    roster.each do |p|
+      name = p[:name]
+      index = p[:index]
+      next unless name && index
+      reader_langs = languages(name)
+      next if reader_langs.empty?
+      # They already read the original in one of their languages.
+      next if reader_langs.include?(msg_lang)
+      # Pick the first whitelisted language they read (their locale first,
+      # then overrides); if they read English, the EN relay text is fine.
+      target = (reader_langs & WHITELIST_ARR).first || (reader_langs.include?(OUR_LOCALE) ? OUR_LOCALE : nil)
+      next unless target
+      text = texts[target] ||= localize(translated, target)
       # A whitelisted locale that returned the EN text unchanged (missing
       # pack or backend failure) gets skipped — the target already saw it.
-      next if loc != OUR_LOCALE && text == translated
-      %([#{loc.inspect}]="#{lua_quote(text)}")
+      next if target != OUR_LOCALE && text == translated
+      tag = target == OUR_LOCALE ? "#{msg_lang}>en" : "en->#{target}"
+      entries << %([#{index}]="[#{tag}] #{lua_quote(speaker_name)}: #{lua_quote(text)}")
     end
     return if entries.empty?
 
-    sl = speaker_locale.to_s.split('-').first || 'en'
-    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local sl = "#{lua_quote(sl)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.locale]; if x then local pl = p.locale:match("^[^-]+") or p.locale; local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl); p.print("["..tag.."] "..n..": "..x, ps) end end end)
+    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.index]; if x then p.print(x, ps) end end end)
     @rcon.command("/sc #{lua}")
   rescue StandardError => e
     warn "[translation] in-game relay failed: #{e.class}: #{e.message}"

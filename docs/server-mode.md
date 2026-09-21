@@ -158,8 +158,18 @@ Ctrl-C needed) to filter the console output:
 /filter                    show current filter state
 /players                   list online players
 /stats                     session summary
+/locales                   list per-player language overrides
+/locales NAME en,pt        set a player's languages (e.g. pt-BR interface
+                           but actually English: /locales KrlosUltimate en,pt)
+/locales NAME -            clear a player's languages
 /help                      list commands
 ```
+
+- Language overrides are persisted to `players-locale.json` (name-keyed,
+  unlike the id-keyed `players-cache.json`) and steer the translation
+  agent: a player's effective languages = Factorio locale + overrides, so
+  an `en` override stops their messages being translated and stops them
+  receiving relay lines for English/pt/ru messages they already read.
 
 - Chat (`write_to_console`) is **always printed and exempt from all
   filters** — including the agent's decoded chat feed.
@@ -174,7 +184,7 @@ Ctrl-C needed) to filter the console output:
 Ctrl-C reloads the code; Ctrl-C again **within 5 seconds** of the previous
 press quits. A single Ctrl-C pressed later is another reload — so you can
 reload repeatedly while editing code, and double-tap to shut down.
-Player names are persisted to `players.json` on reload and at shutdown.
+Player names are persisted to `players-cache.json` (and language overrides to `players-locale.json`) on reload and at shutdown.
 
 Reloads are IN PLACE: `FactorioSniffer#run` rescues `Interrupt`, calls
 `reload_code!` (which `load`s every lib file), and `retry`s. Nothing is

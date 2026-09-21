@@ -551,7 +551,7 @@ check(db.name_to_id('sévérin') == 1, 'name index works with the sanitized name
 # Simulate what an old reload could leave behind: a binary entry injected
 # straight into @players (bypassing add). save() must still write valid JSON.
 Dir.mktmpdir do |dir|
-  path = File.join(dir, 'players.json')
+  path = File.join(dir, 'players-cache.json')
   db2 = PlayerDatabase.new(path)
   db2.add(1, 'alice')
   db2.instance_variable_get(:@players)[2] = { name: "sévérin".b, locale: nil }   # legacy poison
@@ -560,6 +560,28 @@ Dir.mktmpdir do |dir|
   parsed = JSON.parse(raw)
   check(parsed['2']['name'] == 'sévérin', 'legacy binary entry sanitized at save (no GeneratorError)')
   check(parsed['1']['name'] == 'alice', 'clean entry survives')
+end
+
+# Concurrent writers: the capture thread (add), the translation-agent
+# event worker (set_locale_by_id via note_joined) and the console thread
+# (set_locale_overrides) all mutate the hashes — the mutex must serialize
+# mutations + disk writes (an @players.each racing a key-add raises
+# "can't add a new key into hash during iteration"; two saves race on the
+# same .tmp file). Ten rounds of interleaved writers, then verify state.
+Dir.mktmpdir do |dir|
+  path = File.join(dir, 'players-cache.json')
+  cdb = PlayerDatabase.new(path)
+  cdb.add(1, 'alice')
+  errors = []
+  threads = []
+  threads << Thread.new { 100.times { |i| cdb.add(100 + i, "capture#{i}") } }
+  threads << Thread.new { 100.times { |i| cdb.set_locale_by_id(1, "pt-BR") } }
+  threads << Thread.new { 100.times { |i| cdb.set_locale_overrides("bob#{i}", ['en', 'pt']) } }
+  threads.each(&:join)
+  check(cdb.players.size == 101, 'concurrent hash writers lose no entries')
+  check(cdb.get_locale(1) == 'pt-BR', 'concurrent set_locale_by_id lands')
+  check(cdb.locale_overrides('bob99') == ['en', 'pt'], 'concurrent locales writer lands')
+  check(cdb.players == PlayerDatabase.new(path).players, 'concurrent writes persist intact')
 end
 
 # ── Heartbeat timeout: crashed/offline players are dropped ──

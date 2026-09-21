@@ -44,6 +44,22 @@ check(out.string.include?("[simulate] player=StarBurtS lang=ru msg='Zdravstvuyte
       '/simulate prints the translated result through the sniffer console')
 check(!err.string.include?('NoMethodError'), 'no NoMethodError from /simulate (translate_service typo)')
 
+# ── Test 1b: /locales through the sniffer console (set/show/list/clear) ──
+locales_out = StringIO.new
+$stdout = locales_out
+locdb = sniffer.instance_variable_get(:@player_db)
+sniffer.handle_command('/locales KrlosUltimate en,pt')
+check(locdb.locale_overrides('KrlosUltimate') == ['en', 'pt'],
+      '/locales NAME en,pt stores the override in the player db')
+sniffer.handle_command('/locales KrlosUltimate')
+check(locales_out.string.include?('KrlosUltimate: en,pt'),
+      '/locales NAME prints the current override')
+sniffer.handle_command('/locales')
+check(locales_out.string.include?('KrlosUltimate: en,pt'), '/locales lists all overrides')
+sniffer.handle_command('/locales KrlosUltimate -')
+check(locdb.locale_overrides('KrlosUltimate').nil?, '/locales NAME - clears the override')
+$stdout = old_out
+
 # ── Test 2: backend wiring ───────────────────────────────────────────
 agent = TranslationAgent.new(rcon: nil, player_db: player_db, backend: :argos)
 check(agent.translation_service.is_a?(ArgosTranslateService),
@@ -111,15 +127,15 @@ svc = ArgosTranslateService.new(path: '/nonexistent/argos-translate')
 check(svc.to_english('privet', source_lang: 'ru') == 'privet',
       'missing argos binary degrades to the original text (server-only feature)')
 
-# ── Test 4: on_chat relays the translation in-game, per player locale ─
+# ── Test 4: on_chat relays the translation in-game, per player ──────
 cmds = []
 lua_rcon = Object.new
 lua_rcon.define_singleton_method(:command) { |lua| cmds << lua; '' }
 reldb = PlayerDatabase.new(nil)
-# Agent built BEFORE the roster dump lands (sniffer constructs the agent in
-# initialize, load_roster fills player_db later in run) — the first relay
-# lazy-seeds from player_db with NO RCON query.
-rel = TranslationAgent.new(rcon: lua_rcon, player_db: reldb, backend: :mock)
+# The live roster drives the relay: index -> name (Lua can't see language
+# overrides, so Ruby decides per player and Lua prints by game index).
+roster = -> { [{index: 1, name: 'ivan'}, {index: 2, name: 'bob'}, {index: 3, name: 'pedro'}] }
+rel = TranslationAgent.new(rcon: lua_rcon, player_db: reldb, backend: :mock, roster: roster)
 reldb.add(1, 'ivan', locale: 'ru')   # foreign speaker
 reldb.add(2, 'bob', locale: 'en')    # en reader
 reldb.add(3, 'pedro', locale: 'pt')  # pt reader
@@ -130,27 +146,23 @@ ru_cmd = cmds.first
 check(ru_cmd.start_with?('/sc '), 'relay Lua carries the /sc silent-console prefix (never sent as chat)')
 check(ru_cmd.include?('for _, p in pairs(game.connected_players)'),
       'relay loops game.connected_players in Lua (live roster)')
-check(ru_cmd.include?('{["en"]=') && ru_cmd.include?(',["pt"]='),
-      'relay precomputes EN->en and EN->pt entries from the locale snapshot')
-check(!ru_cmd.include?('["ru"]='), 'speaker locale excluded — ru readers already saw the original')
-check(ru_cmd.include?('local x = t[p.locale]') && ru_cmd.include?('p.print("["..'),
-      'relay dispatches per player on their locale')
+check(ru_cmd.include?('[2]="[ru>en]') && ru_cmd.include?('[3]="[en->pt]'),
+      'relay precomputes EN->en and EN->pt entries keyed by game index')
+check(!ru_cmd.include?('[1]='), 'speaker excluded — ru readers already saw the original')
+check(ru_cmd.include?('local x = t[p.index]') && ru_cmd.include?('p.print(x, ps)'),
+      'relay dispatches per player INDEX — Lua cannot see the language overrides')
 check(ru_cmd.include?('local n = "ivan"'), 'relay carries the speaker name')
-check(ru_cmd.include?('p.locale:match("^[^-]+")'), 'relay tags each print with the short locale')
-check(ru_cmd.include?('local tag = (p.locale == "en") and (sl..">en") or ("en->"..pl)'),
-      'relay tag format is [from->to] based on speaker locale')
-check(ru_cmd.include?('] "..n..": "..x, ps)'), 'relay prints as [tag] name: text')
 check(ru_cmd.include?('local s = game.players[n]') && ru_cmd.include?('s.chat_color or s.color'),
       'relay picks up the speaker chat_color (falling back to color)')
 check(ru_cmd.include?('{color = (s.chat_color or s.color)}'),
       'relay passes the whole line in the speaker color via print settings')
 
-# pt speaker: relay reaches ru AND en readers in their own locales
+# pt speaker: relay reaches ru AND en readers in their own languages
 rel.on_chat({ game_player: 3 }, 'hola')
 check(cmds.size == 2, 'pt speaker also relays')
 pt_cmd = cmds.last
-check(pt_cmd.include?('["ru"]=') && pt_cmd.include?('["en"]='), 'pt relay has ru + en entries')
-check(!pt_cmd.include?('["pt"]='), 'speaker locale excluded for the pt relay too')
+check(pt_cmd.include?('[1]="[en->ru]') && pt_cmd.include?('[2]="[pt>en]'), 'pt relay has ru + en index entries')
+check(!pt_cmd.include?('[3]='), 'speaker excluded for the pt relay too')
 
 # /simulate runs simulate_translation: translate AND relay, exactly like a
 # real chat message would
@@ -160,7 +172,7 @@ check(cmds.last.include?('for _, p in pairs(game.connected_players)'),
       'simulate_translation relays the in-game print (what /simulate runs)')
 
 rel.simulate_translation('pedro', 'pt-BR', 'olá')
-check(cmds.last.include?('local sl = "pt";') && !cmds.last.include?('local sl = "pt-BR";'),
+check(cmds.last.include?('[2]="[pt>en]') && !cmds.last.include?('pt-BR'),
       'regional speaker locale is shortened in the relay tag (pt-BR -> pt)')
 
 # ── Test 5: join-time locale capture (one targeted RCON query) ───────
@@ -168,7 +180,7 @@ join_cmds = []
 join_rcon = Object.new
 join_rcon.define_singleton_method(:command) { |lua| join_cmds << lua; 'ru' }
 jdb = PlayerDatabase.new(nil)
-jdb.add(5, 'StarBurtS')  # joiner: players.json locale is null
+jdb.add(5, 'StarBurtS')  # joiner: players-cache.json locale is null
 jag = TranslationAgent.new(rcon: join_rcon, player_db: jdb, backend: :mock)
 jag.note_joined(5, 'StarBurtS')
 check(join_cmds.size == 1, 'join learns the locale with exactly ONE rcon query')
@@ -199,10 +211,10 @@ fdb.add(3, 'pedro', locale: 'pt')
 fcmds = []
 pt_rcon = Object.new
 pt_rcon.define_singleton_method(:command) { |lua| fcmds << lua; '' }
-pt_agent = TranslationAgent.new(rcon: pt_rcon, player_db: fdb, backend: :mock)
+pt_agent = TranslationAgent.new(rcon: pt_rcon, player_db: fdb, backend: :mock, roster: -> { [{index: 1, name: 'ivan'}, {index: 2, name: 'bob'}, {index: 3, name: 'pedro'}] })
 pt_agent.instance_variable_set(:@translation_service, MissingPackService.new)
 pt_agent.on_chat({ game_player: 1 }, "привет\0\0")
-check(fcmds.first.include?('["en"]=') && !fcmds.first.include?('["pt"]='),
+check(fcmds.first.include?('[2]="[ru>en]') && !fcmds.first.include?('[3]='),
       'whitelisted locale with unchanged translation is skipped (no duplicated EN text)')
 check(!fcmds.first.include?("\0"), 'NUL bytes scrubbed before the relay Lua is built')
 
@@ -215,10 +227,68 @@ nw_db = PlayerDatabase.new(nil)
 nw_db.add(1, 'ivan', locale: 'ru')
 nw_db.add(2, 'bob', locale: 'en')
 nw_db.add(3, 'pierre', locale: 'fr')
-nw_agent = TranslationAgent.new(rcon: nw_rcon, player_db: nw_db, backend: :mock)
+nw_agent = TranslationAgent.new(rcon: nw_rcon, player_db: nw_db, backend: :mock,
+  roster: -> { [{index: 1, name: 'ivan'}, {index: 2, name: 'bob'}, {index: 3, name: 'pierre'}] })
 nw_agent.on_chat({ game_player: 1 }, 'привет')
-check(nw_cmds.first&.include?('["en"]=') && !nw_cmds.first&.include?('["fr"]='),
+check(nw_cmds.first&.include?('[2]="[ru>en]') && !nw_cmds.first&.include?('[3]='),
       'non-whitelisted locale gets no relay entry; en readers still do')
+
+# ── Test 7: language overrides (players-locale.json / /locales) ───────
+# KrlosUltimate: pt-BR interface, but reads/writes English — when ENGLISH is
+# among his overrides his own messages are treated as English (not
+# translated), and he receives no relay lines for messages he can read.
+over_cmds = []
+over_rcon = Object.new
+over_rcon.define_singleton_method(:command) { |lua| over_cmds << lua; '' }
+over_db = PlayerDatabase.new(nil)
+over_db.add(1, 'KrlosUltimate', locale: 'pt-BR')
+over_db.add(2, 'bob', locale: 'en')
+over_db.add(3, 'pedro', locale: 'pt')
+over_db.add(4, 'ivan', locale: 'ru')
+over_db.set_locale_overrides('KrlosUltimate', ['en', 'pt'])
+over_agent = TranslationAgent.new(rcon: over_rcon, player_db: over_db, backend: :mock,
+  roster: -> { [{index: 1, name: 'KrlosUltimate'}, {index: 2, name: 'bob'}, {index: 3, name: 'pedro'}, {index: 4, name: 'ivan'}] })
+
+# Overridden speaker writes English: message is the relay base, NOT translated
+_, en_msg = over_agent.on_chat({ game_player: 1 }, 'checking the belt layout')
+check(en_msg == 'checking the belt layout', 'en-overridden speaker message is not translated to [en]')
+last = over_cmds.last
+check(last.include?('[3]="[en->pt]') && last.include?('[4]="[en->ru]'),
+      'en speaker relays are localized for pt/ru readers')
+check(!last.include?('[1]=') && !last.include?('[2]='),
+      'overridden speaker + en readers get no relay line (they read the original)')
+
+# Overridden pt-BR reader: gets no relay line for pt or en messages
+over_agent.on_chat({ game_player: 3 }, 'hola que tal')
+last = over_cmds.last
+check(!last.include?('[1]='), 'overridden pt-BR reader receives no pt relay line (reads pt)')
+check(last.include?('[2]="[pt>en]') && last.include?('[4]="[en->ru]'),
+      'pt speaker still relays to en + ru readers')
+
+# ── Test 8: PlayerDatabase locale-override persistence ─────────────────
+Dir.mktmpdir do |dir|
+  cache = File.join(dir, 'players-cache.json')
+  db = PlayerDatabase.new(cache)
+  db.add(7, 'KrlosUltimate', locale: 'pt-BR')
+  db.set_locale_overrides('KrlosUltimate', ['en', 'pt'])
+  check(db.locale_overrides('KrlosUltimate') == ['en', 'pt'], 'overrides stored by name')
+
+  db2 = PlayerDatabase.new(cache)
+  check(db2.locale_overrides('KrlosUltimate') == ['en', 'pt'],
+        'overrides survive reload from players-locale.json')
+  check(File.exist?(File.join(dir, 'players-locale.json')),
+        'locale overrides live in players-locale.json next to the cache')
+  check(db2.lookup(7) == 'KrlosUltimate' && db2.get_locale(7) == 'pt-BR',
+        'cache file keeps id -> name/locale (players-cache.json)')
+
+  # clearing: empty array removes the entry
+  db2.set_locale_overrides('KrlosUltimate', [])
+  db3 = PlayerDatabase.new(cache)
+  check(db3.locale_overrides('KrlosUltimate').nil?, 'empty override clears the persisted entry')
+end
+
+# Legacy players.json is NOT migrated — the cache is re-seeded from RCON
+# at startup anyway; stale disk entries would only preserve renames/leavers.
 
 puts "\n#{'-' * 40}\n#{$pass} passed, #{$fail} failed"
 exit($fail.zero? ? 0 : 1)

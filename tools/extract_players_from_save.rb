@@ -13,9 +13,9 @@ require 'json'
 #
 # Usage:
 #   ruby tools/extract_save_from_pcap.rb factorio_capture.pcap outdir 1
-#   ruby tools/extract_players_from_save.rb outdir/level.dat [players.json]
+#   ruby tools/extract_players_from_save.rb outdir/level.dat [players-cache.json]
 #
-# Output (players.json, 1-indexed like the sniffer's db):
+# Output (players-cache.json format, 1-indexed like the sniffer's db):
 #   { "1": "Darkcry", "6": "ElNapo", ... }
 
 data = File.binread(ARGV[0] || 'outdir/level.dat')

@@ -16,7 +16,7 @@ includes:
 
 ## Key Protocol Findings
 
-- **Player IDs**: 0-indexed in protocol, 1-indexed in game. `players.json`
+- **Player IDs**: 0-indexed in protocol, 1-indexed in game. `players-cache.json`
   uses 1-indexed. Add `+1` to decoded values.
 - **Ghost flag**: detected via `next_receive & 1` in client heartbeats. When
   bit 0 of the 8-byte client timeshift field is 1, ghost mode is active.
@@ -245,7 +245,7 @@ slices. Parsing them as whole messages decoded mod text (tech
 prerequisites, research triggers, spawn weights) as phantom "usernames"
 — one real "morganc connected" plus 4-5 phantom "X connected" lines in
 the same millisecond, last-write-wins @ip_names, and the first heartbeat
-bound a phantom as the game player (players.json "1" = log-like text).
+bound a phantom as the game player (players-cache.json "1" = log-like text).
 Fix: parse_udp_payload skips frag_number > 0 (header only); frag 0
 parses as before. Proof: captures/server-34197-20260910-205559.pcap
 pkts 34154-34159, saved as test/fixtures/frag_confirm_{0..5}.bin.

@@ -121,8 +121,8 @@ To add a fixture from a live capture:
 3. Add it to `test/fixtures/packets.rb` with the expected actions.
 4. Run `ruby -Ilib test/packet_fixtures_test.rb`.
 
-Run the complete suite with `ruby test/run_tests.rb`; add `--verbose`
-to show captured output for otherwise quiet successful files.
+Run the complete suite with `bundle exec ruby -Ilib test/*_test.rb test/fixture_tests.rb`;
+add `--verbose` to show captured output for otherwise quiet successful files.
 
 ## Additional Notes
 

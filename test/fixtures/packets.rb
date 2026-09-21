@@ -282,6 +282,26 @@ REAL_PACKET_FIXTURES = [
         data: '0100' },
     ],
   },
+  {
+    name: 'client_close_remote_view_20',
+    description: '2.0 close_remote_view (1-byte payload 00) followed by the 8-byte C→S closure trailer; packet 118 in server-34197-20260917-153428.pcap',
+    version: '2.0.77',
+    hex: '26060728137a2e26ad040000000002f7de002a26ad0400000000',
+    actions: [
+      { type: 247, name: 'close_remote_view', player: 221, game_player: 222,
+        data: '002a26ad0400000000' },
+    ],
+  },
+  {
+    name: 'client_clear_recipe_notification_20',
+    description: '2.0 clear_recipe_notification (2-byte payload) followed by the 8-byte C→S closure trailer; packet 160 in server-34197-20260917-153428.pcap',
+    version: '2.0.77',
+    hex: '0606e828137a0f27ad040000000002ff2b01de5d000b27ad0400000000',
+    actions: [
+      { type: 299, name: 'clear_recipe_notification', player: 221, game_player: 222,
+        data: '5d00' },
+    ],
+  },
   # ── C→S closure [tick][pad] trailer regression fixtures (2026-08-12) ──
   #
   # Client tick closures carry ONE 8-byte [tick(4)][pad(4)] trailer after the

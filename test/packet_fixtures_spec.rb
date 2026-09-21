@@ -61,6 +61,7 @@ class TestPacketFixtures < Minitest::Test
           end
         end
       end
+      refute hb[:hit_unknown], "#{fx[:name]}: heartbeat reported hit_unknown"
     end
   end
 

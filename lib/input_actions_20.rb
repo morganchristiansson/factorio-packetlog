@@ -241,7 +241,8 @@ module FactorioProtocol
   244 => ["rename_space_platform", nil],
   245 => ["remote_view_surface", 0],
   246 => ["remote_view_entity", nil],
-  247 => ["close_remote_view", 2],
+  # 2.0 sends one payload byte; the remaining 8 bytes are the closure trailer.
+  247 => ["close_remote_view", 1],
   248 => ["instantly_create_space_platform", nil],
   249 => ["flush_opened_entity_specific_fluid", 1],
   250 => ["change_picking_state", 1],
@@ -292,7 +293,7 @@ module FactorioProtocol
   294 => ["render_mode_changed", 1],
   296 => ["set_player_color", 4],
   298 => ["set_trains_limit", 4],
-  299 => ["clear_recipe_notification", nil],
+  299 => ["clear_recipe_notification", 2],
   300 => ["set_linked_container_link_i_d", 4],
   301 => ["set_turret_ignore_unlisted", 0],
   302 => ["set_lamp_always_on", 0],

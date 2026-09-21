@@ -415,6 +415,15 @@ class TestFactorioProtocol < Minitest::Test
     assert_nil FactorioProtocol.action_len(106)         # write_to_console (variable)
   end
 
+  def test_detect_version_from_connection_request
+    data = [2, 0, 0, 2, 0, 77].pack('C*') + [19_003, 123].pack('V*')
+    assert_equal '2.0.77 (build 19003)', FactorioProtocol.detect_version(data)
+  end
+
+  def test_detect_version_returns_nil_for_other_packet
+    assert_nil FactorioProtocol.detect_version([6].pack('C'))
+  end
+
   # ── uint16v / uint32v decoding ────────────────────────────────
 
   def test_decode_uint16v_single_byte

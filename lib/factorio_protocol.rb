@@ -205,7 +205,7 @@ ACTIONS = {
   168=>["add_decider_combinator_output",0],
   169=>["modify_decider_combinator_output",0],
   170=>["remove_decider_combinator_output",0],
-  171=>["drag_decider_combinator_else_output",0],
+  171=>["drag_decider_combinator_else_output",13],
   172=>["add_decider_combinator_else_output",0],
   173=>["modify_decider_combinator_else_output",0],
   174=>["remove_decider_combinator_else_output",0],
@@ -285,7 +285,7 @@ ACTIONS = {
   249=>["map_editor_action",nil],
   251=>["change_multiplayer_config",1],
   252=>["change_multiplayer_config",0],
-  253=>["admin_action",0],
+  253=>["admin_action",4],
   254=>["lua_shortcut",nil],
   255=>["create_space_platform",0],
   256=>["create_space_platform",0],
@@ -434,6 +434,19 @@ ACTIONS = {
   # string ("2.0.77", "2.1", or a bare "2.0"). Anything 2.0.x uses the
   # defines dump; 2.1+ (and unknown) keep the main ACTIONS table. Returns
   # the chosen label ("2.0" / "2.1+") for logging.
+  # Inspect one UDP payload for a ConnectionRequest (msg 2) and return the
+  # advertised Factorio version. Returns nil when the payload is not a
+  # complete ConnectionRequest. Pcap and capture callers can use this to
+  # choose the version-dependent action tables before decoding heartbeats.
+  def self.detect_version(data)
+    hdr = parse_network_header(data)
+    return nil unless hdr && hdr[:msg_type] == 2
+    parsed = ConnectionRequestPacket.parse(data)
+    parsed&.result&.dig(:connection_request, :version)
+  rescue StandardError
+    nil
+  end
+
   def self.select_version(version)
     if version.to_s.match?(/\A2\.0(\.|\z)/)
       self.actions = ACTIONS_20

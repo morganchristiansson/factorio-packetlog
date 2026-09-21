@@ -31,7 +31,7 @@ Completions still serialize on `@mutex` with scheduled follow-ups and manual
 compaction. Log-event reaction turns use the event worker too. Queues survive
 ordinary hot reloads; this threading migration requires a full restart.
 Shutdown closes each queue and allows two seconds to drain; unfinished work
-is reported, not persisted. Regression: `test/agent_events_spec.rb` and
+is reported, not persisted. Regression: `test/agent_events_test.rb` and
 `test_hung_llm_call_does_not_block_packet_thread`.
 
 ## Long-term memory (compaction)
@@ -78,7 +78,7 @@ Triggers:
   compaction never runs automatically (not on quit).
 - The memory directory is the hardcoded `memories/` in the sniffer's working
   directory (no flag/env); `memory_dir: false` on the agent disables memory
-  entirely (used by the specs).
+  entirely (used by the tests).
 
 `/compact` distills the session into memory and then **wipes the
 conversation + queued console lines** (keeping the memories) for a fresh

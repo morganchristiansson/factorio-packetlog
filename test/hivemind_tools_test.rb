@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for the RubyLLM tool classes (hivemind_tools.rb): reply, rcon query, memory writes, registration.
-# Run: ruby -Ilib test/hivemind_tools_spec.rb
+# Run: ruby -Ilib test/hivemind_tools_test.rb
 
 require 'bundler/setup' # FIRST: vendored gems (rcon), same as factorio-sniffer.rb
 require 'rcon_client'

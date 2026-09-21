@@ -4,7 +4,7 @@
 # Tests for the game-log watcher (hivemind.rb + log_tail.rb wiring):
 # keyed lines reach the console queue, first match in the window fires a
 # turn (repeats stay queue-only), and auto-compaction is gated on history.
-# Run: ruby -Ilib test/hivemind_log_watcher_spec.rb
+# Run: ruby -Ilib test/hivemind_log_watcher_test.rb
 
 require_relative 'hivemind_helper'
 

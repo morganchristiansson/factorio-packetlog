@@ -68,7 +68,7 @@ helpers.write_file(filename, data, append?, for_player?)
   bare `write_file(f, d)` would execute on all of them — `for_player=0`
   pins the write to the server's output explicitly. (RCON `/sc` itself
   executes server-only, so `nil` was already equivalent; `0` makes the
-  intent unambiguous.) The sniffer guard (server_mode_spec) checks every
+  intent unambiguous.) The sniffer guard (server_mode_test) checks every
   write_file call's last arg is `0` — never a player index.
 
 Writes land in `<user-data>/script-output/`. No size limit (unlike the

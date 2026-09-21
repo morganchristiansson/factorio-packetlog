@@ -3,7 +3,7 @@
 
 # Tests for the game-log tail (lib/log_tail.rb): starts at EOF, yields new
 # lines, survives truncation/rotation and file-disappeared races.
-# Run: ruby -Ilib test/log_tail_spec.rb
+# Run: ruby -Ilib test/log_tail_test.rb
 
 require 'minitest/autorun'
 require 'tmpdir'

@@ -7,7 +7,7 @@
 # drives the real /simulate handler and fails on the typo'd code.
 # Argos is only installed on the target server, so Test 3 runs a fake
 # `argos-translate` script (argv echo) instead of the real binary.
-# Run: ruby -Ilib test/translation_agent_spec.rb
+# Run: ruby -Ilib test/translation_agent_test.rb
 
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 require 'stringio'

@@ -109,7 +109,7 @@ live sessions, with expected parse output) or
 [`test/fixtures/chat_variations.rb`](../test/fixtures/chat_variations.rb)
 (synthetic variations of `write_to_console` payloads).
 
-The fixture specs (`test/packet_fixtures_spec.rb`) parse each real packet
+The fixture tests (`test/packet_fixtures_test.rb`) parse each real packet
 through `FactorioProtocol.parse_udp_payload` and assert the exact actions,
 so changing the decoder requires updating the fixtures — preventing
 silent regressions (e.g. the repeated chat truncation bugs).
@@ -119,7 +119,10 @@ To add a fixture from a live capture:
 1. Extract the raw UDP payload hex (e.g. from `factorio_capture.pcap`).
 2. Verify the expected parse output manually.
 3. Add it to `test/fixtures/packets.rb` with the expected actions.
-4. Run `ruby -Ilib test/packet_fixtures_spec.rb`.
+4. Run `ruby -Ilib test/packet_fixtures_test.rb`.
+
+Run the complete suite with `ruby test/run_tests.rb`; add `--verbose`
+to show captured output for otherwise quiet successful files.
 
 ## Additional Notes
 

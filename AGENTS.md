@@ -151,7 +151,7 @@ either on a client or on the game server host (server mode, with RCON).
   index, which writes to that player's client and is skipped via `/sc`.
   Deterministic mod code would run on server + all clients, so `0` pins
   the write to the server's `script-output/` where the sniffer reads it
-  locally. Guarded by a spec (server_mode_spec checks every write_file
+  locally. Guarded by a test (server_mode_test checks every write_file
   call's last arg is 0).
 
 ## Config surface policy
@@ -211,12 +211,12 @@ ruby tools/rcon.rb status          # version/players/admins/time/evolution
 ruby tools/rcon.rb exec "/shout hi"  # or /sc for silent Lua
 
 # Tests:
-ruby -Ilib test/hivemind_spec.rb             # hivemind agent core (triggers, context, greetings)
-ruby -Ilib test/hivemind_tools_spec.rb       # RubyLLM tool classes
-ruby -Ilib test/hivemind_persistence_spec.rb # session file round-trips
-ruby -Ilib test/hivemind_compaction_spec.rb  # long-term memory + /compact
-ruby -Ilib test/hivemind_followups_spec.rb   # scheduled follow-ups
-ruby -Ilib test/server_mode_spec.rb       # server mode + ops
-ruby -Ilib test/packet_fixtures_spec.rb   # real captured packets
-ruby -Ilib test/factorio_protocol_spec.rb # protocol unit tests
+ruby -Ilib test/hivemind_test.rb             # hivemind agent core (triggers, context, greetings)
+ruby -Ilib test/hivemind_tools_test.rb       # RubyLLM tool classes
+ruby -Ilib test/hivemind_persistence_test.rb # session file round-trips
+ruby -Ilib test/hivemind_compaction_test.rb  # long-term memory + /compact
+ruby -Ilib test/hivemind_followups_test.rb   # scheduled follow-ups
+ruby -Ilib test/server_mode_test.rb       # server mode + ops
+ruby -Ilib test/packet_fixtures_test.rb   # real captured packets
+ruby -Ilib test/factorio_protocol_test.rb # protocol unit tests
 ```

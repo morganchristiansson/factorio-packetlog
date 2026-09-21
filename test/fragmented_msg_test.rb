@@ -8,7 +8,7 @@
 # as phantom "usernames", stealing the confirm binding and player slot.
 # Ground truth: test/fixtures/frag_confirm_{0..5}.bin (morganc's join,
 # 2026-09-10; see frag_confirm.txt).
-# Run: ruby -Ilib test/fragmented_msg_spec.rb
+# Run: ruby -Ilib test/fragmented_msg_test.rb
 
 require 'minitest/autorun'
 require 'factorio_protocol'

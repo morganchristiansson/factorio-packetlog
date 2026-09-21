@@ -3,8 +3,8 @@
 
 # Tests for the HiveMindAgent core (lib/hivemind.rb): triggers, chat
 # history/context assembly, player events and greetings.
-# Tool, persistence, compaction, and follow-up specs are separate files.
-# Run: ruby -Ilib test/hivemind_spec.rb
+# Tool, persistence, compaction, and follow-up tests are separate files.
+# Run: ruby -Ilib test/hivemind_test.rb
 
 require_relative 'hivemind_helper'
 class TestHiveMindAgent < Minitest::Test

@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for scheduled follow-ups (hivemind_followups.rb): registry, scheduler thread, restart persistence.
-# Run: ruby -Ilib test/hivemind_followups_spec.rb
+# Run: ruby -Ilib test/hivemind_followups_test.rb
 
 require_relative 'hivemind_helper'
 

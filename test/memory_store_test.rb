@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Tests for the Hivemind long-term memory store (keyed blobs → files).
-# Run: ruby -Ilib test/memory_store_spec.rb
+# Run: ruby -Ilib test/memory_store_test.rb
 
 require 'minitest/autorun'
 require 'tmpdir'

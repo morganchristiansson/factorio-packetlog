@@ -205,7 +205,7 @@ shape — new ivars need lazy init (`@x ||=`) or a full restart.
 
 ## Tests
 
-- `ruby -Ilib test/server_mode_spec.rb` — server mode, auto-detect,
+- `ruby -Ilib test/server_mode_test.rb` — server mode, auto-detect,
   dedicated detection, hot-reload state, RCON roster parsing.
-- `ruby -Ilib test/packet_fixtures_spec.rb` — real captured packet fixtures.
-- `ruby -Ilib test/factorio_protocol_spec.rb` — protocol unit tests.
+- `ruby -Ilib test/packet_fixtures_test.rb` — real captured packet fixtures.
+- `ruby -Ilib test/factorio_protocol_test.rb` — protocol unit tests.

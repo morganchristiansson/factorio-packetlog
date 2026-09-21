@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-# Shared helpers for the Hivemind spec files:
-#   hivemind_spec.rb             agent core (triggers, context, greetings)
-#   hivemind_tools_spec.rb       RubyLLM tool classes
-#   hivemind_persistence_spec.rb session file round-trips
-#   hivemind_compaction_spec.rb  long-term memory + /compact
-#   hivemind_followups_spec.rb   scheduled follow-ups + scheduler
+# Shared helpers for the Hivemind test files:
+#   hivemind_test.rb             agent core (triggers, context, greetings)
+#   hivemind_tools_test.rb       RubyLLM tool classes
+#   hivemind_persistence_test.rb session file round-trips
+#   hivemind_compaction_test.rb  long-term memory + /compact
+#   hivemind_followups_test.rb   scheduled follow-ups + scheduler
 
 require 'minitest/autorun'
 require 'hivemind'

@@ -220,15 +220,16 @@ class FactorioSniffer
 
       # Translation agent: auto-translates chat for foreign players.
       # Enabled in server mode when RCON is available (no API key needed).
-      # Default backend is now argos-translate (installed on server, not locally).
+      # Backend and Google API key are read from config-translation.yaml
+      # and env (GOOGLE_TRANSLATE_API_KEY for hybrid/google backends).
       if @rcon
         begin
-          if (google_key = ENV['GOOGLE_TRANSLATE_API_KEY'])
-            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :hybrid, api_key: google_key, roster: -> { @attrs.roster_pairs })
+          @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
+          backend = @translation_agent.backend
+          if [:hybrid, :google].include?(backend) && ENV['GOOGLE_TRANSLATE_API_KEY']
             puts "[translate] Translation agent online — auto-translating foreign player chat (hybrid: argos + google cloud fallback)"
           else
-            @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, backend: :argos, roster: -> { @attrs.roster_pairs })
-            puts "[translate] Translation agent online — auto-translating foreign player chat (argos-translate backend)"
+            puts "[translate] Translation agent online — auto-translating foreign player chat (#{backend} backend)"
           end
         rescue => e
           warn "[translate] Translation agent disabled: #{e.message}"

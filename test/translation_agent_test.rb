@@ -145,7 +145,7 @@ class TestTranslationAgent < Minitest::Test
 
     _output, = capture_io do
       result = agent.on_chat({ game_player: 1 }, 'привет')
-      assert_equal [true, '[en] привет'], result
+      assert_equal [true, 'привет'], result
       agent.on_chat({ game_player: 3 }, 'hola que tal')
       assert_equal '[en] привет', agent.simulate_translation('ivan', 'ru', 'привет')
       agent.simulate_translation('pedro', 'pt-BR', 'olá')
@@ -156,7 +156,7 @@ class TestTranslationAgent < Minitest::Test
     assert_includes first, '/sc '
     assert_includes first, 'for _, p in pairs(game.connected_players)'
     assert_includes first, '[2]="[ru>en] ivan:'
-    assert_includes first, '[3]="[en->pt] ivan:'
+    assert_includes first, '[3]="[ru>pt] ivan:'
     refute_includes first, '[1]='
     assert_includes first, 'local x = t[p.index]'
     assert_includes first, 'p.print(x, ps)'
@@ -166,17 +166,17 @@ class TestTranslationAgent < Minitest::Test
     assert_includes first, '{color = (s.chat_color or s.color)}'
 
     second = commands[1]
-    assert_includes second, '[1]="[en->ru] pedro:'
+    assert_includes second, '[1]="[pt>ru] pedro:'
     assert_includes second, '[2]="[pt>en] pedro:'
     refute_includes second, '[3]='
 
-    third = commands[2]
-    assert_includes third, '[2]="[ru>en] ivan:'
-    assert_includes third, '[3]="[en->pt] ivan:'
-    refute_includes third, 'pt-BR'
+    fourth = commands[3]
+    assert_includes fourth, '[1]="[pt>ru] pedro:'
+    assert_includes fourth, '[2]="[pt>en] pedro:'
+    refute_includes fourth, 'pt-BR'
 
     fourth = commands[3]
-    assert_includes fourth, '[1]="[en->ru] pedro:'
+    assert_includes fourth, '[1]="[pt>ru] pedro:'
     assert_includes fourth, '[2]="[pt>en] pedro:'
     refute_includes fourth, 'pt-BR'
   end
@@ -213,7 +213,7 @@ class TestTranslationAgent < Minitest::Test
 
   def test_relay_skips_unchanged_whitelisted_and_unsupported_targets
     missing_pack = Class.new(MockTranslationService) do
-      def from_english(text, target_lang:)
+      def translate(text, source_lang:, target_lang:)
         target_lang == 'pt' ? text : super
       end
     end.new

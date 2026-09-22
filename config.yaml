@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────
+# Factorio Packet Sniffer — general config
+# ─────────────────────────────────────────────────────────────
+# Copy to config.yaml and edit. Settings here are overrides to
+# hardcoded defaults — absent or unchanged, defaults apply.
+# Secrets (RCON password, API keys, credentials) are env-only:
+#   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY,
+#   FACTORIO_USERNAME, FACTORIO_TOKEN
+# ─────────────────────────────────────────────────────────────
+
+# Capture source (one: port, interface, or server mode)
+port: 34197
+interface: null
+local_ip: null
+server: null
+server_ip: null
+no_rcon: false
+
+# Capture settings
+full_capture: false
+save_transfer_blocks: false
+save_capture_gz: true
+save_unknowns: null
+keep: 72
+max_size: 256
+
+# Player
+player_maps: []
+
+# Protocol
+protocol_version: null
+dump_raw_types: false
+validate: false
+
+# Logging
+log_keep_days: 7
+debug: false
+
+# Item/entity prototype dumps
+item_db: null
+entity_db: null

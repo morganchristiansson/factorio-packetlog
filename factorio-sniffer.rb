@@ -14,7 +14,7 @@ end
 # within QUIT_WINDOW quits.
 #
 # Usage:
-#   Live capture: sudo ruby factorio-sniffer.rb -i eth0 -p 34197
+#   Live capture: sudo ruby factorio-sniffer.rb
 #   Server mode:  sudo ruby factorio-sniffer.rb          (auto-detects IP/port/interface from the running factorio process)
 #   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
 #   Player cache (hardcoded): players-cache.json next to the process cwd
@@ -22,6 +22,14 @@ end
 #     (server), latest file is the live one, rotation + retention always on
 #     (defaults 72h / 256 MB, --keep / --max-size override); --save-capture-gz to compress.
 #   Filter by local IP: ... --local-ip 192.168.1.100
+#
+# Config files (edit these instead of CLI flags):
+#   config.yaml               general sniffer config (port, interface, capture, etc.)
+#   config-hivemind.yaml       Hivemind AI agent config (api_base, model, etc.)
+#   config-translation.yaml    Translation agent config (backend, locales, etc.)
+# Secrets (RCON password, API keys, credentials) are env-only:
+#   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY,
+#   FACTORIO_USERNAME, FACTORIO_TOKEN
 
 require_relative 'lib/server_detect'
 require_relative 'lib/factorio_protocol'
@@ -32,6 +40,7 @@ require_relative 'lib/live_capture'
 require_relative 'lib/rcon_client'
 require_relative 'lib/hivemind'
 require_relative 'lib/factorio_sniffer'
+require 'yaml'
 
 # ─────────────────────────────────────────────────────────────────────
 # Configuration
@@ -104,11 +113,11 @@ class OutputTee
 end
 
 # New history file per run in logs/ (next to captures/); prune files
-# older than LOG_KEEP_DAYS. Returns the path.
-def setup_output_log
+# older than log_keep_days. Returns the path.
+def setup_output_log(log_keep_days = LOG_KEEP_DAYS)
   dir = File.join(Dir.pwd, 'logs')
   FileUtils.mkdir_p(dir)
-  cutoff = Time.now - LOG_KEEP_DAYS * 24 * 3600
+  cutoff = Time.now - log_keep_days * 24 * 3600
   Dir.glob(File.join(dir, 'packetlog-*.log')).each do |f|
     begin
       File.delete(f) if File.mtime(f) < cutoff
@@ -126,64 +135,45 @@ def setup_output_log
   path
 end
 
+# Load general sniffer config from config.yaml. Returns a hash
+# with symbol keys (YAML string keys transformed). Secrets are
+# env-only and not stored in YAML.
+def load_config
+  return {} unless File.exist?('config.yaml')
+  (YAML.load_file('config.yaml') || {}).transform_keys(&:to_sym)
+end
+
 # ─────────────────────────────────────────────────────────────────────
 # CLI + hot-reload loop
 # ─────────────────────────────────────────────────────────────────────
 if __FILE__ == $PROGRAM_NAME
   require 'optparse'
 
-  options = { player_db: DEFAULT_PLAYER_DB }
+  config = load_config
+  options = { player_db: DEFAULT_PLAYER_DB }.merge(config)
 
   op = OptionParser.new do |opts|
     opts.banner = "Usage: #{$PROGRAM_NAME} [options]"
     opts.separator ''
     opts.separator 'Capture sources (specify one):'
-    opts.on('-i', '--interface IFACE', 'Network interface for live capture') { |v| options[:interface] = v }
     opts.on('-r', '--read PCAP', 'Read from pcap file') { |v| options[:pcap] = v }
     opts.separator ''
-    opts.on('-p', '--port PORT', Integer, "UDP port (default: #{DEFAULT_PORT})") { |v| options[:port] = v }
-    opts.on('--local-ip IP', 'Client mode: only show outgoing packets from this IP (filters out all server broadcasts)') { |v| options[:local_ip] = v }
-    opts.on('--server', 'Server mode: run on the game server host (auto-enabled when a factorio server is detected on this host). Analyzes only incoming (client→server) packets — no broadcast duplicates — and excludes map-download save packets (msg 13) from analysis and capture.') { |v| options[:server] = true }
-    opts.on('--server-ip IP', 'Server IP for --server mode (default: auto-detected from local interfaces)') { |v| options[:server_ip] = v }
-    opts.on('--no-rcon', 'Disable the RCON roster sync (server mode)') { |v| options[:no_rcon] = true }
-    opts.on('--save-capture-gz', 'Compress the (always-on, auto-named) capture stream with gzip (~3-4x smaller)') { |v| options[:save_capture_gz] = true }
-    opts.on('--save-transfer-blocks', 'Also record map-download TransferBlock packets (msg 13, raw save data) in the capture. Off by default: they contain no player actions and add ~12% to the file size. Required if you later want tools/extract_save_from_pcap.rb to reconstruct the save.') { |v| options[:save_transfer_blocks] = true }
-    opts.on('--keep HOURS', Integer, 'Rolling capture: rotate the capture file every hour and keep only the last HOURS worth across ALL runs (deletes older rotated files). Defaults to 72 when omitted — capture is always on, so retention is always bounded.') { |v| options[:keep] = v }
-    opts.on('--max-size MB', Integer, 'Rolling capture: rotate the capture file when it exceeds this size (MB) and prune rotated files to keep total rotated size bounded. Defaults to 256 when omitted. Restarts always preserve the previous capture (renamed with a timestamp).') { |v| options[:max_size] = v }
-    opts.on('--full-capture', 'Record every packet as-is: no TransferBlock exclusion, no keepalive-heartbeat filtering, no server-mode direction filter (implies --save-transfer-blocks)') { |v| options[:full_capture] = true }
-    opts.on('--save-unknowns PATH', 'Save individual packets with unknown action types to pcap (for analysis)') { |v| options[:save_unknowns] = v }
-    opts.on('--item-db PATH', 'Item prototype dump file (item_prototypes_runtime.txt) for item name lookup') { |v| options[:item_db] = v }
-    opts.on('--entity-db PATH', 'Entity prototype dump file (entity_prototypes_runtime.txt) for entity name lookup (pipette from world)') { |v| options[:entity_db] = v }
-    opts.on('--dump-raw-types', 'Dump raw action type IDs with hex data (for reverse engineering)') { |v| options[:dump_raw_types] = v }
-    opts.on('--validate', 'Show warnings about unknown action types and potential length mismatches') { |v| options[:validate] = v }
-    opts.on('--protocol-version VERSION', 'Factorio server version for segment-type mapping ("2.0" or "2.1"; default: auto-detect via RCON in server mode, else 2.1). Main action types are version-stable — only input-action segment types differ between 2.0 and 2.1.') { |v| options[:protocol_version] = v }
-    opts.on('--debug', 'Show the decoded per-action packet lines. Off by default — with many players those dominate the console; without this the output is chat + events + warnings only. Useful for inspecting invalid/missing decodes.') { |v| options[:debug] = true }
-
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
-    opts.on('--map-player ID:NAME', 'Map player ID to name (e.g. 1:dlbattle)') do |v|
-      (options[:player_maps] ||= []) << v
-    end
     opts.on('-h', '--help', 'Show help') { puts opts; exit }
   end
 
   op.parse!
 
-  # Hivemind AI agent is fully implicit: in server mode with an API key
-  # set (HIVE_API_KEY), the agent auto-enables — there is no --ai-agent
-  # flag. No key = no AI. Client/pcap mode never auto-enables (the agent
-  # needs RCON/game.print, which only server mode has).
-
   if options[:server_ip] && !options[:server]
     warn 'Warning: --server-ip has no effect without --server'
   end
 
-  # Auto-enable server mode: when no explicit mode was chosen (no --server,
-  # no --local-ip) and a factorio server is running on THIS host, run in
-  # server mode with the detected config. Live capture only — for pcap
-  # analysis the capture may come from a different machine, so an automatic
-  # server-IP filter would silently drop everything. The capture interface
-  # is auto-picked below (server's --bind IP → its interface, else the
-  # default-route interface), so `-i` is optional.
+  # Auto-enable server mode: when no explicit mode was chosen (no server config,
+  # no local_ip, no pcap) and a factorio server is running on THIS host, run in
+  # server mode with the detected config. Live capture only — for pcap analysis
+  # the capture may come from a different machine, so an automatic server-IP
+  # filter would silently drop everything. The capture interface is auto-picked
+  # below (server's --bind IP → its interface, else default route), so `-i` is optional.
   auto_server = false
   if !options[:server] && !options[:local_ip] && !options[:pcap]
     detected = ServerDetect.detect
@@ -193,14 +183,15 @@ if __FILE__ == $PROGRAM_NAME
     end
   end
 
-  # Implicit Hivemind agent (see above): server mode, live capture.
-  # Without HIVE_API_KEY the agent constructs disabled and says so once;
-  # this is the ONLY key-presence decision outside HiveMindAgent.
+  # Implicit Hivemind agent (see above): in server mode with an API key
+  # set (HIVE_API_KEY), the agent auto-enables — there is no --ai-agent
+  # flag. No key = no AI. Client/pcap mode never auto-enables (the agent
+  # needs RCON/game.print, which only server mode has).
   options[:ai_agent] = true if options[:server] && !options[:pcap]
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring
-  # the operator to pass it all by hand. Explicit CLI values win.
+  # the operator to pass it all by hand. Explicit config values win.
   if options[:server]
     detected ||= ServerDetect.detect
     if detected.empty?
@@ -213,7 +204,7 @@ if __FILE__ == $PROGRAM_NAME
       options[:interface] ||= ServerDetect.capture_iface(detected[:cmdline]) if !options[:pcap]
       if auto_server
         puts "Auto-enabled SERVER mode: running factorio server detected (pid #{detected[:pid]})"
-        puts '  (pass --local-ip to force client mode)'
+        puts '  (set server: false in config.yaml for client mode)'
       end
       puts "Auto-detected running factorio server (pid #{detected[:pid]}):"
       puts "  game port: #{detected[:game_port]}"
@@ -260,7 +251,7 @@ if __FILE__ == $PROGRAM_NAME
 
   # Console history from here on (auto-detect chatter, joins, chat —
   # everything below prints through the tee).
-  setup_output_log
+  setup_output_log(config[:log_keep_days])
 
   # Apply player mappings to the DB before starting
   db = PlayerDatabase.new(options[:player_db])
@@ -276,7 +267,7 @@ if __FILE__ == $PROGRAM_NAME
     puts
     if options[:server]
       puts 'Error: server mode could not pick a capture interface (no default route found).'
-      puts '  Pass -i IFACE explicitly (e.g. sudo ruby factorio-sniffer.rb -i ens18).'
+      puts '  Set interface in config.yaml.'
     else
       puts 'Error: specify --interface or --read'
     end
@@ -318,7 +309,6 @@ if __FILE__ == $PROGRAM_NAME
 
   begin
     sniffer.run
-    # Natural completion (pcap exhausted or capture loop ended) → finalize.
     sniffer.finish
   rescue Interrupt
     puts "\nInterrupt — shutting down."

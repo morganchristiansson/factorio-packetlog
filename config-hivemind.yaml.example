@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────
+# Hivemind AI agent — config example
+# ─────────────────────────────────────────────────────────────
+# Copy this to config-hivemind.yaml and edit. Settings here
+# document the defaults — unchanged values apply their hardcoded
+# defaults. API key, model, and endpoint are env-only:
+# HIVE_API_KEY, HIVE_MODEL, HIVE_API_BASE.
+# ─────────────────────────────────────────────────────────────
+
+# OpenAI-compatible endpoint. Env override: HIVE_API_BASE.
+api_base: "https://opencode.ai/zen/go/v1"
+
+# Model name. Env override: HIVE_MODEL.
+model: "deepseek-v4-flash"
+
+# Provider (hardcoded :openai).
+provider: openai
+
+# Max UNREAD console lines kept between prompts.
+history_size: 1000
+
+# Per-line clip in the history context.
+history_line_len: 120
+
+# Truncate replies to fit Factorio chat's ~500 char limit.
+max_reply_len: 400
+
+# Recent-context budget (characters) kept after compaction.
+trim_tail_chars: 20000
+
+# Auto-compaction gate (characters).
+auto_compaction_min_chars: 400000
+
+# Chat trigger phrases.
+triggers:
+  - hivemind
+  - good bot
+  - goodbot
+  - hm
+  - hive
+
+# Game-log watcher: log() events that fire a dedicated turn.
+log_turn_events:
+  - map-reset

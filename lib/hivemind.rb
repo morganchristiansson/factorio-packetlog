@@ -3,6 +3,7 @@
 require 'securerandom'
 require 'set'
 require 'time'
+require 'yaml'
 require 'ruby_llm'
 begin
   require 'ruby_llm-responses_api'
@@ -245,7 +246,8 @@ class HiveMindAgent
   def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
   def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil,
-                 attrs: nil, current_tick: nil, player_db: nil)
+                 attrs: nil, current_tick: nil, player_db: nil,
+                 api_base: nil, model: nil)
     @attrs = attrs
     @current_tick = current_tick
     @player_db = player_db
@@ -316,10 +318,11 @@ class HiveMindAgent
     #    endpoint); model/base/key come from env or defaults. Missing key,
     #    missing gem, or bad provider config now raises — FactorioSniffer
     #    rescues and leaves @agent=nil (hard fail, no disabled object).
+    hive_config = File.exist?('config-hivemind.yaml') ? (YAML.load_file('config-hivemind.yaml') || {}) : {}
     llm_api_key = api_key || ENV['HIVE_API_KEY']
-    @model = ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
+    @model = model || hive_config['model'] || ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
     @provider = self.class.provider_for(@model)
-    api_base = ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
+    api_base = api_base || hive_config['api_base'] || ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
 
     raise ArgumentError, 'no API key set (HIVE_API_KEY) — agent disabled' if llm_api_key.nil?
 

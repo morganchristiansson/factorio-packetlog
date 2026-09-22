@@ -101,7 +101,6 @@ class FactorioSniffer
     # NETWORK peer ids — those only equal game indexes for new joiners.
     @self_ip = nil
     @self_name = nil
-    @self_index = nil  # 0-indexed game player index of this client
     # peer_id (network) -> name, for join/leave events (peer ids are NOT
     # game indexes; game indexes come from heartbeat actions instead).
     @peer_names = {}
@@ -506,7 +505,6 @@ class FactorioSniffer
         else
           @self_ip = src_ip
           @self_name = cc[:username]
-          @self_index = nil
         end
       end
     end
@@ -581,7 +579,7 @@ class FactorioSniffer
       hb[:tick_closures].each do |tc|
         real = tc[:actions]&.find { |a| a[:type] != 0 && a[:type] != 84 }
         if real
-          idx = real[:player]
+          idx = real[:game_player]
           break
         end
       end
@@ -594,7 +592,7 @@ class FactorioSniffer
     # clients sharing one source IP. Also learns the src_ip binding so
     # later keepalive-only heartbeats (no actions → no index) still touch
     # via touch_heartbeat(src_ip).
-    touch_heartbeat_index(idx + 1, src_ip) if @options[:server] && idx
+    touch_heartbeat_index(idx, src_ip) if @options[:server] && idx
 
     # Bind usernames to game indexes from C→S heartbeat actions (joins:
     # msg 4 name + first real action's index → "confirmed as game player").
@@ -607,9 +605,9 @@ class FactorioSniffer
         name = entry && !entry[1] ? entry[0] : nil  # unconfirmed only
         if name
           entry[1] = true  # confirmed — never re-fire the join event
-          @player_db[idx + 1] = {name: name, locale: nil}
-          @player_db.remove_other_entries_for(name, idx + 1)
-          @attrs.set_index(name, idx + 1)  # confirming heartbeat = liveness proof
+          @player_db[idx] = {name: name, locale: nil}
+          @player_db.remove_other_entries_for(name, idx)
+          @attrs.set_index(name, idx)  # confirming heartbeat = liveness proof
           # src_ip → name for connected players: lets the clean-quit
           # signals (C→S PeerDisconnect sync action, msg 14 fallback)
           # resolve the leaver on C→S alone. Server mode has no S→C
@@ -619,19 +617,18 @@ class FactorioSniffer
           @agent&.enqueue(:on_player_event, :joined, name, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
           # One targeted RCON query to learn the joiner's locale (rare event;
           # rides the same heartbeat-confirm that bound their game index).
-          @translation_agent&.enqueue(:note_joined, idx + 1, name)
+          @translation_agent&.enqueue(:note_joined, idx, name)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-          puts "#{ts_str}  #{name} confirmed as game player ##{idx + 1}"
+          puts "#{ts_str}  #{name} confirmed as game player ##{idx}"
         end
-      elsif @self_name && src_ip == @self_ip && @self_index.nil?
-        @self_index = idx
-        @player_db[idx + 1] = {name: @self_name, locale: nil}
+      elsif @self_name && src_ip == @self_ip
+        @player_db[idx] = {name: @self_name, locale: nil}
         # Peer-id-based guess (peer_id+1) may differ for returning players;
         # remove any other slot claiming our name.
-        @player_db.remove_other_entries_for(@self_name, idx + 1)
-        @attrs.set_index(@self_name, idx + 1)
+        @player_db.remove_other_entries_for(@self_name, idx)
+        @attrs.set_index(@self_name, idx)
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-        puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx + 1}"
+        puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx}"
       end
     end
 
@@ -925,7 +922,7 @@ class FactorioSniffer
   end
 
   def log_action(ts, act, is_server, ghost: false)
-    pid = act[:game_player] || act[:player]
+    pid = act[:game_player]
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     arrow = is_server ? '<-' : '->'
 
@@ -958,7 +955,7 @@ class FactorioSniffer
 
     return if act[:name].start_with?('Unknown')
     # Skip server-internal actions (no real player)
-    return if act[:player] == 0xFFFF
+    return if act[:game_player] <= 0
     # Skip 'nothing' (type 0) - these are server padding/metadata after echoed actions
     return if act[:type] == 0
     # Skip server_tick_info (type 84) - server wrapper action (hash+tick) in every server heartbeat

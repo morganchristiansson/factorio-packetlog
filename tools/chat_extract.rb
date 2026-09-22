@@ -89,17 +89,17 @@ puts "# files: #{files.join(', ')}"
 
 # ── Name resolution ─────────────────────────────────────────────────
 
-# Player index (0-indexed game index +1 → players-cache.json key) → name.
-# pcap-derived bindings (msg-4 username + first C→S heartbeat index) win
-# over players-cache.json (which may be stale / missing recent joiners).
+# Player index (1-indexed game index) → name. pcap-derived bindings
+# (msg-4 username + first C→S heartbeat index) win over players-cache.json
+# (which may be stale / missing recent joiners).
 db = PlayerDatabase.new(File.join(__dir__, '..', 'players-cache.json'))
 index_name = {}
-ip_index = {}   # src_ip → 0-indexed game index (bound by first real action)
+ip_index = {}   # src_ip → 1-indexed game index (bound by first real action)
 ip_name = {}    # src_ip → username (from msg 4 ConnectionRequestReplyConfirm)
 
-def player_name(idx0, db, index_name)
-  return '?' if idx0.nil?
-  index_name[idx0] || db.lookup(idx0 + 1)
+def player_name(idx, db, index_name)
+  return '?' if idx.nil?
+  index_name[idx] || db.lookup(idx)
 end
 
 # ── Segment reassembly (mirrors FactorioSniffer#chat_action_data) ────
@@ -150,11 +150,11 @@ files.each do |f|
           hb[:tick_closures]&.each do |tc|
             real = tc[:actions]&.find { |a| a[:type] != 0 && a[:type] != 84 }
             if real
-              ip_index[src_ip] = real[:player]
+              ip_index[src_ip] = real[:game_player]
               # msg-4 username + first-heartbeat index = authoritative
               # name→index (same as server mode's confirm path).
               if ip_name[src_ip]
-                index_name[real[:player]] ||= ip_name[src_ip]
+                index_name[real[:game_player]] ||= ip_name[src_ip]
               end
               break
             end
@@ -163,7 +163,7 @@ files.each do |f|
         hb[:tick_closures]&.each do |tc|
           tc[:actions]&.each do |act|
             next unless act[:name] == 'write_to_console'
-            pname = player_name(act[:player], db, index_name)
+            pname = player_name(act[:game_player], db, index_name)
             data = reassemble_chat(chat_segments, act, pname, ts)
             next unless data
             msg = FactorioProtocol.decode_chat(data)

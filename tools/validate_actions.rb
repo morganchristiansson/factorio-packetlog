@@ -47,7 +47,7 @@ def rcon
   RconClient.new(host: d[:rcon_host] || 'localhost', port: d[:rcon_port], password: d[:rcon_password])
 end
 
-pkt_actions = Hash.new { |h, k| h[k] = [] }  # tick => [[raw_player, wire_type], ...]
+pkt_actions = Hash.new { |h, k| h[k] = [] }  # tick => [[game_player, wire_type], ...]
 
 # ── Capture mode: capture + tail the log for the same window ───────
 if options[:capture]
@@ -93,7 +93,7 @@ if options[:capture]
         hb = parsed[:heartbeat]
         hb[:tick_closures]&.each do |tc|
           next unless tc[:tick]
-          tc[:actions]&.each { |a| pkt_actions[tc[:tick]] << [a[:player], a[:type]] }
+          tc[:actions]&.each { |a| pkt_actions[tc[:tick]] << [a[:game_player], a[:type]] }
         end
       end
     end
@@ -119,7 +119,7 @@ if options[:pcap]
     hb = parsed[:heartbeat]
     hb[:tick_closures]&.each do |tc|
       next unless tc[:tick]
-      tc[:actions]&.each { |a| pkt_actions[tc[:tick]] << [a[:player], a[:type]] }
+      tc[:actions]&.each { |a| pkt_actions[tc[:tick]] << [a[:game_player], a[:type]] }
     end
   end
   lo, hi = pkt_actions.keys.minmax
@@ -138,37 +138,35 @@ puts "pcap: #{pkt_actions.size} ticks, #{pkt_actions.sum { |_, v| v.size }} acti
 puts "log:  #{log_actions.size} ticks, #{log_actions.sum { |_, v| v.size }} action lines"
 
 # ── Join on (tick, player, position) ───────────────────────────────
-# The log's player index may be raw (0-based) or game (1-based), and the
-# closure tick may lead/lag the server's processing tick — scan small
-# offsets and keep the alignment with the most (tick, player) joins.
+# The log's player index is 1-based, matching the decoded :game_player field.
+The closure tick may lead/lag the server's processing tick — scan small
+tick offsets and keep the alignment with the most (tick, player) joins.
 # Type-0 "nothing" padding is stripped from the pcap side (it is never
 # logged; keeping it would shift the last pairing by one).
 def self.normalize(name)
   name.to_s.gsub(/([a-z0-9])([A-Z])/, '\1_\2').downcase  # CamelCase -> snake_case
 end
 
-best = { score: -1, tick_off: 0, p_off: 0, conf: {}, exact: 0 }
+best = { score: -1, tick_off: 0, conf: {}, exact: 0 }
 (-2..2).each do |tick_off|
-  [0, 1].each do |p_off|
-    conf = Hash.new(0)
-    joined = 0
-    exact = 0
-    (log_actions.keys & pkt_actions.keys.map { |t| t + tick_off }).each do |lt|
-      lbp = log_actions[lt].group_by(&:first)
-      pbp = pkt_actions[lt - tick_off].group_by(&:first)
-      lbp.each do |lplayer, lseq|
-        pseq = pbp[lplayer + p_off]&.reject { |(_p, w)| w == 0 }  # strip nothing padding
-        next unless pseq
-        joined += 1
-        next unless lseq.size == pseq.size  # exact positional match only
-        exact += 1
-        lseq.zip(pseq).each { |(_, name), (_, wire)| conf[[wire, normalize(name)]] += 1 }
-      end
+  conf = Hash.new(0)
+  joined = 0
+  exact = 0
+  (log_actions.keys & pkt_actions.keys.map { |t| t + tick_off }).each do |lt|
+    lbp = log_actions[lt].group_by(&:first)
+    pbp = pkt_actions[lt - tick_off].group_by(&:first)
+    lbp.each do |lplayer, lseq|
+      pseq = pbp[lplayer]&.reject { |(_p, w)| w == 0 }  # strip nothing padding
+      next unless pseq
+      joined += 1
+      next unless lseq.size == pseq.size  # exact positional match only
+      exact += 1
+      lseq.zip(pseq).each { |(_, name), (_, wire)| conf[[wire, normalize(name)]] += 1 }
     end
-    best = { score: joined, tick_off: tick_off, p_off: p_off, conf: conf, exact: exact } if joined > best[:score]
   end
+  best = { score: joined, tick_off: tick_off, conf: conf, exact: exact } if joined > best[:score]
 end
-puts "alignment: tick_offset=#{best[:tick_off]} player=#{best[:p_off].zero? ? 'raw' : 'game'} (#{best[:score]} joins, #{best[:exact]} exact)"
+puts "alignment: tick_offset=#{best[:tick_off]} player=game (#{best[:score]} joins, #{best[:exact]} exact)"
 
 # Table names are snake_case; compare against the normalized log names.
 table = options[:table] == 21 ? FactorioProtocol::ACTIONS : FactorioProtocol::ACTIONS_20

@@ -89,9 +89,9 @@ structure and lossless-capture fixes.
 
 ## Player ID Conventions
 
-- **Game player indexes** (what heartbeat actions carry, 0-indexed in the
-  protocol) are the index into `game.players`; `players-cache.json` uses
-  1-indexed values. Add +1 to decoded values.
+- **Game player indexes** (heartbeat action `game_player` field) are
+  1-indexed (Lua-style); the wire protocol is 0-indexed but the parser
+  converts at decode time. `players-cache.json` uses 1-indexed values.
 - **Network peer ids** (ConnectionAcceptOrDeny `clientPeerInfo`, NewPeerInfo
   sync peer_id) are a separate connection counter. They only equal game
   indexes for brand-new joiners.

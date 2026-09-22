@@ -149,7 +149,9 @@ module FactorioProtocol
                                    is_drag: is_drag, is_server: is_server, is_last: is_last)
         break unless act
         tc[:actions] << act
-        last_index = act[:player]
+        # Keep the wire (0-indexed) index only for the next delta calculation;
+        # public action hashes expose the Lua-style 1-indexed game index.
+        last_index = act[:game_player] - 1
         tc[:hit_unknown] = true if act[:hit_unknown]
       end
 
@@ -186,7 +188,7 @@ module FactorioProtocol
           # Payload: uint32v length + data
           v_off, pay_len = decode_uint32v(data, offset); offset = v_off
           next unless pay_len && pay_len > 0 && offset + pay_len <= data.bytesize
-          segs << { type: seg_type, green: seg_green, total: total_len,
+          segs << { type: seg_type, raw_player: seg_green, total: total_len,
                     no: seg_number, payload: data[offset, pay_len] }
           offset += pay_len
         end
@@ -209,7 +211,7 @@ module FactorioProtocol
             seg_name = FactorioProtocol.segment_action_name(seg_type)
             tc[:actions] << {
               type: seg_type, name: seg_name,
-              player: parts.first[:green], game_player: parts.first[:green] + 1,
+              game_player: parts.first[:raw_player] + 1,
               delta: 0, data: payload, hit_unknown: false,
               total_segs: total_segs, seg_no: seg_no
             }
@@ -351,7 +353,7 @@ module FactorioProtocol
       end
 
       [offset, {
-        type: type, name: name, player: raw_player, game_player: game_player,
+        type: type, name: name, game_player: game_player,
         delta: delta, data: adata, hit_unknown: hit_unknown,
         type_offset: type_offset, data_offset: data_start,
       }]

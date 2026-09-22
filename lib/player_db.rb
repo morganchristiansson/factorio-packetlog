@@ -3,9 +3,9 @@
 require 'json'
 
 # Player ID -> info mapping, persisted to a JSON file.
-# IDs are 1-indexed game player indexes (protocol values are 0-indexed;
-# add +1 when decoding). Persists across restarts and hot reloads via the
-# JSON file.
+# IDs are 1-indexed game player indexes (parser converts from the
+# 0-indexed wire protocol at decode time). Persists across restarts and
+# hot reloads via the JSON file.
 #
 # TWO files, both managed here:
 #

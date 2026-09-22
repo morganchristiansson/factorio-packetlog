@@ -25,7 +25,7 @@ class TestPacketFixtures < Minitest::Test
   # end-to-end.
   def reassemble(split_actions)
     by_player = Hash.new { |h, k| h[k] = {} }
-    split_actions.each { |act| by_player[act[:player]][act[:seg_no]] = act[:data] }
+    split_actions.each { |act| by_player[act[:game_player]][act[:seg_no]] = act[:data] }
     by_player.map { |_player, parts| parts.keys.sort.map { |n| parts[n] }.join }
   end
 
@@ -46,7 +46,6 @@ class TestPacketFixtures < Minitest::Test
         refute_nil act, "#{fx[:name]}: action #{i} missing"
         assert_equal exp[:type], act[:type], "#{fx[:name]} action #{i} type"
         assert_equal exp[:name], act[:name], "#{fx[:name]} action #{i} name"
-        assert_equal exp[:player], act[:player], "#{fx[:name]} action #{i} player"
         assert_equal exp[:game_player], act[:game_player], "#{fx[:name]} action #{i} game_player"
         got_data = act[:data] ? act[:data].unpack1('H*') : nil
         assert_equal exp[:data], got_data, "#{fx[:name]} action #{i} data"

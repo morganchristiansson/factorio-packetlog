@@ -31,7 +31,7 @@ class TestAgentEvents < Minitest::Test
       sniffer = FactorioSniffer.new({player_db: nil}, pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
       sniffer.instance_variable_set(:@agent, hive)
       sniffer.instance_variable_set(:@translation_agent, translation)
-      action = {name: 'write_to_console', game_player: 1, player: 0, type: 1, data: "\x01\x02hi".b}
+      action = {name: 'write_to_console', game_player: 1, type: 1, data: "\x01\x02hi".b}
       capture_io do
         Timeout.timeout(1) do
           sniffer.send(:log_action, Time.now.to_f, action, false)

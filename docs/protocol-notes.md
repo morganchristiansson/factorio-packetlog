@@ -16,8 +16,9 @@ includes:
 
 ## Key Protocol Findings
 
-- **Player IDs**: 0-indexed in protocol, 1-indexed in game. `players-cache.json`
-  uses 1-indexed. Add `+1` to decoded values.
+- **Player IDs**: decoded as 1-indexed game player indexes (`game_player`
+  field). Wire protocol is 0-indexed; the +1 translation happens in the
+  parser, not in downstream code.
 - **Ghost flag**: detected via `next_receive & 1` in client heartbeats. When
   bit 0 of the 8-byte client timeshift field is 1, ghost mode is active.
 - **Build action lengths**:

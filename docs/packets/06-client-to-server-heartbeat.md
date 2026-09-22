@@ -58,6 +58,10 @@ Each Input Action:
 Player Index = `(previous_player_index + player_delta) & 0xFFFF`
 Previous player index starts at `0xFFFF` at the start of each tick closure.
 
+The formula above yields the raw wire (0-indexed) value. The parser
+converts it to the Lua-style 1-indexed `game_player` field at decode
+time — downstream code sees only 1-indexed values.
+
 ### Synchronizer Actions
 
 Used for peer synchronization (connection management, map downloads, etc.).

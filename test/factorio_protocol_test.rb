@@ -97,8 +97,8 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal 2, actions.size, 'wrapper + real action kept, metadata dropped'
     assert_equal 84, actions[0][:type]
     assert_equal 'deconstruct', actions[1][:name]
-    assert_equal 33, actions[1][:player]   # delta 33 relative to wrapper player 0
     assert_equal 34, actions[1][:game_player]
+    refute actions[1].key?(:player), 'raw 0-indexed player field is not public'
   end
 
   def test_client_heartbeat_keeps_all_actions
@@ -138,7 +138,8 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal 2, actions.size
     actions.each_with_index do |a, i|
       assert_equal 128, a[:type], "action #{i} type"
-      assert_equal 0, a[:player], "action #{i} must stay on player 0 (no phantom delta)"
+      assert_equal 1, a[:game_player], "action #{i} must stay on game player 1 (no phantom delta)"
+      refute a.key?(:player), "action #{i} must not expose raw 0-indexed player"
     end
     assert_equal 24, actions[0][:data].bytesize, 'intermediate zoom: payload only, no +8'
   end
@@ -156,7 +157,8 @@ class TestFactorioProtocol < Minitest::Test
     actions = extract_actions(result)
     assert_equal [9, 69], actions.map { |a| a[:type] }
     assert_equal '', actions[0][:data].unpack1('H*'), 'intermediate cleared has no data'
-    assert actions.all? { |a| a[:player] == 0 }
+    assert actions.all? { |a| a[:game_player] == 1 }
+    assert actions.all? { |a| !a.key?(:player) }
   end
 
   def test_client_266_followed_by_start_walking
@@ -171,7 +173,8 @@ class TestFactorioProtocol < Minitest::Test
     assert_equal [266, 69], actions.map { |a| a[:type] }
     assert_equal '84', actions[0][:data].unpack1('H*')
     assert_equal 16, actions[1][:data].bytesize
-    assert actions.all? { |a| a[:player] == 0 }
+    assert actions.all? { |a| a[:game_player] == 1 }
+    assert actions.all? { |a| !a.key?(:player) }
   end
 
   def test_client_drag_build_carries_position
@@ -187,7 +190,8 @@ class TestFactorioProtocol < Minitest::Test
     actions = extract_actions(result)
     assert_equal [68, 9], actions.map { |a| a[:type] }
     assert_equal 21, actions[0][:data].bytesize, 'drag build carries both positions'
-    assert actions.all? { |a| a[:player] == 1 }
+    assert actions.all? { |a| a[:game_player] == 2 }
+    assert actions.all? { |a| !a.key?(:player) }
   end
 
   # ── Build action (type 68) ─────────────────────────────────────
@@ -360,8 +364,8 @@ class TestFactorioProtocol < Minitest::Test
     result = FactorioProtocol.parse_udp_payload(pkt)
     actions = extract_actions(result)
     assert_equal 1, actions.size
-    assert_equal 1, actions[0][:player]   # raw
-    assert_equal 2, actions[0][:game_player]  # game (1-indexed)
+    assert_equal 2, actions[0][:game_player]  # Lua-style 1-indexed
+    refute actions[0].key?(:player), 'raw 0-indexed player field is not public'
 
     # Second action with delta=11: raw = 1+11 = 12, game = 13
     pkt2 = build_client_tc_packet([
@@ -371,8 +375,8 @@ class TestFactorioProtocol < Minitest::Test
     result2 = FactorioProtocol.parse_udp_payload(pkt2)
     actions2 = extract_actions(result2)
     assert_equal 2, actions2.size
-    assert_equal 12, actions2[1][:player]   # raw
-    assert_equal 13, actions2[1][:game_player]  # game
+    assert_equal 13, actions2[1][:game_player]  # Lua-style 1-indexed
+    refute actions2[1].key?(:player), 'raw 0-indexed player field is not public'
   end
 
   # ── Network header parsing ─────────────────────────────────────

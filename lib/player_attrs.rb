@@ -4,10 +4,6 @@
 # populated once from RCON at startup and maintained by packet decoding:
 #
 #   connected   — true while in-game (NewPeerInfo / PeerDisconnect)
-#   admin       — seeded from RCON; there is no reliable packet signal for
-#                 admin changes (the wire action is a UI action, not a
-#                 status change), so it stays as seeded. Re-seed / re-query
-#                 via RCON to refresh.
 #   online_time — total ticks played across ALL sessions. Seeded from RCON
 #                 (which includes the current session), then computed
 #                 LAZILY on read — never auto-incremented:
@@ -39,28 +35,29 @@
 # atomically (one structure per player — no parallel copies to drift).
 class PlayerAttrs
   def initialize
-    @players = {}  # name -> {index:, connected:, admin:, base_ticks:,
+    @players = {}  # name -> {index:, connected:, base_ticks:,
                    #         session_start:, afk_seed:, afk_anchor:, last_action:,
-                   #         hb:}
+                   #         hb:, rcon_seeded:}
     @mutex = Mutex.new
   end
 
   # Seed from an RCON player_attributes query result (one hash per player:
-  # {index:, name:, connected:, admin:, online_time:, afk_time:}).
+  # {index:, name:, connected:, online_time:, afk_time:}). Admin status is
+  # stored in PlayerDatabase so it survives restarts in players-cache.json.
   # Connected seeds are the authoritative live-roster entry at startup;
   # they get an immediate liveness stamp so the watchdog can't drop them
   # before proof of life arrives.
-  def seed(name, index:, connected:, admin:, online_time:, afk_time: 0)
+  def seed(name, index:, connected:, online_time:, afk_time: 0)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @mutex.synchronize do
       p = (@players[name] ||= {})
       p[:index] ||= index
       p[:connected] = connected
-      p[:admin] = admin
       p[:base_ticks] = online_time.to_i
       p[:afk_seed] = afk_time.to_i
       p[:afk_anchor] = nil  # anchored at the first observed game tick
       p[:last_action] = nil # first real action resets afk to 0
+      p[:rcon_seeded] = true
       # Connected players are anchored at the first observed game tick;
       # offline players have no live session at all.
       p[:session_start] = nil
@@ -71,8 +68,11 @@ class PlayerAttrs
 
   # NewPeerInfo — player joined. Session start = current game tick; the
   # join itself is liveness proof. If the player was seeded as connected but
-  # not yet anchored, anchor here.
-  def connect(name, tick)
+  # not yet anchored, anchor here. Optionally folds in a single targeted
+  # RCON join lookup (rcon_attrs = {index:, name:, connected:,
+  # online_time:, afk_time:}) so the player's stats are authoritative from
+  # the first prompt instead of 0 — this runs once per unseeded join.
+  def connect(name, tick, rcon_attrs = nil)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @mutex.synchronize do
       p = (@players[name] ||= {})
@@ -86,6 +86,20 @@ class PlayerAttrs
         # math never hits nil.
         p[:base_ticks] ||= 0
         p[:afk_seed] ||= 0
+        p[:rcon_seeded] = false unless p[:rcon_seeded]
+        if rcon_attrs
+          online = rcon_attrs[:online_time].to_i
+          if tick
+            start = p[:session_start] || tick
+            elapsed = [tick.to_i - start, 0].max
+            p[:base_ticks] = [online - elapsed, 0].max
+          else
+            p[:base_ticks] = online
+          end
+          p[:afk_seed] = rcon_attrs[:afk_time].to_i
+          p[:last_action] = nil
+          p[:rcon_seeded] = true
+        end
         p[:hb] = now
         p
       end
@@ -154,6 +168,7 @@ class PlayerAttrs
     p = @players[name]
     return 0 unless p
     base = p[:base_ticks] || 0
+    return base unless current_tick
     if p[:connected] && p[:session_start]
       base + [current_tick - p[:session_start], 0].max
     else
@@ -173,6 +188,10 @@ class PlayerAttrs
     else
       p[:afk_seed] || 0
     end
+  end
+
+  def rcon_seeded?(name)
+    @mutex.synchronize { !!(@players[name] && @players[name][:rcon_seeded]) }
   end
 
   # ── Live roster / liveness (drives the server-mode timeout watchdog) ──

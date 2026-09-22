@@ -138,6 +138,15 @@ class RconClient
     self.class.parse_player_attrs(json_query(PLAYER_ATTRS_FILENAME, PLAYER_ATTRS_WRITE_LUA, PLAYER_ATTRS_PRINT_LUA))
   end
 
+  # Fetch one connected player's attributes for a join-time enrichment query.
+  # This is deliberately targeted: the full dump belongs at startup only.
+  # One-line /sc command; returns a parsed LuaPlayer-attr hash or nil.
+  def player_attributes_for(name)
+    escaped = lua_quote(name)
+    body = execute(%(do local p=game.connected_players["#{escaped}"] rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale}) or "nil") end))
+    self.class.parse_player_attrs(body)&.find { |p| p[:name] == name }
+  end
+
   # Fetch a JSON payload, preferring helpers.write_file to <user-data>
   # script-output (no 4KB rcon.print response cap) when the server's
   # script-output dir is known locally — the sniffer runs ON the server

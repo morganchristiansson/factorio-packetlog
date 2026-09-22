@@ -64,8 +64,9 @@ either on a client or on the game server host (server mode, with RCON).
   players currently in-game (`FactorioSniffer#online_players`) — seeded
   from the RCON roster, updated on NewPeerInfo / PeerDisconnect / the C→S
   PeerDisconnect quit signal, indexes bound by C→S heartbeats. Survives
-  hot reloads. The Hivemind agent does NOT read this map — it queries the
-  RCON roster live instead (see `HiveMindAgent#online_player_list`).
+  hot reloads. The Hivemind agent reads the packet-derived
+  `@attrs` cache instead of querying RCON for roster/stats
+  (targeted RCON lookup only for newly joined players).
 - **Server mode captures and analyzes ONLY C→S packets** (the server's
   S→C broadcasts are N duplicates per event and the capture filter drops
   them; there is no S→C analysis at all). Every join/leave signal must

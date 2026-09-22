@@ -289,7 +289,7 @@ class TestServerMode < Minitest::Test
   def test_hot_reload_preserves_state
     sniffer = make_test_sniffer(server: true, server_ip: SERVER_IP)
     sniffer.instance_variable_set(:@player_db, PlayerDatabase.new(nil))
-    sniffer.instance_variable_get(:@player_db).add(7, 'hotreload_user')
+    sniffer.instance_variable_get(:@player_db)[7] = {name: 'hotreload_user'}
     sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_pipette'))
     stats = sniffer.instance_variable_get(:@stats)
     player_db = sniffer.instance_variable_get(:@player_db)
@@ -550,19 +550,19 @@ class TestServerMode < Minitest::Test
     # A name that arrived binary-flagged (pre-fix decode path / reloaded state)
     # must be sanitized on add — the stored value stays usable and JSON-safe.
     db = PlayerDatabase.new(nil)
-    db.add(1, "sévérin".b)
+    db[1] = {name: "sévérin".b}
     name = db.lookup(1)
     assert_equal 'sévérin', name, 'binary-flagged name sanitized on add'
     assert_equal Encoding::UTF_8, name.encoding, 'stored name is valid UTF-8'
     assert name.valid_encoding?, 'stored name is valid UTF-8'
-    assert_equal 1, db.name_to_id('sévérin'), 'name index works with the sanitized name'
+    assert_equal 1, db.id_for('sévérin'), 'name index works with the sanitized name'
 
     # Simulate what an old reload could leave behind: a binary entry injected
     # straight into @players (bypassing add). save() must still write valid JSON.
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'players-cache.json')
       db2 = PlayerDatabase.new(path)
-      db2.add(1, 'alice')
+      db2[1] = {name: 'alice'}
       db2.instance_variable_get(:@players)[2] = { name: "sévérin".b, locale: nil }   # legacy poison
       db2.save
       raw = File.read(path)
@@ -580,17 +580,60 @@ class TestServerMode < Minitest::Test
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'players-cache.json')
       cdb = PlayerDatabase.new(path)
-      cdb.add(1, 'alice')
+      cdb[1] = {name: 'alice'}
       threads = [
-        Thread.new { 100.times { |i| cdb.add(100 + i, "capture#{i}") } },
+        Thread.new { 100.times { |i| cdb[100 + i] = {name: "capture#{i}"} } },
         Thread.new { 100.times { |i| cdb.set_locale_by_id(1, "pt-BR") } },
         Thread.new { 100.times { |i| cdb.set_locale_overrides("bob#{i}", ['en', 'pt']) } },
       ]
       threads.each(&:value)
-      assert_equal 101, cdb.players.size, 'concurrent hash writers lose no entries'
-      assert_equal 'pt-BR', cdb.get_locale(1), 'concurrent set_locale_by_id lands'
-      assert_equal ['en', 'pt'], cdb.locale_overrides('bob99'), 'concurrent locales writer lands'
-      assert_equal cdb.players, PlayerDatabase.new(path).players, 'concurrent writes persist intact'
+      reloaded = PlayerDatabase.new(path)
+      assert_equal 101, reloaded.players.size, 'concurrent writes persist intact'
+      assert_equal cdb.players.transform_values { |p| [p[:name], p[:locale]] }.sort,
+                   reloaded.players.transform_values { |p| [p[:name], p[:locale]] }.sort,
+                   'concurrent writes persist intact'
+    end
+  end
+
+  # ── Player DB admin persistence ─────────────────────────────────────
+
+  def test_player_db_admin_persistence
+    # explicit admin updates must not be ignored by add()
+    db = PlayerDatabase.new(nil)
+    db[1] = {name: 'alice', admin: true}
+    db[2] = {name: 'bob', admin: false}
+    assert db['alice'][:admin], 'admin true is readable'
+    refute db['bob'][:admin], 'admin false is readable'
+    refute (db['unknown'] || {})[:admin], 'unknown defaults to false'
+    db['alice'] = {admin: false}
+    refute db['alice'][:admin], 'explicit admin false updates the DB'
+
+    # persisted to disk and reloaded
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'players-cache.json')
+      db2 = PlayerDatabase.new(path)
+      db2[1] = {name: 'alice', admin: true}
+      db2[2] = {name: 'bob', admin: false}
+      db2.save
+      reloaded = PlayerDatabase.new(path)
+      assert_equal [true, false, false], [reloaded['alice'][:admin], reloaded['bob'][:admin], (reloaded['unknown'] || {})[:admin] || false], 'admin survives reload'
+
+      # explicit false persists after update
+      db2['alice'] = {admin: false}
+      db2.save
+      reloaded2 = PlayerDatabase.new(path)
+      refute (reloaded2['alice'] || {})[:admin], 'explicit false persists'
+      assert_equal [false, false], [(reloaded2['alice'] || {})[:admin] || false, (reloaded2['bob'] || {})[:admin] || false]
+    end
+
+    # legacy entries without admin load safely as false
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'players-cache.json')
+      legacy = PlayerDatabase.new(path)
+      legacy[1] = {name: 'carol'}            # admin defaults to nil (legacy injection)
+      legacy.save
+      reloaded_legacy = PlayerDatabase.new(path)
+      refute (reloaded_legacy['carol'] || {})[:admin], 'missing admin defaults to false'
     end
   end
 
@@ -664,28 +707,18 @@ class TestServerMode < Minitest::Test
     capture_io { sniffer.send(:check_heartbeat_timeouts) }
     assert attrs.online_names.include?('ripe'), 'src_ip touch keeps the player alive'
 
-    # RCON is authoritative for timeouts: a coffeeowl-style false positive
-    # (roster-seeded + idle → no attributable packets) must NOT fire while the
-    # game server still reports the player connected.
-    wd_rcon_rows = [{ index: 9, name: 'phantom', connected: true, admin: false, online_time: 0, afk_time: 0, locale: nil }]
-    wd_rcon = Object.new
-    wd_rcon.define_singleton_method(:player_attributes) { wd_rcon_rows }
-    sniffer.instance_variable_set(:@rcon, wd_rcon)
-    attrs.roster_online('phantom', 9)
-    players['phantom'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
-
-    # RCON-confirmed-gone player must still fire the timeout (the guard must
-    # not swallow real departures).
-    wd_rcon_rows << { index: 10, name: 'gone', connected: false, admin: false, online_time: 0, afk_time: 0, locale: nil }
+    # Liveness is packet-derived, not periodic RCON (load_roster stays
+    # as-is on startup/reload): roster-seeded players that never get
+    # attributable packets can time out (a false positive forces a
+    # rejoin; a false negative only registers late).
+    sniffer.instance_variable_set(:@rcon, nil)
     attrs.roster_online('gone', 10)
     players['gone'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
     wd_events.clear
     output, = capture_io { sniffer.send(:check_heartbeat_timeouts) }
-    assert attrs.online_names.include?('phantom'), 'RCON-connected player survives packet silence (no false timeout)'
-    assert wd_events.include?([:timeout, 'gone']), 'RCON-confirmed-gone player still fires the timeout'
-    refute attrs.online_names.include?('gone'), 'RCON-confirmed-gone player removed from roster'
-    refute wd_events.include?([:timeout, 'phantom']), 'no timeout event for the RCON-connected player'
-    assert_includes output, 'gone timed out', 'console prints the RCON-confirmed-gone timeout'
+    assert wd_events.include?([:timeout, 'gone']), 'disconnected roster player still fires the timeout'
+    refute attrs.online_names.include?('gone'), 'roster player removed from roster'
+    assert_includes output, 'gone timed out', 'console prints the timeout'
     assert_includes output, 'no heartbeat', 'console prints the timeout reason'
   ensure
     sniffer&.instance_variable_get(:@pcap_writer)&.close

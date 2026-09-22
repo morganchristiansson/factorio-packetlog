@@ -215,13 +215,22 @@ class HiveMindAgent
   # rcon: an RconClient (for game.print replies). Chat completions need
   # an API key: HIVE_API_KEY env by default; the api_key PARAM exists as
   # the specs' injection point ('sk-test') — production never passes it.
-  # Model/endpoint resolve from HIVE_MODEL / HIVE_API_BASE or the class
-  # defaults. session_path: false disables the session file;
-  # memory_dir: false disables long-term memory (default memories/).
-  # Resolved model id (HIVE_MODEL or default) — startup log reads this.
   attr_reader :model
   attr_reader :last_trigger
   attr_reader :memory_store
+
+  # Cached packet-derived player attributes (lib/player_attrs.rb),
+  # or nil when the agent is used standalone (no @attrs object).
+  attr_accessor :attrs
+
+  # Cached PlayerDatabase (lib/player_db.rb) for admin status and
+  # targeted RCON enrichment writes, or nil for standalone agents
+  # (fall back to direct RCON admin data).
+  attr_accessor :player_db
+
+  # Callable returning the current game tick for cached stats,
+  # or nil. Set by FactorioSniffer to @game_tick.
+  attr_accessor :current_tick
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
@@ -235,7 +244,11 @@ class HiveMindAgent
   # its id lazily on first use instead of sending a blank header.
   def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
-  def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil)
+  def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil,
+                 attrs: nil, current_tick: nil, player_db: nil)
+    @attrs = attrs
+    @current_tick = current_tick
+    @player_db = player_db
     @rcon = rcon
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
@@ -874,23 +887,65 @@ class HiveMindAgent
     persist_queue! if @session_path
   end
 
-  # Names of players currently in-game, queried live from RCON. There is
-  # deliberately no other source: every reply is DELIVERED via RCON too,
-  # so if these queries fail nothing could be sent regardless. Names are
-  # force-cleaned: wire-derived names may be binary-flagged and must not
-  # taint the UTF-8 context snapshot.
+  # Names of players currently in-game. Primary source: the
+  # sniffer's packet-derived online tracking
+  # (PlayerAttrs#online_names). If the agent is standalone
+  # (no @attrs object), fall back to an RCON roster query.
+  # Names are force-cleaned: wire-derived names may be
+  # binary-flagged and must not taint the UTF-8 context snapshot.
   def online_player_list
+    if @attrs
+      return @attrs.online_names.map { |n| clean_text(n) }
+    end
     @rcon&.connected_players&.map { |p| clean_text(p[:name]) } || []
   rescue StandardError => e
     log_error('online-player query failed', e)
     []
   end
 
-  # Attribute snapshot for a specific player ({name:, admin:, connected:,
-  # online_time:} — LuaPlayer attrs via RCON), or nil when unknown.
+  # Current game tick for cached stats snapshots, or nil when the
+  # agent is standalone or no tick has been observed yet.
+  def current_tick_value
+    @current_tick&.call
+  end
+
+  # Attribute snapshot for a specific player. Primary source:
+  # the cached packet-derived attrs (PlayerAttrs accessors).
+  # Newly joined players are not RCON-seeded yet, so they get
+  # ONE targeted RCON enrichment query (RconClient#player_attributes_for)
+  # folded into PlayerAttrs#connect; after that, cached values are
+  # used. Player admin is read from PlayerDatabase when available;
+  # standalone agents fall back to direct RCON player_attributes.
   def player_attrs_for(name)
+    if @attrs && @attrs.rcon_seeded?(name)
+      return {
+        name: name,
+        admin: @player_db ? @player_db[name]&.fetch(:admin, false) : (@rcon&.player_attributes_for(name)&.fetch(:admin, false) || false),
+        online_time_ticks: @attrs.online_time_ticks(name, current_tick_value),
+      }
+    end
     return nil unless @rcon
-    @rcon.player_attributes&.find { |p| p[:name] == name }
+    attrs = nil
+    if @rcon.respond_to?(:player_attributes_for)
+      attrs = @rcon.player_attributes_for(name)
+    end
+    # Targeted lookup can miss offline/disconnected players; fall
+    # back to the full dump for standalone agents / missing data.
+    if attrs.nil? && @rcon.respond_to?(:player_attributes)
+      attrs = @rcon.player_attributes&.find { |p| p[:name] == name }
+    end
+    return nil unless attrs
+    if @attrs && !@attrs.rcon_seeded?(name)
+      @attrs.connect(name, current_tick_value, attrs)
+      @player_db[attrs[:index]] = {name: name, admin: attrs[:admin]}
+      {
+        name: name,
+        admin: @player_db ? @player_db[name]&.fetch(:admin, false) : attrs[:admin],
+        online_time_ticks: @attrs.online_time_ticks(name, current_tick_value),
+      }
+    else
+      attrs
+    end
   rescue StandardError => e
     log_error("player attrs query failed for #{name}", e)
     nil
@@ -919,8 +974,31 @@ class HiveMindAgent
   # right now; lifetime stats of everyone else are noise (and a growing
   # token cost on long-lived servers). Flags: admin; afk <time> while
   # connected and idle.
+  # Player attribute lines for the system context. Primary source:
+  # the cached packet-derived attrs (PlayerAttrs#online_names + per-player
+  # accessors) seeded from RCON at startup and maintained by packets.
+  # Offline players are omitted entirely — the prompt covers who is
+  # online right now; lifetime stats of everyone else are noise (and
+  # a growing token cost on long-lived servers). Flags: admin; afk
+  # <time> while connected and idle. If the agent is standalone
+  # (no @attrs object), fall back to a direct RCON player_attributes
+  # query.
   def player_stat_lines
-    list = @rcon ? (@rcon.player_attributes || []) : []
+    if @attrs
+      tick = current_tick_value
+      names = @attrs.online_names
+      list = names.map do |name|
+        {
+          name: name,
+          connected: true,
+          admin: @player_db ? @player_db[name]&.fetch(:admin, false) : (@rcon&.player_attributes_for(name)&.fetch(:admin, false) || false),
+          online_time_ticks: @attrs.online_time_ticks(name, tick),
+          afk_time_ticks: @attrs.afk_time_ticks(name, tick),
+        }
+      end
+    else
+      list = @rcon ? (@rcon.player_attributes || []) : []
+    end
     list.select { |p| p[:connected] }.map do |p|
       time = format_ticks(p[:online_time_ticks] || p[:online_time])
       flags = []

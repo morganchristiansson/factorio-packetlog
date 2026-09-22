@@ -28,15 +28,19 @@ class FakeRcon
     @sent << text
   end
   def player_attributes = @attrs
+  def player_attributes_for(name)
+    @attrs&.find { |a| a[:name] == name }
+  end
   def connected_players = @connected.map { |p| p.is_a?(Hash) ? p : { name: p } }
 end
 
 module HivemindSpecHelpers
   # A standard offline agent: no session file, no memory dir, empty
   # rosters, LLM calls stubbed so tests never hit the network.
-  def make_agent(**overrides)
+  def make_agent(player_db: nil, **overrides)
     agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test',
-                              session_path: false, memory_dir: false, **overrides)
+                              session_path: false, memory_dir: false,
+                              player_db: player_db, **overrides)
     agent.define_singleton_method(:complete) { |_prompt| '' }
     agent
   end

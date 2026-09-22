@@ -119,8 +119,9 @@ class FactorioSniffer
     # {seg_no => payload}. Split chat messages arrive as separate
     # input-action segments across packets; merged when complete.
     @chat_segments = {}
-    # Mirrored LuaPlayer attributes (connected/admin/online_time): seeded
-    # once from RCON, maintained by packet decoding. See PlayerAttrs.
+    # Mirrored LuaPlayer attributes (connected/online_time/afk_time):
+    # seeded once from RCON, maintained by packet decoding.
+    # Admin status lives in PlayerDatabase (players-cache.json). See PlayerAttrs.
     # Also owns the live roster (connected records) + liveness (:hb).
     @attrs = PlayerAttrs.new
     # Latest game tick observed in heartbeat tick closures — the clock for
@@ -195,12 +196,17 @@ class FactorioSniffer
       # say "hivemind". Auto-enabled by the entry point (server mode +
       # HIVE_API_KEY). Lives as a plain ivar: hot reload swaps the CODE under
       # this object, not the object itself, so there is nothing to carry
-      # over or re-point. The agent pulls its roster/stats straight from
-      # RCON.
+      # over or re-point. Context comes from the packet-derived
+      # @attrs cache (seeded from RCON at startup, maintained by
+      # packets); online players and stats are cached. Player admin is
+      # stored in PlayerDatabase (players-cache.json); targeted RCON
+      # attrs lookups happen once for newly joined players only.
       if options[:ai_agent]
         if @rcon
           begin
-            @agent = HiveMindAgent.new(rcon: @rcon)
+            @agent = HiveMindAgent.new(rcon: @rcon, attrs: @attrs,
+                                        current_tick: -> { @game_tick },
+                                        player_db: @player_db)
             @agent.ensure_followup_scheduler
             @agent.ensure_log_watcher(ServerDetect.log_path)
             puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
@@ -337,6 +343,13 @@ class FactorioSniffer
     select_protocol_version
     @agent&.ensure_followup_scheduler
     @agent&.ensure_log_watcher(ServerDetect.log_path)
+    # Hot reload swaps code under the same agent object; re-point
+    # the cached attrs/tick provider in case this is the first
+    # reload after the agent was constructed (or libs changed
+    # the ivar shape).
+    @agent&.attrs = @attrs
+    @agent&.current_tick = -> { @game_tick }
+    @agent.player_db = @player_db if @agent
     # Agent event queues/workers persist on the same objects across reloads.
   end
 
@@ -510,7 +523,7 @@ class FactorioSniffer
       ca[:peers].each do |p|
         @peer_names[p[:peer_id]] = p[:name]
         pid = p[:peer_id] + 1
-        @player_db.add(pid, p[:name], locale: nil)
+        @player_db[pid] = {name: p[:name], locale: nil}
         puts "#{ts_str}  [server]  online peer #{p[:peer_id]} -> #{p[:name]} (candidate index #{pid})"
       end
     end
@@ -530,7 +543,7 @@ class FactorioSniffer
       if sa[:username]  # NewPeerInfo — a player joined (or is this client)
         @peer_names[sa[:peer_id]] = sa[:username]
         pid = sa[:peer_id] ? sa[:peer_id] + 1 : 0
-        @player_db.add(pid, sa[:username], locale: nil)
+        @player_db[pid] = {name: sa[:username], locale: nil}
         # Join = liveness proof (connect stamps hb); index bound once a
         # C→S heartbeat confirms it.
         @attrs.connect(sa[:username], @game_tick)
@@ -594,7 +607,7 @@ class FactorioSniffer
         name = entry && !entry[1] ? entry[0] : nil  # unconfirmed only
         if name
           entry[1] = true  # confirmed — never re-fire the join event
-          @player_db.add(idx + 1, name, locale: nil)
+          @player_db[idx + 1] = {name: name, locale: nil}
           @player_db.remove_other_entries_for(name, idx + 1)
           @attrs.set_index(name, idx + 1)  # confirming heartbeat = liveness proof
           # src_ip → name for connected players: lets the clean-quit
@@ -612,7 +625,7 @@ class FactorioSniffer
         end
       elsif @self_name && src_ip == @self_ip && @self_index.nil?
         @self_index = idx
-        @player_db.add(idx + 1, @self_name, locale: nil)
+        @player_db[idx + 1] = {name: @self_name, locale: nil}
         # Peer-id-based guess (peer_id+1) may differ for returning players;
         # remove any other slot claiming our name.
         @player_db.remove_other_entries_for(@self_name, idx + 1)
@@ -1007,7 +1020,7 @@ class FactorioSniffer
     connected = attrs.select { |a| a[:connected] }
     return if connected.empty?
     connected.each do |a|
-      @player_db.add(a[:index], a[:name], locale: a[:locale])
+      @player_db[a[:index]] = {name: a[:name], locale: a[:locale], admin: a[:admin]}
       @player_db.remove_other_entries_for(a[:name], a[:index])
       # Authoritative live-roster seed (connected + index + fresh hb);
       # time accounting is player_attributes' job (load_player_attrs).
@@ -1215,9 +1228,10 @@ class FactorioSniffer
 
   # (everything below here is private as before)
 
-  # One-shot seed of mirrored LuaPlayer attributes (connected/admin/
-  # online_time) from RCON for ALL known players. After this, the packet
-  # stream maintains them (PlayerAttrs). A failed/truncated query is
+  # One-shot seed of mirrored LuaPlayer attributes (connected /
+  # online_time / afk_time) from RCON for ALL known players. Admin is
+  # stored in PlayerDatabase (players-cache.json). After this, the packet
+  # stream maintains attrs (PlayerAttrs). A failed/truncated query is
   # non-fatal — attrs are enrichment; the roster/stream keep working.
   def load_player_attrs
     return if @attrs_loaded
@@ -1227,8 +1241,9 @@ class FactorioSniffer
     @attrs_query = nil
     return if attrs.nil? || attrs.empty?
     attrs.each do |a|
+      @player_db[a[:index]] = {admin: a[:admin]}
       @attrs.seed(a[:name], index: a[:index], connected: a[:connected],
-                   admin: a[:admin], online_time: a[:online_time],
+                   online_time: a[:online_time],
                    afk_time: a[:afk_time])  # connected seeds join the live roster
     end
     ts = Time.now.strftime('%H:%M:%S.%L')
@@ -1300,19 +1315,8 @@ class FactorioSniffer
   def timeout_player(name, idle)
     # Refreshed since the scan → still alive.
     return unless @attrs.still_stale?(name, HEARTBEAT_TIMEOUT)
-    # Packets can't prove life for players we can't attribute (roster-seeded
-    # with no learned src_ip, NAT'd, idle: keepalive-only heartbeats carry no
-    # index). Capture silence ≠ gone: confirm with RCON (authoritative) —
-    # never drop a player the game server still reports connected.
-    if @rcon
-      attrs = @rcon.player_attributes
-      return unless attrs # query failed → assume still online, retry next scan
-      row = attrs.find { |a| a[:name] == name }
-      if row && row[:connected]
-        @attrs.touch(name) # game says online → our silence was an attribution blind spot; hb refreshed, re-check ≥60s out
-        return
-      end
-    end
+    # Liveness comes from packet-derived heartbeats, not periodic
+    # RCON roster refreshes (load_roster stays as-is on startup/reload).
     @attrs.disconnect(name, @game_tick)
     @agent&.enqueue(:on_player_event, :timeout, name)
     ts_str = Time.now.strftime('%H:%M:%S.%L')

@@ -7,6 +7,8 @@
 # Run: ruby -Ilib test/hivemind_test.rb
 
 require_relative 'hivemind_helper'
+require_relative '../lib/player_db'
+require_relative '../lib/player_attrs'
 class TestHiveMindAgent < Minitest::Test
   include HivemindSpecHelpers
 
@@ -165,6 +167,34 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_context_snapshot_empty_without_providers
     assert_empty @agent.send(:context_snapshot)
+  end
+
+  def test_context_snapshot_reads_admin_from_player_db
+    db = PlayerDatabase.new(nil)
+    db[1] = {name: 'alice', admin: true}
+    attrs = PlayerAttrs.new
+    attrs.seed('alice', index: 1, connected: true, online_time: 5_040_000, afk_time: 0)
+    agent = make_agent(attrs: attrs, player_db: db, current_tick: -> { 0 })
+    snap = agent.send(:context_snapshot)
+    assert_includes snap, 'Online players (1): alice: 23h20m (admin).'
+    db['alice'] = {admin: false}
+    snap2 = agent.send(:context_snapshot)
+    refute_includes snap2, '(admin).', 'admin status is read from PlayerDatabase'
+  end
+
+  def test_join_enrichment_writes_admin_to_player_db
+    db = PlayerDatabase.new(nil)
+    rcon = FakeRcon.new(attrs: [])
+    rcon.define_singleton_method(:player_attributes_for) do |name|
+      { name: 'alice', index: 2, connected: true, admin: true,
+        online_time: 11_016_000, afk_time: 0 }
+    end
+    attrs = PlayerAttrs.new
+    agent = make_agent(attrs: attrs, player_db: db, rcon: rcon, current_tick: -> { 0 })
+    player_attrs_for = agent.method(:player_attrs_for)
+    snapshot = player_attrs_for.call('alice')
+    assert snapshot[:admin], 'targeted RCON enrichment persists admin'
+    assert db['alice']&.fetch(:admin, false), 'targeted RCON enrichment wrote DB'
   end
 
 

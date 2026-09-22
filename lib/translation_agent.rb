@@ -209,7 +209,7 @@ class TranslationAgent
   # overrides. The locale (their interface language) always comes first so
   # target selection prefers it for relay translations.
   def languages(name)
-    id = @player_db.name_to_id(name)
+    id = @player_db.id_for(name)
     locale = id && @player_db.get_locale(id)
     langs = [base(locale)]
     langs += @player_db.locale_overrides(name) || []

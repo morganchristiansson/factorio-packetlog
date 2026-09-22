@@ -174,10 +174,10 @@ player chat ──► write_to_console action (C→S packet)
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or
   two short sentences, sent through the say tool. The join event line
-  includes the player's current total play time from RCON
-  (`online_time`, ticks — the server's `player_attributes` query;
-  falls back to the mirrored attrs), formatted the same way as the
-  context snapshot's stats (`2d3h`, `45m`):
+  includes the player's current total play time from the cached
+  packet-derived attrs (seeded from RCON at startup; a single targeted
+  RCON lookup is used for newly joined players), formatted the same way
+  as the context snapshot's stats (`2d3h`, `45m`):
   `alice joined the game (2d3h played)`. The greeting instruction also
   states the player's admin status ("they have played 2d3h in total and
   are an admin" — from the same attrs query), and the player's long-term
@@ -205,9 +205,7 @@ player chat ──► write_to_console action (C→S packet)
   fresh session). The list comes from the sniffer's packet-driven online
   tracking (`online_players`) and mirrored `PlayerAttrs` (seeded from
   RCON, maintained by packets); if the sniffer's attrs are empty, the
-  agent falls back to a direct RCON `player_attributes` query. So the AI
-  can answer "who has played the longest", "who is an admin", etc.
-  If no provider is wired (agent standalone), it falls back to RCON.
+  agent falls back to a direct RCON `player_attributes` query (targeted on joins, full for standalone).
 - **Reply = a tool**: the model responds by calling the `reply` tool (`HivemindReply`)
   (`say(text: ...)`), a RubyLLM tool that sends the text through RCON
   `game.print` (`RconClient#say`, Lua-quoted so output can't inject code)

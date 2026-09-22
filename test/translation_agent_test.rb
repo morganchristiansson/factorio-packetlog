@@ -138,9 +138,9 @@ class TestTranslationAgent < Minitest::Test
     roster = -> { [{ index: 1, name: 'ivan' }, { index: 2, name: 'bob' }, { index: 3, name: 'pedro' }] }
     rcon, commands = command_recorder
     player_db = PlayerDatabase.new(nil)
-    player_db.add(1, 'ivan', locale: 'ru')
-    player_db.add(2, 'bob', locale: 'en')
-    player_db.add(3, 'pedro', locale: 'pt')
+    player_db[1] = {name: 'ivan', locale: 'ru'}
+    player_db[2] = {name: 'bob', locale: 'en'}
+    player_db[3] = {name: 'pedro', locale: 'pt'}
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
 
     _output, = capture_io do
@@ -189,7 +189,7 @@ class TestTranslationAgent < Minitest::Test
       'ru'
     end
     player_db = PlayerDatabase.new(nil)
-    player_db.add(5, 'StarBurtS')
+    player_db[5] = {name: 'StarBurtS'}
     agent = make_agent(rcon: rcon, player_db: player_db)
 
     assert_equal 'ru', agent.note_joined(5, 'StarBurtS')
@@ -205,7 +205,7 @@ class TestTranslationAgent < Minitest::Test
       'nil'
     end
     nil_db = PlayerDatabase.new(nil)
-    nil_db.add(6, 'Unknown')
+    nil_db[6] = {name: 'Unknown'}
     make_agent(rcon: nil_rcon, player_db: nil_db).note_joined(6, 'Unknown')
     assert_equal 1, nil_commands.size
     assert_nil nil_db.get_locale(6)
@@ -221,9 +221,9 @@ class TestTranslationAgent < Minitest::Test
     roster = -> { [{ index: 1, name: 'ivan' }, { index: 2, name: 'bob' }, { index: 3, name: 'pedro' }] }
     rcon, commands = command_recorder
     player_db = PlayerDatabase.new(nil)
-    player_db.add(1, 'ivan', locale: 'ru')
-    player_db.add(2, 'bob', locale: 'en')
-    player_db.add(3, 'pedro', locale: 'pt')
+    player_db[1] = {name: 'ivan', locale: 'ru'}
+    player_db[2] = {name: 'bob', locale: 'en'}
+    player_db[3] = {name: 'pedro', locale: 'pt'}
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
     agent.instance_variable_set(:@translation_service, missing_pack)
 
@@ -234,9 +234,9 @@ class TestTranslationAgent < Minitest::Test
 
     unsupported_rcon, unsupported_commands = command_recorder
     unsupported_db = PlayerDatabase.new(nil)
-    unsupported_db.add(1, 'ivan', locale: 'ru')
-    unsupported_db.add(2, 'bob', locale: 'en')
-    unsupported_db.add(3, 'pierre', locale: 'fr')
+    unsupported_db[1] = {name: 'ivan', locale: 'ru'}
+    unsupported_db[2] = {name: 'bob', locale: 'en'}
+    unsupported_db[3] = {name: 'pierre', locale: 'fr'}
     unsupported_agent = make_agent(
       rcon: unsupported_rcon,
       player_db: unsupported_db,
@@ -252,7 +252,7 @@ class TestTranslationAgent < Minitest::Test
     Dir.mktmpdir do |dir|
       cache = File.join(dir, 'players-cache.json')
       db = PlayerDatabase.new(cache)
-      db.add(7, 'KrlosUltimate', locale: 'pt-BR')
+      db[7] = {name: 'KrlosUltimate', locale: 'pt-BR'}
       db.set_locale_overrides('KrlosUltimate', ['en', 'pt'])
 
       assert_equal ['en', 'pt'], db.locale_overrides('KrlosUltimate')

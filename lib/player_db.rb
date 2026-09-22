@@ -9,7 +9,7 @@ require 'json'
 #
 # TWO files, both managed here:
 #
-#   players-cache.json     {id: {name: "<name>", locale: "<locale>"}}
+#   players-cache.json     {id: {name: "<name>", locale: "<locale>", admin: <bool>}}
 #       The game-index -> identity cache. ONLY valid for a single server +
 #       savefile: ids are handed out in join order and reused across
 #       sessions, so this file is never authoritative across worlds.
@@ -38,7 +38,7 @@ require 'json'
 #               and two concurrent saves race on the same .tmp file.
 #   @overrides  stdin thread (set_locale_overrides) today; the agent will
 #               write it too once players self-set locales — same lock.
-# Single-key READS (lookup / name_to_id / get_locale / locale_overrides)
+# Single-key READS (lookup / id_for / get_locale / locale_overrides)
 # are lock-free: they're atomic under the GVL.
 class PlayerDatabase
   DEFAULT_CACHE_BASENAME = 'players-cache.json'
@@ -50,7 +50,7 @@ class PlayerDatabase
     @path = path
     @locales_path = derive_path(path, DEFAULT_LOCALES_BASENAME)
     @mutex = Mutex.new  # hash mutations + disk writes (see header)
-    @players = {}  # id -> {name:, locale:}
+    @players = {}  # id -> {name:, locale:, admin:}
     @id_by_name = {}  # name -> id
     @overrides = {}  # name -> [lang, ...]
     # load runs at construction (single thread, before any capture/agent
@@ -64,10 +64,6 @@ class PlayerDatabase
     p ? p[:name] : "Player_#{id}"
   end
 
-  def lookup_info(id)
-    @players[id] || {name: "Player_#{id}", locale: nil}
-  end
-
   # Names are forced to UTF-8 + scrubbed on Entry: packet-derived names can
   # still carry a binary encoding tag with non-ASCII bytes (hot-reload state
   # written by an older build, or a decode path that missed the scrub), and a
@@ -78,24 +74,29 @@ class PlayerDatabase
   # or name change), so the cache survives a crash/kill mid-session —
   # previously the mapping was only saved on quit/reload (FactorioSniffer
   # #finish / Ctrl-C), losing every player learned after the last save.
-  # Called from every join path: roster load, connection accept,
-  # NewPeerInfo, C→S heartbeat index binding, self-confirm. Identical
-  # re-adds are no-ops (skip the disk write).
-  def add(id, name, locale: nil)
-    name = clean(name)
-    return if name.nil? || name.empty?
-    id = id.to_i
+  # Record accessors. Index (Numeric) or name (String) keys both work.
+  # `[]` reads; `[]=` merges into the existing record (or creates one)
+  # and persists immediately. Admin lives here (players-cache.json).
+  def [](key)
+    id = id_for(key)
+    @players[id]
+  end
+
+  def []=(key, record)
+    id = id_for(key)
+    return unless id
     @mutex.synchronize do
-      existing = @players[id]
-      next if existing && existing[:name] == name && existing[:locale] == locale
-      @players[id] = {name: name, locale: locale}
-      @id_by_name[name] = id
+      rec = (record || {}).dup
+      rec[:name] = clean(rec[:name]) if rec.key?(:name)
+      @players[id] = (@players[id] || {}).merge(rec)
+      @id_by_name[@players[id][:name]] = id if @players[id][:name]
       persist
     end
   end
 
-  def name_to_id(name)
-    @id_by_name[name]
+  def id_for(key)
+    return nil if key.nil?
+    key.is_a?(Numeric) ? key.to_i : @id_by_name[clean(key)]
   end
 
   # Remove all entries for a name except the given id (used when the
@@ -110,6 +111,14 @@ class PlayerDatabase
       @players.each do |id, info|
         if info[:name] == name && id != keep_id.to_i
           @players.delete(id)
+          changed = true
+        end
+      end
+      kept = @players[keep_id.to_i]
+      if kept
+        admin = @players.values.find { |p| p[:name] == name }&.dig(:admin)
+        if admin != kept[:admin]
+          kept[:admin] = admin
           changed = true
         end
       end
@@ -137,11 +146,6 @@ class PlayerDatabase
   def get_locale(id)
     p = @players[id.to_i]
     p ? p[:locale] : nil
-  end
-
-  # All known locales (for debugging)
-  def all_locales
-    @mutex.synchronize { @players.dup.transform_values { |p| p[:locale] }.compact }
   end
 
   # ── Language overrides (players-locale.json, keyed by NAME) ────────
@@ -219,10 +223,18 @@ class PlayerDatabase
     raw = JSON.parse(File.read(@path))
     @players = raw.each_with_object({}) { |(k, v), h|
       next unless k =~ /^\d+$/
-      h[k.to_i] = {name: v['name'] || v[:name], locale: v['locale'] || v[:locale]}
+      next unless v.respond_to?(:key?)
+      admin = if v.key?('admin')
+        v['admin']
+      elsif v.key?(:admin)
+        v[:admin]
+      else
+        nil
+      end
+      h[k.to_i] = {name: v['name'] || v[:name], locale: v['locale'] || v[:locale], admin: admin}
     }
     rebuild_index
-  rescue JSON::ParserError, TypeError, Errno::ENOENT
+  rescue JSON::ParserError, TypeError, NoMethodError, Errno::ENOENT
     # Invalid/corrupt format — start fresh, will be repopulated from RCON
     @players = {}
     @id_by_name = {}
@@ -235,7 +247,9 @@ class PlayerDatabase
   # + the temp+rename below.
   def persist
     return unless @path
-    safe = @players.dup.transform_values { |p| {name: clean(p[:name]), locale: p[:locale]} }
+    safe = @players.dup.transform_values { |p|
+      {name: clean(p[:name]), locale: p[:locale], admin: p.key?(:admin) ? p[:admin] : nil}
+    }
     tmp = "#{@path}.tmp"
     File.write(tmp, JSON.pretty_generate(safe))
     File.rename(tmp, @path)

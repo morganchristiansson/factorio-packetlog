@@ -106,18 +106,18 @@ class TestTranslationAgent < Minitest::Test
 
       service = ArgosTranslateService.new(path: script)
       text = "Zdravstvuyte $(touch injected) `touch backticked`"
-      assert_equal 'PEREVOD', service.to_english(text, source_lang: 'ru')
+      assert_equal 'PEREVOD', service.translate(text, source_lang: 'ru', target_lang: 'en')
       assert_equal ['--from-lang', 'ru', '--to-lang', 'en', text], File.readlines(log).map(&:strip)
       refute File.exist?(File.join(dir, 'injected'))
       refute File.exist?(File.join(dir, 'backticked'))
 
-      assert_equal 'PEREVOD', service.to_english("a\0b", source_lang: 'ru')
+      assert_equal 'PEREVOD', service.translate("a\0b", source_lang: 'ru', target_lang: 'en')
       assert_equal 'ab', File.readlines(log).map(&:strip).last
 
       noisy = File.join(dir, 'noisy-argos')
       File.write(noisy, "#!/bin/sh\necho '2026-09-17 17:06:58 WARNING: Language en package default expects mwt' >&2\nprintf 'PEREVOD\\n'\n")
       File.chmod(0o755, noisy)
-      assert_equal 'PEREVOD', ArgosTranslateService.new(path: noisy).to_english('x', source_lang: 'ru')
+      assert_equal 'PEREVOD', ArgosTranslateService.new(path: noisy).translate('x', source_lang: 'ru', target_lang: 'en')
 
       assert service.supported?('ru')
       assert service.supported?('RU')
@@ -130,7 +130,7 @@ class TestTranslationAgent < Minitest::Test
   def test_missing_argos_binary_returns_original_text
     service = ArgosTranslateService.new(path: '/nonexistent/argos-translate')
     capture_io do
-      assert_equal 'privet', service.to_english('privet', source_lang: 'ru')
+      assert_equal 'privet', service.translate('privet', source_lang: 'ru', target_lang: 'en')
     end
   end
 

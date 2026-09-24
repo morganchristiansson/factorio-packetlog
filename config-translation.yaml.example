@@ -1,16 +1,12 @@
 # ─────────────────────────────────────────────────────────────
 # Translation agent — config example
 # ─────────────────────────────────────────────────────────────
-# Copy this to config-translation.yaml and edit. Settings here
+# Copy to config-translation.yaml and edit. Settings here
 # document the defaults — unchanged values apply their hardcoded
 # defaults. API keys (GOOGLE_TRANSLATE_API_KEY) are env-only.
 # ─────────────────────────────────────────────────────────────
 
-# Enable auto-translation of foreign player chat.
-enabled: true
-
-# Translation backend: libretranslate, bergamot, argos, google,
-# hybrid, mock. Default: argos.
+# Translation backend: argos, google, hybrid, mock. Default: argos.
 backend: argos
 
 # Locales to translate between. 'en' is always the pivot
@@ -21,7 +17,3 @@ whitelist:
   - en
   - pt
   - ru
-
-# Backend URLs.
-libretranslate_url: "https://libretranslate.de/translate"
-bergamot_url: "http://localhost:8080"

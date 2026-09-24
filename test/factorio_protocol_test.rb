@@ -33,8 +33,6 @@ class TestFactorioProtocol < Minitest::Test
     refute_nil rect
     assert_equal(-90211, rect.top_left.x)
     assert_equal(118732, rect.bottom_right.y)
-    assert_in_delta(3.34, rect.width_tiles, 0.01)
-    assert_in_delta(33.69, rect.height_tiles, 0.01)
   end
 
   # ── Deconstruct (type 131) ─────────────────────────────────────

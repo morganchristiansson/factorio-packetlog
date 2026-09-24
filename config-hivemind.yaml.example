@@ -1,22 +1,30 @@
 # ─────────────────────────────────────────────────────────────
 # Hivemind AI agent — config example
 # ─────────────────────────────────────────────────────────────
-# Copy this to config-hivemind.yaml and edit. Settings here
-# document the defaults — unchanged values apply their hardcoded
-# defaults. API key, model, and endpoint are env-only:
-# HIVE_API_KEY, HIVE_MODEL, HIVE_API_BASE.
-# ─────────────────────────────────────────────────────────────
+# The API key is the only secret and is read from HIVE_API_KEY.
+# Other settings belong here; the sniffer exposes no Hivemind CLI args.
 
-# OpenAI-compatible endpoint. Env override: HIVE_API_BASE.
-api_base: "https://opencode.ai/zen/go/v1"
-
-# Model name. Env override: HIVE_MODEL.
+# Current startup model.
 model: "deepseek-v4-flash"
 
-# Provider (hardcoded :openai).
-provider: openai
+# Models available to /model and automatic fallback, in order.
+# Each entry may define provider, api_base, api_key_env, or api_key.
+# api_key_env is preferred for secrets; HIVE_API_KEY overrides api_key.
+models:
+  - name: deepseek-v4-flash
+    provider: openai
+    api_base: "https://opencode.ai/zen/go/v1"
+    api_key_env: HIVE_API_KEY
+  - name: gpt-4o
+    provider: openai
+    api_base: "https://opencode.ai/zen/go/v1"
+    api_key_env: HIVE_API_KEY
 
-# Max UNREAD console lines kept between prompts.
+# Optional global defaults for models that omit a field.
+provider: openai
+api_base: "https://opencode.ai/zen/go/v1"
+
+# Max unread console lines kept between prompts.
 history_size: 1000
 
 # Per-line clip in the history context.
@@ -25,10 +33,10 @@ history_line_len: 120
 # Truncate replies to fit Factorio chat's ~500 char limit.
 max_reply_len: 400
 
-# Recent-context budget (characters) kept after compaction.
+# Recent-context budget kept after compaction.
 trim_tail_chars: 20000
 
-# Auto-compaction gate (characters).
+# Auto-compaction gate (conversation characters).
 auto_compaction_min_chars: 400000
 
 # Chat trigger phrases.
@@ -39,6 +47,6 @@ triggers:
   - hm
   - hive
 
-# Game-log watcher: log() events that fire a dedicated turn.
+# Game-log events that fire a dedicated turn.
 log_turn_events:
   - map-reset

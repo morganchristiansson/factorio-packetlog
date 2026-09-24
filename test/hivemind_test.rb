@@ -16,6 +16,33 @@ class TestHiveMindAgent < Minitest::Test
     @agent = make_agent
   end
 
+  def test_hivemind_yaml_options_are_applied
+    config = YAML.safe_load_file('config-hivemind.yaml')
+    assert_equal config['model'], @agent.model
+    assert_equal config['models'].map { |m| m['name'] }, @agent.models
+    assert_equal config['models'].first['api_base'], @agent.send(:api_base_for, @agent.model)
+    assert_equal config['provider'].to_sym, @agent.instance_variable_get(:@provider)
+    assert_equal config['history_size'], @agent.instance_variable_get(:@history_size)
+    assert_equal config['triggers'], @agent.triggers
+    assert_equal config['log_turn_events'], @agent.instance_variable_get(:@log_turn_events)
+    assert_equal config['max_reply_len'], @agent.max_reply_len
+    assert_equal config['auto_compaction_min_chars'], @agent.auto_compaction_min_chars
+    assert_match(/Model switched to #{config['models'].last['name']}/, @agent.switch_model!(config['models'].last['name']))
+    assert_equal config['models'].last['name'], @agent.model
+  end
+
+  def test_unavailable_model_falls_back_to_next_configured_model
+    @agent.singleton_class.send(:remove_method, :complete)
+    calls = 0
+    @agent.define_singleton_method(:ask_with_retry) do |_chat, _prompt|
+      calls += 1
+      raise RubyLLM::ModelNotFoundError, 'model removed' if calls == 1
+      RubyLLM::Message.new(role: :assistant, content: 'fallback reply')
+    end
+
+    assert_equal 'fallback reply', @agent.send(:complete, 'hello')
+    assert_equal @agent.models.last, @agent.model
+  end
 
   # ── Rolling chat history ──────────────────────────────────────
 
@@ -677,16 +704,6 @@ class TestHiveMindAgent < Minitest::Test
     assert @agent.trim_session_after_compaction!
     after = @agent.opencode_session_id
     refute_equal before, after
-    assert_equal after, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
-  end
-
-  # A wiped session is a new conversation — the id rotates with it.
-  def test_clear_session_rotates_opencode_session_id
-    before = @agent.opencode_session_id
-    @agent.clear_session!
-    after = @agent.opencode_session_id
-    refute_equal before, after
-    chat = @agent.instance_variable_get(:@chat)
     assert_equal after, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
   end
 end

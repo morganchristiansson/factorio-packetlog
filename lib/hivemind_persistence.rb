@@ -148,7 +148,7 @@ module HiveMindPersistence
       'version' => 1,
       # Stable OpenCode session id — restored on restart so the resumed
       # conversation keeps its routing/caching identity (rotated only by
-      # clear_session!, which starts a genuinely new conversation).
+      # compaction, which starts a genuinely new conversation).
       'opencode_session' => opencode_session_id,
       'console_queue' => @console_queue,
       'session_players' => @session_players.to_a,

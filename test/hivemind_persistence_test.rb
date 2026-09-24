@@ -127,26 +127,6 @@ class TestHivemindPersistence < Minitest::Test
     end
   end
 
-
-  def test_clear_session_forgets_but_keeps_memories
-    Dir.mktmpdir do |dir|
-      sess = File.join(dir, 'session.json')
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: dir)
-      store = agent.instance_variable_get(:@memory_store)
-      store.write_key('alice', 'alice loves belts')
-      agent.send(:append_history, 'alice', 'hello hivemind')
-      agent.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: one')
-
-      assert agent.clear_session!
-      chat = agent.instance_variable_get(:@chat)
-      assert_empty chat.messages.reject { |m| m.role == :system }, 'conversation wiped'
-      assert_empty agent.instance_variable_get(:@console_queue)
-      assert_equal 'alice loves belts', store.player('alice'), 'memories kept'
-      # persisted session file is wiped too
-      assert_empty JSON.parse(File.read(sess))['messages']
-    end
-  end
-
   # Regression: persist_queue! (fired by append_history on every chat line)
   # used to rewrite the session file WITHOUT the messages/followups keys,
   # clobbering the conversation persisted moments earlier by persist! — a

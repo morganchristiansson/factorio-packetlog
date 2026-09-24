@@ -169,7 +169,7 @@ player chat ──► write_to_console action (C→S packet)
   long an entry lives. You can only infer the window indirectly: a long
   gap between triggers where `cached` drops to 0 means the prior prefix
   expired.
-- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `HIVE_SESSION` env overrides; `session_path: false` disables.
+- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `session_path: false` is available to tests only.
 - **Join greeting**: joining players get a **personal, LLM-generated
   welcome** — the model greets them informed by the current console
   context (recent chat, who else is online, their play history), one or
@@ -236,12 +236,15 @@ HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-
 
 The key is read from the `HIVE_API_KEY` environment variable **only** —
 deliberately no CLI flag and no `OPENAI_API_KEY` fallback, so an ambient
-key elsewhere on the box can't silently turn the agent on (or off). The
-provider is fixed (`openai` — any OpenAI-compatible endpoint works);
-endpoint and model default to `https://opencode.ai/zen/go/v1` /
-`deepseek-v4-flash` and can be overridden per run via `HIVE_API_BASE`
-and `HIVE_MODEL`. The constructor's `api_key:` param is a spec-only
-injection point — production code never passes it.
+key elsewhere on the box can't silently turn the agent on (or off). All
+other Hivemind settings, including endpoint, model, provider, triggers, and
+limits, come from `config-hivemind.yaml`. The constructor's `api_key:` param
+is a spec-only injection point — production code never passes it. `models:` defines the models available to `/model` and the ordered automatic
+fallback list. Each model can set its own `provider`, `api_base`, and
+secret source via `api_key_env`; `api_key` is also supported for a local
+ignored config. The current `model:` is the startup choice. A
+`ModelNotFoundError` switches to the next configured model; ordinary
+transient errors are not treated as permanent model removal.
 
 System prompt role: RubyLLM sends the system prompt as role `developer`
 by default (OpenAI's newer convention). Some endpoints/models (e.g.
@@ -257,8 +260,7 @@ Request identity: every LLM request carries a custom `User-Agent`
 stable per-conversation `x-opencode-session` id (OpenCode Go requires
 both — without them the gateway rejects requests). The id is minted at
 startup, persisted in `hivemind-session.json` so restarts resume the same
-conversation identity, and rotated only by a full session wipe
-(`clear_session!` — a genuinely new conversation).
+conversation identity, and rotated when a compacted session starts.
 
 Example:
 
@@ -398,9 +400,8 @@ needs doing.
 - **Persistence**: pending follow-ups are stored in the session file with
   **absolute unix deadlines** (monotonic time doesn't survive reboots),
   so a restart re-arms them — one that came due while the process was
-  down fires on startup. `clear_session!` (run by `/compact` after
-  distilling) cancels all pending follow-ups: they belong to the session
-  being wiped.
+  down fires on startup. Compaction preserves pending follow-ups in the
+  session material so they can be reconsidered by the next session.
 - **Compaction**: pending follow-ups are listed in the compaction material
   ("Pending scheduled follow-ups: #3 (in 9m30s): check the mall"), so
   plans/goals can be remembered across sessions.

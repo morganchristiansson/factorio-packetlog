@@ -43,9 +43,8 @@ class HiveMindAgent
   include HiveMindPersistence  # session file: load_session / persist!
   include HiveMindCompaction   # long-term memory distillation (/compact)
   include HiveMindFollowUps    # scheduled follow-ups + scheduler thread
-  # OpenAI-compatible endpoint + model. Defaults, overridable per run via
-  # HIVE_API_BASE / HIVE_MODEL (same family as HIVE_API_KEY) — e.g. pointing
-  # the agent at a different provider without touching code.
+  # OpenAI-compatible endpoint + model. Configuration comes from
+  # config-hivemind.yaml; HIVE_API_KEY is the only environment secret.
   DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
   DEFAULT_MODEL    = 'deepseek-v4-flash'
   DEFAULT_PROVIDER = :openai
@@ -56,10 +55,9 @@ class HiveMindAgent
   USER_AGENT = 'factorio-hivemind/1.0'
 
   # Models that are only available via the Responses API (Zen: /v1/responses).
-  # Auto-selects :openai_responses when HIVE_PROVIDER is not set.
+  # Auto-selects :openai_responses for models that require that API.
   RESPONSES_MODELS = %w[muse-spark-1.3-contributor-free].freeze
   def self.provider_for(model)
-    return ENV['HIVE_PROVIDER'].to_sym if ENV['HIVE_PROVIDER'] && !ENV['HIVE_PROVIDER'].empty?
     return :openai_responses if RESPONSES_MODELS.include?(model) || model.to_s.downcase.include?('muse-spark')
     DEFAULT_PROVIDER
   end
@@ -131,41 +129,6 @@ class HiveMindAgent
   # window. Below that there is little to distill and the pass would be a
   # wasted LLM call. Manual /compact ignores this.
   AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 20
-  # Forget the CURRENT session (live conversation + queued console lines)
-  # but KEEP the long-term memories. The next turn re-seeds the system
-  # prompt (SOUL/KNOWLEDGE) and re-injects the online players' memories.
-  # The sniffer's /compact command runs this right after a SUCCESSFUL
-  # compaction, so a compacted session starts fresh (distill then wipe).
-  # Since /forget and /clear were removed, /compact is the only interactive
-  # trigger here — this method also stays callable to clear WITHOUT
-  # distilling. Clears the persisted session file too.
-  #
-  # keep_unread_console: used by /compact. By wipe time the queue holds
-  # ONLY lines that arrived mid-pass (the pass's own ask drained
-  # everything older into its material) — wiping them would silently
-  # lose events nobody has seen yet, so they carry into the fresh
-  # session instead.
-  def clear_session!(keep_unread_console: false)
-    @mutex.synchronize do
-      @chat&.reset_messages!
-      @memories_sent.clear
-      @session_players_mutex.synchronize { @session_players.clear }
-      @console_mutex.synchronize do
-        @console_queue.clear unless keep_unread_console
-      end
-      # Pending follow-ups belong to the session being wiped — drop them so
-      # a stale timer can't inject a turn into the fresh session later.
-      @followup_mutex.synchronize { @followups.clear }
-      # A wiped session is a NEW conversation — rotate the OpenCode session
-      # id so routing/caching follows the fresh thread, not the old one.
-      @opencode_session_id = SecureRandom.uuid
-      apply_request_headers(@chat)
-      @chat&.with_instructions(system_prompt_with_memories)
-    end
-    persist! if @session_path
-    true
-  end
-
   # Post-compaction history trim (the /compact path — replaces the old
   # full wipe): drop exactly the messages the pass included, MINUS the
   # newest stretch that fits TRIM_TAIL_CHARS, which stays so the session
@@ -177,7 +140,7 @@ class HiveMindAgent
   # re-inject into the trimmed thread, and the system prompt IS refreshed:
   # the pass rewrote memory blobs on disk, and a trimmed thread is the one
   # sanctioned "fresh start" case for a prompt change (one bounded cache
-  # rebuild). clear_session! remains for full resets.
+  # rebuild).
   def trim_session_after_compaction!
     @mutex.synchronize do
       return false unless @chat
@@ -187,7 +150,7 @@ class HiveMindAgent
       # Walk backwards from the included boundary keeping the newest
       # messages that fit the char budget (always keep at least one).
       cut = included
-      budget = TRIM_TAIL_CHARS
+      budget = @trim_tail_chars
       while cut > floor && !(cut < included && budget.negative?)
         budget -= msgs[cut - 1].content.to_s.length + 1
         cut -= 1
@@ -219,6 +182,8 @@ class HiveMindAgent
   attr_reader :model
   attr_reader :last_trigger
   attr_reader :memory_store
+  attr_reader :models
+  attr_reader :triggers
 
   # Cached packet-derived player attributes (lib/player_attrs.rb),
   # or nil when the agent is used standalone (no @attrs object).
@@ -239,6 +204,29 @@ class HiveMindAgent
   # calls briefly hold different Mutex instances).
   def rate_mutex = (@rate_mutex ||= Mutex.new)
   def persist_mutex = (@persist_mutex ||= Mutex.new)
+  def max_reply_len = @max_reply_len
+  def auto_compaction_min_chars = @auto_compaction_min_chars
+
+  def model_settings(model)
+    @model_configs.find { |config| config[:name] == model } || {}
+  end
+
+  def model_provider(model)
+    configured = model_settings(model)[:provider]&.to_sym || @configured_provider
+    return configured if configured
+    self.class.provider_for(model)
+  end
+
+  def api_base_for(model)
+    model_settings(model)[:api_base] || @default_api_base
+  end
+
+  def api_key_for(model)
+    return @injected_api_key if @injected_api_key
+    config = model_settings(model)
+    env_name = (config[:api_key_env] || 'HIVE_API_KEY').to_s
+    ENV[env_name] || ENV['HIVE_API_KEY'] || config[:api_key] || @default_api_key
+  end
   # Stable OpenCode session id (x-opencode-session), one per conversation.
   # Reload-safe like the mutexes above: a hot-reloaded agent keeps its
   # boot-time ivars, so an object built before this field existed mints
@@ -271,7 +259,7 @@ class HiveMindAgent
     # to fire) and an absolute unix due_at (persisted, so a restart re-arms
     # with the correct remaining delay). Scheduling an existing name again
     # REPLACES the entry (upsert — no cancel-first dance). Survive hot
-    # reloads (agent persists in state); cleared by clear_session! — they
+    # reloads (agent persists in state); follow-ups survive compaction —
     # belong to the session.
     @followups = []
     @followup_mutex = Mutex.new
@@ -290,9 +278,8 @@ class HiveMindAgent
     # Session persistence: console history + LLM conversation are saved to
     # disk so a full RESTART (not just Ctrl-C) can resume — packets while
     # stopped are lost, but the context carries over. Default file
-    # hivemind-session.json (HIVE_SESSION overrides); pass session_path:
-    # false to disable.
-    @session_path = session_path == false ? nil : (session_path || ENV['HIVE_SESSION'] || 'hivemind-session.json')
+    # hivemind-session.json; pass session_path: false to disable in tests.
+    @session_path = session_path == false ? nil : (session_path || 'hivemind-session.json')
 
     # Long-term memory (keyed blobs: soul / knowledge / <player>) — the
     # compaction layer that lets a NEW session carry over what Hivemind
@@ -308,26 +295,45 @@ class HiveMindAgent
     # Players encountered THIS LLM session (since last compaction/reset).
     # Persisted with the session file; drives compaction targets so they
     # can't drift from what the session actually saw. Cleared on /compact
-    # success and clear_session!; console lines afterwards re-populate it.
+    # compaction success; console lines afterwards re-populate it.
     # Own lock: marked from PACKET threads (must never wait on @mutex —
     # an in-flight LLM call would stall the capture loop).
     @session_players = Set.new
     @session_players_mutex = Mutex.new
 
-    # ── LLM wiring. Provider is fixed (:openai — any OpenAI-compatible
-    #    endpoint); model/base/key come from env or defaults. Missing key,
-    #    missing gem, or bad provider config now raises — FactorioSniffer
-    #    rescues and leaves @agent=nil (hard fail, no disabled object).
+    # ── LLM wiring. Model/base/provider and limits come from
+    #    config-hivemind.yaml; only the API key is an environment secret.
+    #    Missing key, missing gem, or bad provider config now raises —
+    #    FactorioSniffer rescues and leaves @agent=nil (hard fail, no
+    #    disabled object).
     hive_config = File.exist?('config-hivemind.yaml') ? (YAML.load_file('config-hivemind.yaml') || {}) : {}
-    llm_api_key = api_key || ENV['HIVE_API_KEY']
-    @model = model || hive_config['model'] || ENV.fetch('HIVE_MODEL', DEFAULT_MODEL)
-    @provider = self.class.provider_for(@model)
-    api_base = api_base || hive_config['api_base'] || ENV.fetch('HIVE_API_BASE', DEFAULT_API_BASE)
+    @injected_api_key = api_key
+    @default_api_base = api_base || hive_config['api_base'] || DEFAULT_API_BASE
+    @default_api_key = hive_config['api_key']
+    @configured_provider = hive_config['provider']&.to_sym
+    entries = Array(hive_config['models'] || hive_config['model'] || DEFAULT_MODEL)
+    @model_configs = entries.filter_map do |entry|
+      config = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
+      name = config[:name].to_s
+      name.empty? ? nil : config.merge(name: name)
+    end.uniq { |config| config[:name] }
+    @model = model || hive_config['model'] || @model_configs.first&.fetch(:name, nil) || DEFAULT_MODEL
+    @model_configs << { name: @model } unless @model_configs.any? { |config| config[:name] == @model }
+    @models = @model_configs.map { |config| config[:name] }
+    @provider = model_provider(@model)
+    llm_api_key = api_key_for(@model)
+    @history_size = (hive_config['history_size'] || HISTORY_SIZE).to_i
+    @history_line_len = (hive_config['history_line_len'] || HISTORY_LINE_LEN).to_i
+    @max_reply_len = (hive_config['max_reply_len'] || MAX_REPLY_LEN).to_i
+    @trim_tail_chars = (hive_config['trim_tail_chars'] || TRIM_TAIL_CHARS).to_i
+    @auto_compaction_min_chars = (hive_config['auto_compaction_min_chars'] || AUTO_COMPACTION_MIN_CHARS).to_i
+    @triggers = Array(hive_config['triggers'] || TRIGGERS).map(&:to_s)
+    @log_turn_events = Array(hive_config['log_turn_events'] || LOG_TURN_EVENTS).map(&:to_s)
 
-    raise ArgumentError, 'no API key set (HIVE_API_KEY) — agent disabled' if llm_api_key.nil?
+    raise ArgumentError, "no API key configured for #{@model}" if llm_api_key.nil?
 
     RubyLLM.configure do |config|
-      config.openai_api_base = api_base
+      config.openai_api_base = api_base_for(@model)
       config.openai_api_key = llm_api_key
       config.default_model = @model
       # Read timeout ceiling for EVERY request (faraday). Raised from 60s
@@ -562,7 +568,7 @@ class HiveMindAgent
     rescue StandardError => e
       log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
     end
-    log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{LOG_TURN_EVENTS.join(', ')})"
+    log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{@log_turn_events.join(', ')})"
     true
   end
 
@@ -579,7 +585,7 @@ class HiveMindAgent
     name = log_event_name(text)
     return if name.nil?
     append_history(nil, text)
-    return unless LOG_TURN_EVENTS.include?(name)
+    return unless @log_turn_events.include?(name)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     rate_mutex.synchronize do
       return if now - @last_log_event < LOG_EVENT_INTERVAL
@@ -663,7 +669,7 @@ class HiveMindAgent
     complete(turn_prompt(
       "In-game chat from #{player}: #{message}\n\n" \
       "Answer the player's question or continue the conversation. " \
-      "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
+      "Keep it under #{@max_reply_len} characters. Plain text only — " \
       'no markdown, no code blocks, no emoji.',
       exclude: [player, message],
       player: player
@@ -691,12 +697,54 @@ class HiveMindAgent
       # Dynamic context (online players, stats, new console lines) rides
       # in the per-turn user prompt (see turn_prompt).
       register_tools
-      response = ask_with_retry(@chat, prompt)
+      response = nil
+      begin
+        response = ask_with_retry(@chat, prompt)
+      rescue RubyLLM::ModelNotFoundError => e
+        fallback = next_model
+        raise if fallback.nil?
+        log "model #{@model} unavailable (#{e.class}); falling back to #{fallback}"
+        activate_model!(fallback)
+        retry
+      end
       text = response.respond_to?(:content) ? response.content.to_s : ''
       clean_reply(text)
     end
   ensure
     persist! if @session_path  # conversation changed — save for restart
+  end
+
+  def next_model
+    index = @models.index(@model)
+    return nil unless index
+    @models.rotate(index + 1).find { |candidate| api_key_for(candidate) }
+  end
+
+  def configure_model!(model)
+    key = api_key_for(model)
+    raise ArgumentError, "no API key configured for #{model}" if key.nil?
+    RubyLLM.configure do |config|
+      config.default_model = model if config.respond_to?(:default_model=)
+      config.openai_api_base = api_base_for(model)
+      config.openai_api_key = key
+    end
+  end
+
+  def activate_model!(new_model)
+    configure_model!(new_model)
+    @model = new_model
+    @provider = model_provider(@model)
+    if @chat
+      @chat.with_model(@model, provider: @provider, assume_exists: true)
+      apply_request_headers(@chat)
+    else
+      @chat = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
+      @chat.with_instructions(system_prompt_with_memories)
+      apply_request_headers(@chat)
+      register_tools
+      @observers_hooked = false
+      hook_chat_observers
+    end
   end
 
   # One chat.ask — retries happen INSIDE faraday-retry (see configure),
@@ -850,7 +898,7 @@ class HiveMindAgent
       unread.pop if exclude && unread.last == exclude
       unread.reject! { |p, _| p == 'hivemind' }  # replies live in the conversation
       unread.map do |player, msg|
-        clipped = msg[0, HISTORY_LINE_LEN]
+        clipped = msg[0, @history_line_len]
         player ? "#{clean_text(player)}: #{clipped}" : clipped
       end
     end
@@ -880,8 +928,8 @@ class HiveMindAgent
     end
     @console_mutex.synchronize do
       @console_queue << [player, msg]
-      if @console_queue.size > HISTORY_SIZE
-        dropped = @console_queue.shift(@console_queue.size - HISTORY_SIZE)
+      if @console_queue.size > @history_size
+        dropped = @console_queue.shift(@console_queue.size - @history_size)
         if dropped.any?
           warn "[hivemind] console history truncated: #{dropped.size} oldest lines dropped (no trigger in a while)"
         end
@@ -1037,7 +1085,7 @@ class HiveMindAgent
   # Strip markdown-ish noise and clamp length. String#[] counts CHARACTERS
   # on UTF-8 strings, so no manual each_char dance is needed.
   def clean_reply(text)
-    text.gsub('`', '').gsub(/[*_]{1,2}/, '')[0, MAX_REPLY_LEN].strip
+    text.gsub('`', '').gsub(/[*_]{1,2}/, '')[0, @max_reply_len].strip
   end
 
   # ── Trigger / rate limit / reply ──────────────────────────────────
@@ -1046,7 +1094,7 @@ class HiveMindAgent
   # match, so "Hivemind?", "good bot!" and "hm, hello" all ping the agent
   # while "shmoose" or "HivemindFan" can't accidentally do it.
   def trigger_match?(msg)
-    TRIGGERS.any? { |t| msg.match?(/\b#{Regexp.escape(t)}\b/i) }
+    @triggers.any? { |t| msg.match?(/\b#{Regexp.escape(t)}\b/i) }
   end
 
   def handle(player, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
@@ -1079,40 +1127,20 @@ class HiveMindAgent
 
   # ── Runtime model switching (/model, /try) ───────────────────────
 
-  # Switch the persistent model at runtime (like HIVE_MODEL but live).
+  # Switch the persistent model at runtime (without changing the config file).
   # Uses RubyLLM::Chat#with_model which mutates the SAME chat in place —
   # messages, tools, and observers stay, only the model+provider changes.
-  # Survives hot reloads (ivar) but not a full restart (reverts to ENV).
+  # Survives hot reloads (ivar) but not a full restart (reverts to config).
   def switch_model!(new_model)
     cleaned = clean_text(new_model.to_s).strip
     return "Error: model name empty — usage: /model <model-id>" if cleaned.empty?
+    return "Error: model #{cleaned.inspect} is not configured. Available: #{@models.join(', ')}" unless @models.include?(cleaned)
     return "Model already #{@model}." if cleaned == @model
     begin
-      @model = cleaned
-      # Keep RubyLLM's global default in sync so compaction forks and any
-      # future chats pick up the new model.
-      begin
-        RubyLLM.configure { |c| c.default_model = @model if c.respond_to?(:default_model=) }
-      rescue StandardError
-        nil
-      end
-      @provider = self.class.provider_for(@model)
-      @mutex.synchronize do
-        if @chat
-          @chat.with_model(@model, provider: @provider, assume_exists: true)
-          apply_request_headers(@chat)
-        else
-          @chat = RubyLLM.chat(model: @model, provider: @provider, assume_model_exists: true)
-          @chat.with_instructions(system_prompt_with_memories)
-          apply_request_headers(@chat)
-          register_tools
-          @observers_hooked = false
-          hook_chat_observers
-        end
-      end
+      @mutex.synchronize { activate_model!(cleaned) }
       persist! if @session_path
       log "model switched to #{@model}"
-      "Model switched to #{@model}. Future replies will use it (persists until restart; reverts to HIVE_MODEL/DEFAULT on restart)."
+      "Model switched to #{@model}. Future replies will use it (persists until restart; reverts to config-hivemind.yaml on restart)."
     rescue StandardError => e
       log_error('model switch failed', e)
       "Error: failed to switch model: #{e.message}"
@@ -1143,7 +1171,7 @@ class HiveMindAgent
       prompt = turn_prompt(
         "In-game chat from #{player}: #{msg}\n\n" \
         "Answer the player's question or continue the conversation. " \
-        "Keep it under #{MAX_REPLY_LEN} characters. Plain text only — " \
+        "Keep it under #{@max_reply_len} characters. Plain text only — " \
         'no markdown, no code blocks, no emoji.',
         exclude: [player, msg],
         player: player
@@ -1155,40 +1183,34 @@ class HiveMindAgent
     end
     snapshot = @mutex.synchronize { @chat ? @chat.messages.dup : [] }
     Thread.new do
+      original_model = @model
       begin
-        tmp_provider = self.class.provider_for(m)
-        tmp = RubyLLM.chat(model: m, provider: tmp_provider, assume_model_exists: true)
-        apply_request_headers(tmp)
-        tmp.messages.replace(snapshot.dup)
-        register_tools(tmp)
-        observe_chat(tmp)
-        start_t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        response = ask_with_retry(tmp, prompt)
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_t
-        text = clean_reply(response.respond_to?(:content) ? response.content.to_s : '')
-        # Try to extract usage from last assistant message if available.
-        usage = ''
-        if tmp.messages.last
-          usage = usage_line(tmp.messages.last)
+        @mutex.synchronize do
+          configure_model!(m)
+          tmp_provider = model_provider(m)
+          tmp = RubyLLM.chat(model: m, provider: tmp_provider, assume_model_exists: true)
+          apply_request_headers(tmp)
+          tmp.messages.replace(snapshot.dup)
+          register_tools(tmp)
+          observe_chat(tmp)
+          start_t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          response = ask_with_retry(tmp, prompt)
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_t
+          text = clean_reply(response.respond_to?(:content) ? response.content.to_s : '')
+          usage = tmp.messages.last ? usage_line(tmp.messages.last) : ''
+          if text.empty?
+            log "[try #{m}] (#{elapsed.round(1)}s) → (no reply — model stayed silent)#{usage}"
+          else
+            log "[try #{m}] (#{elapsed.round(1)}s) → #{text}#{usage}"
+          end
         end
-        if text.empty?
-          log "[try #{m}] (#{elapsed.round(1)}s) → (no reply — model stayed silent)#{usage}"
-        else
-          log "[try #{m}] (#{elapsed.round(1)}s) → #{text}#{usage}"
-        end
-        # Also log tool result if reply came via tool (Halt has empty content).
-        # The observe_chat callbacks already logged tool calls/results for tmp,
-        # so operator sees full trace.
       rescue StandardError => e
         log_error("try (#{m}) failed", e)
+      ensure
+        @mutex.synchronize { configure_model!(original_model) } rescue nil
       end
     end
     "[try] Running '#{msg}' with model #{m} — one-off, not persisted, not sent to game. See [hivemind] logs for result..."
-  end
-
-  # Generic dry-run with arbitrary prompt (used by /eval tooling or /try).
-  def dry_run!(model, prompt_text)
-    try_model!(model, prompt_text, player: 'eval')
   end
 
   # Fallback reply path: only fires when the model answered with plain text

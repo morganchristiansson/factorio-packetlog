@@ -31,8 +31,7 @@ module HiveMindCompaction
   # on quit (no auto compaction). On SUCCESS /compact trims the compacted
   # history (trim_session_after_compaction!, keeping mid-pass console
   # lines); on failure — a missing/empty section after one retry — the
-  # session is kept. clear_session! stays callable standalone so a full
-  # wipe can be scripted/tested.
+  # session is kept.
   def compact_memory!(reason = nil)
     return false unless @memory_store.enabled?
     return false unless compactable?
@@ -238,7 +237,7 @@ module HiveMindCompaction
     return false unless @chat
     chars = @chat.messages.reject { |m| m.role == :system }
                     .sum { |m| m.content.to_s.length }
-    chars >= HiveMindAgent::AUTO_COMPACTION_MIN_CHARS
+    chars >= auto_compaction_min_chars
   end
 
   # One-line summary of what the compaction pass is reviewing.

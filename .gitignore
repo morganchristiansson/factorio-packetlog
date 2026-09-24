@@ -1,3 +1,6 @@
+# Local configuration may contain credentials; commit only *.example files
+config*.yaml
+
 # Capture artifacts
 *.pcap
 captures/

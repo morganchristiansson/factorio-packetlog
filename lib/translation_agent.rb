@@ -15,10 +15,9 @@ class TranslationAgent
   # other whitelisted readers. Translation occurs between all
   # whitelisted locales via direct service support (no pivot).
   WHITELIST = Set.new(%w[en pt ru])
-  WHITELIST_ARR = %w[en pt ru]
 
   # Backend types
-  # Available backends: :libretranslate, :bergamot, :mock, :argos, :google, :hybrid
+  # Available backends: :mock, :argos, :google, :hybrid
 
   attr_reader :rcon, :enabled, :player_db, :backend, :translation_service, :whitelist
 
@@ -27,12 +26,10 @@ class TranslationAgent
   # decide per-player who needs a translated line and address them by game
   # index — Lua can't see the language overrides, so the decision is made
   # here and Lua just prints to the computed indexes.
-  def initialize(rcon:, player_db:, backend: nil, libretranslate_url: nil, bergamot_url: nil, api_key: nil, enabled: true, roster: nil)
+  def initialize(rcon:, player_db:, backend: nil, api_key: nil, roster: nil)
     # Load config-translation.yaml for defaults (param > config > hardcoded).
     trans_config = File.exist?('config-translation.yaml') ? (YAML.load_file('config-translation.yaml') || {}) : {}
     backend ||= (trans_config['backend'] || 'argos').to_sym
-    libretranslate_url ||= trans_config['libretranslate_url']
-    bergamot_url ||= trans_config['bergamot_url']
     # Google API key for hybrid/google backend — env-only (secret).
     if (backend == :hybrid || backend == :google) && api_key.nil? && ENV['GOOGLE_TRANSLATE_API_KEY']
       api_key = ENV['GOOGLE_TRANSLATE_API_KEY']
@@ -40,13 +37,12 @@ class TranslationAgent
     @rcon = rcon
     @player_db = player_db
     @backend = backend
-    @enabled = enabled && !@rcon.nil? && !@player_db.nil?
+    @enabled = !@rcon.nil? && !@player_db.nil?
     @whitelist = (trans_config['whitelist'] || WHITELIST.to_a).map(&:downcase).to_set
-    @whitelist_arr = @whitelist.to_a
     @roster = roster
 
     # Initialize translation backend
-    @translation_service = create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
+    @translation_service = create_translation_service(backend, api_key)
 
     # player_name -> last translation time (for cooldown)
     @last_translate = {}
@@ -133,30 +129,13 @@ class TranslationAgent
   end
 
   # Enable/disable translation at runtime (no background threads to manage)
-  def enable!
-    @enabled = true
-  end
-
-  def disable!
-    @enabled = false
-  end
-
-  # Shutdown
-  def shutdown
-    close_events
-    disable!
-  end
-
   private
 
   # Create translation service based on backend
   # Only ONE backend is ever active per agent — load just that file (the
   # others stay out of memory and off the reload path).
-  def create_translation_service(backend, libretranslate_url, bergamot_url, api_key)
+  def create_translation_service(backend, api_key)
     case backend
-    when :bergamot
-      require_relative 'translation_bergamot'
-      BergamotTranslationService.new(bergamot_url || 'http://localhost:8080')
     when :mock
       require_relative 'translation_mock'
       MockTranslationService.new
@@ -170,8 +149,9 @@ class TranslationAgent
       require_relative 'translation_hybrid'
       HybridTranslationService.new(api_key)
     else
-      require_relative 'translation_libre'
-      LibreTranslateService.new(libretranslate_url || 'https://libretranslate.de/translate', api_key)
+      warn "Unknown translation backend #{backend.inspect}; using argos"
+      require_relative 'translation_argos'
+      ArgosTranslateService.new
     end
   end
 
@@ -223,7 +203,7 @@ class TranslationAgent
       next if reader_langs.include?(msg_lang)
       # Pick the first whitelisted language they read (locale first,
       # then overrides).
-      target = (reader_langs & @whitelist_arr).first
+      target = (reader_langs & @whitelist.to_a).first
       next unless target
       text = texts[target] ||= localize(message, target, msg_lang)
       # A whitelisted locale that returned the original text unchanged

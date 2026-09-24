@@ -145,13 +145,6 @@ class TestHivemindFollowUps < Minitest::Test
   end
 
 
-  def test_clear_session_cancels_pending_followups
-    @agent.schedule_followup(delay_seconds: 60, task: 'remind', name: 'remind')
-    assert @agent.clear_session!
-    assert_empty @agent.instance_variable_get(:@followups)
-  end
-
-
   # The follow-up scheduler thread must survive hot reloads: the agent
   # object persists while code is reloaded, but a thread that died (or was
   # never started) is revived at the sniffer's reconstruction seam via
@@ -172,8 +165,6 @@ class TestHivemindFollowUps < Minitest::Test
     assert_equal 'post-reload check', agent.instance_variable_get(:@followups).first[:task]
     agent.send(:persist!)  # the exact crash from the live run
     assert agent.send(:compaction_material).include?('Pending scheduled follow-ups:')
-    assert agent.clear_session!
-    assert_empty agent.instance_variable_get(:@followups)
   end
 
 end

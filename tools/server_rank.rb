@@ -18,10 +18,8 @@ require 'optparse'
 require 'matchmaking'
 require 'server_query'
 
-# Server names carry Factorio rich-text ([color=...], [img=...]); strip for chat/stdout.
-def strip_tags(s)
-  s.to_s.gsub(/\[[^\]]*\]/, '').strip.squeeze(' ')
-end
+# Keep the historical top-level helper while sharing the implementation.
+def strip_tags(s) = ServerQuery.strip_tags(s)
 
 def player_count(s)
   (s['players'] || []).length

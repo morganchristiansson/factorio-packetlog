@@ -3,9 +3,9 @@
 # Scheduled follow-ups (the schedule_followup / cancel_followup tools'
 # backing logic, JS setTimeout/clearTimeout analog). A MIXIN on
 # HiveMindAgent — deliberately NOT part of the tool classes: the pending
-# entries are shared state (persisted by persist!/load_session, dropped by
-# clear_session!, listed by compaction) and must survive hot reloads and
-# restarts, while tools are rebuilt fresh per ask.
+# entries are shared state (persisted by persist!/load_session, listed by
+# compaction) and must survive hot reloads and restarts, while tools are
+# rebuilt fresh per ask.
 module HiveMindFollowUps
   # Scheduled follow-ups (the schedule_followup tool, JS-setTimeout-like).
   MIN_FOLLOWUP_DELAY = 15.0     # min seconds before a follow-up can fire (anti ping-pong/abuse)
@@ -97,7 +97,7 @@ module HiveMindFollowUps
       'The context above is fresh (online players, console lines since your last turn). ' \
       'Check on the situation and act as you see fit: send a chat message (reply tool), ' \
       'run read-only queries (rcon_query), schedule another follow-up, or stay silent ' \
-      "if nothing needs doing. Keep any message under #{HiveMindAgent::MAX_REPLY_LEN} characters.",
+      "if nothing needs doing. Keep any message under #{max_reply_len} characters.",
       player: nil
     )
   end

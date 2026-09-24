@@ -31,22 +31,6 @@ class GoogleCloudTranslateService
     text
   end
 
-  def to_english(text, source_lang:)
-    translate(text, source_lang: normalize_locale(source_lang), target_lang: 'en')
-  end
-
-  def from_english(text, target_lang:)
-    translate(text, source_lang: 'en', target_lang: normalize_locale(target_lang))
-  end
-
-  def needed?(player_locale, our_locale)
-    normalize_locale(player_locale) != normalize_locale(our_locale)
-  end
-
-  def clear_cache!
-    @mutex.synchronize { @cache.clear }
-  end
-
   private
 
   def do_translate(text, source_lang, target_lang)

@@ -21,7 +21,7 @@ either on a client or on the game server host (server mode, with RCON).
 - `lib/player_db.rb` — Player ID→name mapping (`players-cache.json`) + per-player language overrides (`players-locale.json`, set via `/locales`)
 - `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
 - `lib/memory_store.rb` — Hivemind long-term memory: keyed blobs → `memories/SOUL.md` (soul), `memories/KNOWLEDGE.md` (knowledge), `memories/players/<name>.md` (per-player). Atomic whole-blob writes; keys are never file paths to the model.
-- `lib/hivemind.rb` — Hivemind AI agent (`HiveMindAgent`; prompts in `lib/hivemind_prompts.rb`, tools in `lib/hivemind_tools.rb`, persistence/compaction/follow-up mixins in `lib/hivemind_persistence.rb` / `lib/hivemind_compaction.rb` / `lib/hivemind_followups.rb`): `HivemindReply` [model-facing name "reply"], `RconQuery`, `SetPlayerTag`, `ScheduleFollowUp`/`CancelFollowUp`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (reply tool, Lua-quoted); read-only RCON queries via `rcon_query` tool; player tags via `set_player_tag` (the only state-changing tool). **Scheduled follow-ups**: `schedule_followup` / `cancel_followup` tools (JS `setTimeout`/`clearTimeout` analog) — the model sets a timer for a later turn (e.g. "check whether spawn is held in 10 minutes"); a single scheduler thread (condition-variable sleep, serialized with asks via the same mutex) fires a fresh turn with the current context + the task; entries persist with absolute deadlines and are re-armed on restart; cleared by `clear_session!` (via `/compact`). Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars; changes that add/remove instance state need a full restart (method/tool/prompt changes hot-reload fine). Reloads happen IN PLACE now: the sniffer's `reload_code!` re-`load`s the libs and calls `ensure_followup_scheduler` to revive a dead scheduler thread. Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`GREET_INTERVAL` rate-limited; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one single-pass LLM turn in a throwaway chat replaying the live thread (input-token cache reused) that rewrites every keyed memory as delimited plain-text sections (no tools — the gateway drops tool-call args); then trims the compacted range keeping a recent tail (distill-then-trim — `/compact` is now the only session clear; `/forget`/`/clear` were removed, `clear_session!` keeps memories). See `docs/ai-agent.md`.
+- `lib/hivemind.rb` — Hivemind AI agent (`HiveMindAgent`; prompts in `lib/hivemind_prompts.rb`, tools in `lib/hivemind_tools.rb`, persistence/compaction/follow-up mixins in `lib/hivemind_persistence.rb` / `lib/hivemind_compaction.rb` / `lib/hivemind_followups.rb`): `HivemindReply` [model-facing name "reply"], `RconQuery`, `SetPlayerTag`, `ScheduleFollowUp`/`CancelFollowUp`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (reply tool, Lua-quoted); read-only RCON queries via `rcon_query` tool; player tags via `set_player_tag` (the only state-changing tool). **Scheduled follow-ups**: `schedule_followup` / `cancel_followup` tools (JS `setTimeout`/`clearTimeout` analog) — the model sets a timer for a later turn (e.g. "check whether spawn is held in 10 minutes"); a single scheduler thread (condition-variable sleep, serialized with asks via the same mutex) fires a fresh turn with the current context + the task; entries persist with absolute deadlines, are re-armed on restart, and survive compaction. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars; changes that add/remove instance state need a full restart (method/tool/prompt changes hot-reload fine). Reloads happen IN PLACE now: the sniffer's `reload_code!` re-`load`s the libs and calls `ensure_followup_scheduler` to revive a dead scheduler thread. Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`GREET_INTERVAL` rate-limited; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one single-pass LLM turn in a throwaway chat replaying the live thread (input-token cache reused) that rewrites every keyed memory as delimited plain-text sections (no tools — the gateway drops tool-call args); then trims the compacted range keeping a recent tail (distill-then-trim — `/compact` is now the only session clear; `/forget`/`/clear` were removed, and memories are kept). See `docs/ai-agent.md`.
 - `lib/pcap.rb` — PcapWriter / PcapReader
 - `lib/live_capture.rb` — pcaprub live capture (msg-13 fast path)
 - `tools/rcon.rb` — RCON CLI (status/players/exec/raw)
@@ -160,13 +160,12 @@ either on a client or on the game server host (server mode, with RCON).
 Keep the CLI/env surface from growing. Rules for adding any flag or env
 var (applies to new AND existing knobs):
 
-1. **Hardcode first.** Add a knob only when you can name a concrete run
-   that sets it to a non-default value. (`memories/` and the provider are
-   hardcoded — no knobs.)
-2. **One source per setting.** Never expose both a flag and an env var
-   for the same thing.
+1. **Hardcode first.** Add a config option only when you can name a concrete
+   run that sets it to a non-default value. (`memories/` remains hardcoded.)
+2. **One source per setting.** Hivemind behavior comes from
+   `config-hivemind.yaml`; no Hivemind CLI args or non-secret env vars.
 3. **Secrets are env-only** — never a CLI flag (shell history / `ps` /
-   committed scripts leak it). `HIVE_API_KEY` is the only AI knob.
+   committed scripts leak it). `HIVE_API_KEY` is the only Hivemind env var.
 4. **One feature = one toggle.** No flag AND env for the same on/off
    switch (there's no `--ai-agent`/`HIVE_AGENT` pair — the agent is
    implicit: on in server mode iff `HIVE_API_KEY` is set).
@@ -179,9 +178,8 @@ Current AI config surface:
 |------|--------|------|
 | agent on/off | implicit (server mode + `HIVE_API_KEY`) | — |
 | api key | `HIVE_API_KEY` | env (secret) |
-| model | `HIVE_MODEL` or `DEFAULT_MODEL` | env |
-| endpoint | `HIVE_API_BASE` or `DEFAULT_API_BASE` | env |
-| provider | `:openai` | hardcoded |
+| per-model provider/api_base/api_key_env, prompts, limits | `config-hivemind.yaml` | YAML |
+| api key | `HIVE_API_KEY` | env (secret) |
 
 ## Usage
 
@@ -193,8 +191,7 @@ sudo ruby factorio-sniffer.rb
 # agent auto-enables in server mode (no flag, no extra args):
 HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
 # (Capture is always on; retention defaults bound disk. No key = no AI.
-# Provider is fixed (:openai); model/endpoint overridable via
-# HIVE_MODEL / HIVE_API_BASE.)
+# Hivemind behavior is configured in config-hivemind.yaml.)
 
 # Pcap from a 2.0 server (action tables differ from 2.1):
 ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0

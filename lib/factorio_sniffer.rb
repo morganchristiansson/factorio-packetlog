@@ -208,7 +208,7 @@ class FactorioSniffer
                                         player_db: @player_db)
             @agent.ensure_followup_scheduler
             @agent.ensure_log_watcher(ServerDetect.log_path)
-            puts "[hivemind] AI agent online — answering chat for \"#{HiveMindAgent::TRIGGERS.join(', ')}\" (model #{@agent.model})"
+            puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
           rescue => e
             warn "[hivemind] AI agent disabled: #{e.message}"
             @agent = nil
@@ -1102,8 +1102,9 @@ class FactorioSniffer
       if @agent.nil?
         puts "hivemind disabled (no HIVE_API_KEY or init failed) — model N/A"
       elsif parts[1].nil?
-        puts "model: #{@agent.model} (default #{HiveMindAgent::DEFAULT_MODEL}, env HIVE_MODEL=#{ENV['HIVE_MODEL'] || 'not set'})"
-        puts "usage: /model <model-id>  — e.g. /model gpt-4o or /model deepseek-v3"
+        puts "model: #{@agent.model} (configured in config-hivemind.yaml)"
+        puts "available: #{@agent.models.join(', ')}"
+        puts "usage: /model <model-id>"
       else
         model = parts[1..].join(' ').strip.gsub(/\A["']|["']\z/, '')
         puts @agent.switch_model!(model)

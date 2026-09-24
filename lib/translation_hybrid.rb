@@ -30,28 +30,6 @@ class HybridTranslationService
     text
   end
 
-  def to_english(text, source_lang:)
-    translate(text, source_lang: normalize_locale(source_lang), target_lang: 'en')
-  end
-
-  def from_english(text, target_lang:)
-    translate(text, source_lang: 'en', target_lang: normalize_locale(target_lang))
-  end
-
-  def needed?(player_locale, our_locale)
-    normalize_locale(player_locale) != normalize_locale(our_locale)
-  end
-
-  def supported?(locale)
-    @argos.supported?(normalize_locale(locale)) || true # google covers everything
-  end
-
-  def clear_cache!
-    @mutex.synchronize { @cache.clear }
-    @argos.clear_cache!
-    @google.clear_cache!
-  end
-
   private
 
   def try_translate(text, source_lang, target_lang)

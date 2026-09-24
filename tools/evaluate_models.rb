@@ -72,15 +72,11 @@ end
 # Helper: run one prompt against one model synchronously, return reply text + timing.
 def run_one(model, scenario, api_key)
   rcon = FakeRcon.new
-  # Force model via ENV for this agent instance (HiveMindAgent reads HIVE_MODEL at init)
-  old = ENV['HIVE_MODEL']
-  ENV['HIVE_MODEL'] = model
   begin
-    agent = HiveMindAgent.new(rcon: rcon, api_key: api_key || 'sk-test', session_path: false, memory_dir: false)
+    agent = HiveMindAgent.new(rcon: rcon, api_key: api_key || 'sk-test', model: model,
+                               session_path: false, memory_dir: false)
   rescue => e
     return ["(agent disabled — #{e.message})", 0, '']
-  ensure
-    ENV['HIVE_MODEL'] = old
   end
 
   # Seed a little console history so model has context to roleplay with.
@@ -89,17 +85,13 @@ def run_one(model, scenario, api_key)
 
   prompt = nil
   if scenario[:greeting]
-    # Simulate join greeting path
-    agent.instance_variable_get(:@memory_store) # ensure exists
-    # Build greeting prompt manually via turn_prompt (we capture via monkey)
-    # Easiest: call greet_join style? Just use ask_llm path with a greeting instruction.
+    # Simulate join greeting path.
     prompt = agent.send(:turn_prompt,
       "#{scenario[:player] || 'newguy'} just joined the game. Greet them personally and briefly (one or two short sentences, under 150 characters).",
       player: scenario[:player] || 'newguy')
   else
     player = 'alice'
     msg = scenario[:prompt]
-    # Build the same prompt ask_llm would
     prompt = agent.send(:turn_prompt,
       "In-game chat from #{player}: #{msg}\n\nAnswer the player's question or continue the conversation. Keep it under 400 characters. Plain text only — no markdown, no code blocks, no emoji.",
       exclude: [player, msg], player: player)
@@ -108,37 +100,19 @@ def run_one(model, scenario, api_key)
   start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   reply = nil
   begin
-    # Use the single-model chat directly — synchronous, no thread, no send_reply
-    # We call ask_with_retry on a throwaway? But agent's complete does everything (including tool).
-    # Use agent's private complete via send, but that will call send_reply (which would rcon.say).
-    # For eval we want just the reply text without side effects, so bypass complete and call ask_with_retry on a temp chat?
-    # Simpler: call complete and capture rcon.sent / returned text.
-    # Monkey: temporarily stub send_reply to capture.
-    captured = nil
-    orig_send = agent.method(:send_reply)
-    agent.define_singleton_method(:send_reply) { |t| captured = t }
-    # Call ask_llm path synchronously (it uses complete internally which now handles tool)
-    # Instead do: agent.send(:complete, prompt) and see what's returned.
-    # The reply tool (HivemindReply) will be invoked inside the LLM turn and will call rcon.say directly,
-    # not via send_reply — so we also need to capture rcon.sent.
-    agent.send(:register_tools) if agent.instance_variable_get(:@chat)
-    # Run the completion synchronously on the agent's chat
+    # Run the completion synchronously on the agent's already-initialized chat.
     chat = agent.instance_variable_get(:@chat)
     if chat
       resp = agent.send(:ask_with_retry, chat, prompt)
       text = resp.respond_to?(:content) ? resp.content.to_s : ''
       text = agent.send(:clean_reply, text)
-      # If model used reply tool, text is empty (Halt) and rcon.sent has the real reply.
-      if text.empty? && rcon.sent.any?
-        text = rcon.sent.last.sub(/\AHivemind> /, '')
-      elsif !captured.nil? && !captured.empty?
-        text = captured
-      end
+      # If the model used the reply tool, the response is empty and the
+      # fake RCON client holds the actual in-game reply.
+      text = rcon.sent.last.sub(/\AHivemind> /, '') if text.empty? && rcon.sent.any?
       reply = text
     else
       reply = '(no chat)'
     end
-    agent.define_singleton_method(:send_reply, orig_send) # restore
   rescue StandardError => e
     reply = "ERROR: #{e.class}: #{e.message}"
   end

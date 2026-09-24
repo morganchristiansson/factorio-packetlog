@@ -19,10 +19,6 @@ abort "usage: ruby tools/grief_scan.rb CAPTURE [--tx X] [--ty Y] [--ver 2.0|2.1]
 FactorioProtocol.select_version(VER)
 R = 8  # search radius around target
 
-def px(signed32raw)
-  signed32raw >= 0x80000000 ? signed32raw - 0x100000000 : signed32raw
-end
-
 min_ts = Float::INFINITY
 max_ts = 0.0
 players = {}

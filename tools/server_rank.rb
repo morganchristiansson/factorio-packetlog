@@ -129,8 +129,11 @@ if $PROGRAM_NAME == __FILE__
   if opts[:say]
     require_relative '../lib/server_detect'
     require_relative '../lib/rcon_client'
-    rcon = RconClient.from_detected(ServerDetect.detect)
-    abort 'RCON unavailable (no server detected)' unless rcon
+    detected = ServerDetect.detect
+    abort 'RCON unavailable (no server detected)' unless detected[:rcon_port]
+    rcon = RconClient.new(host: detected[:rcon_host] || 'localhost',
+                          port: detected[:rcon_port],
+                          password: detected[:rcon_password])
     lines.each { |l| rcon.say(l) }
   end
 end

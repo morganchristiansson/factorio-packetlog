@@ -15,7 +15,6 @@ FactorioProtocol.select_version(VER)
 NEAR = ARGV.find_index('--near') ? ARGV[ARGV.find_index('--near') + 1, 3].map(&:to_f) : nil
 PLAYER = ARGV.find_index('--player') ? ARGV[ARGV.find_index('--player') + 1].to_i : nil
 
-def px(v) = v >= 0x80000000 ? v - 0x100000000 : v
 def ok(gp) = PLAYER.nil? || gp == PLAYER
 
 events = []  # [ts, gp, tick, name, x, y]

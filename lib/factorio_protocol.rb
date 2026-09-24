@@ -601,36 +601,25 @@ ACTIONS = {
       info[:mods] << [p[pos2, l], p[pos2 + l, 3].bytes.join('.')]
       pos = pos2 + l + 7
     end
-    info[:tags] = read_info_strings(p, pos)
+    info[:tags], pos = read_info_strings(p, pos)
     return nil if info[:tags].nil?
-    pos = read_info_strings_pos(p, pos)
-    info[:players] = read_info_strings(p, pos)
+    info[:players], = read_info_strings(p, pos)
     return nil if info[:players].nil?
     info
   end
 
-  # Read a [uint32v count][len+str]* block at pos; nil on overrun.
+  # Read a [uint32v count][len+str]* block at pos.
+  # Returns [values, next_offset], or [nil, nil] on overrun.
   def self.read_info_strings(p, pos)
     pos, n = decode_uint32v(p, pos)
-    return nil if n.nil?
-    n.times.map do
+    return [nil, nil] if n.nil?
+    values = n.times.map do
       pos2, l = decode_uint32v(p, pos)
-      return nil if l.nil? || pos2 + l > p.bytesize
-      s = p[pos2, l]; pos = pos2 + l
-      s
-    end
-  end
-
-  # Advance pos past a [uint32v count][len+str]* block; nil on overrun.
-  def self.read_info_strings_pos(p, pos)
-    pos, n = decode_uint32v(p, pos)
-    return nil if n.nil?
-    n.times do
-      pos2, l = decode_uint32v(p, pos)
-      return nil if l.nil? || pos2 + l > p.bytesize
+      return [nil, nil] if l.nil? || pos2 + l > p.bytesize
       pos = pos2 + l
+      p[pos2, l]
     end
-    pos
+    [values, pos]
   end
 
   # ── Chat Message Decoding (write_to_console) ─────────────────────

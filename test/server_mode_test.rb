@@ -60,12 +60,7 @@ class TestServerMode < Minitest::Test
   end
 
   # In-memory PcapWriter double: the real writer formats + flushes records to
-  # disk (and spawns a background flusher thread); tests only care about WHICH
-  # frames/packets the capture pipeline decides to write, so they record into a
-  # buffer instead. `records` holds the exact bytes the real writer would have
-  # framed (the raw Ethernet frame from write_frame, or the rebuilt IP/UDP
-  # packet from write_packet). This keeps every capture assertion meaningful
-  # while writing nothing — not even to /tmp.
+  # disk; tests only care about WHICH frames the capture pipeline writes.
   class FakePcapWriter
     attr_reader :path, :records
 
@@ -77,11 +72,7 @@ class TestServerMode < Minitest::Test
     end
 
     def write_frame(frame, _ts = Time.now)
-      @records << frame.b
-    end
-
-    def write_packet(ip_payload)
-      @records << ip_payload.b
+      @records << frame.b if frame
     end
 
     def close
@@ -158,7 +149,7 @@ class TestServerMode < Minitest::Test
     # capture: only the incoming client packet is captured — outgoing
     # server broadcasts and msg13 TransferBlocks are excluded from capture in
     # server mode (analysis never reads them; --full-capture keeps everything).
-    # The FakePcapWriter records exactly what the real writer would have framed.
+    # The FakePcapWriter records the original Ethernet frames.
     writer = sniffer.instance_variable_get(:@pcap_writer)
     writer.close
     records = writer.records
@@ -168,7 +159,7 @@ class TestServerMode < Minitest::Test
     assert payloads.none? { |payload| payload.bytesize >= 500 }, 'no 503-byte TransferBlock payloads in capture'
   end
 
-  # ── Test 2: server mode, pcap-read path (no raw_frame) ────────────────
+  # ── Test 2: server mode, pcap-read path ────────────────────────────────
 
   def test_server_mode_pcap_read_path
     output, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, debug: true) do |sniffer|
@@ -217,7 +208,10 @@ class TestServerMode < Minitest::Test
       run_pcap = File.join(dir, 'srv_banner.pcap')
       writer = PcapWriter.new(run_pcap)
       builder = make_test_sniffer(player_db: nil)
-      frame = builder.send(:build_fake_ip_udp, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
+      frame = "\x00" * 12 + [0x0800].pack('n') + "\x45\x00" + [20 + 8 + fixture_packet('client_chat_message_0x0b').bytesize].pack('n') + "\x00\x00\x00\x00\x40\x11\x00\x00" +
+              CLIENT_IP.split('.').map(&:to_i).pack('C4') + SERVER_IP.split('.').map(&:to_i).pack('C4') +
+              [34197, 34197, 8 + fixture_packet('client_chat_message_0x0b').bytesize, 0].pack('nnnn') +
+              fixture_packet('client_chat_message_0x0b')
       writer.write_frame(frame)
       writer.close
 
@@ -429,6 +423,25 @@ class TestServerMode < Minitest::Test
     assert_equal 4, records.size, "--full-capture records all 4 packets (got #{records.size})"
   end
 
+  def test_unknown_player_packet_is_saved_for_followup
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        path = File.join('captures', 'unknown.packets.pcap')
+        packet = fixture_packet('client_chat_message_0x0b')
+        _, sniffer = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+          s.instance_variable_get(:@player_db)[1] = {name: 'known'}
+          s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34_197, 34_197,
+                   packet, "\x00" * 14 + packet)
+        end
+        writer = sniffer.instance_variable_get(:@unknown_writer)
+        writer.close
+        bytes = File.binread(writer.path)
+        assert_operator bytes.bytesize, :>, 24
+        assert_includes bytes, packet
+      end
+    end
+  end
+
   # ── Test 9: C→S join/leave detection feeds the agent ──────────────────
 
   def test_server_mode_join_and_leave_events
@@ -558,16 +571,16 @@ class TestServerMode < Minitest::Test
     assert_equal 1, db.id_for('sévérin'), 'name index works with the sanitized name'
 
     # Simulate what an old reload could leave behind: a binary entry injected
-    # straight into @players (bypassing add). save() must still write valid JSON.
+    # straight into @players. The next mutation must still write valid JSON.
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'players-cache.json')
       db2 = PlayerDatabase.new(path)
       db2[1] = {name: 'alice'}
       db2.instance_variable_get(:@players)[2] = { name: "sévérin".b, locale: nil }   # legacy poison
-      db2.save
+      db2[1] = {name: 'alice'} # any later mutation persists and sanitizes the whole snapshot
       raw = File.read(path)
       parsed = JSON.parse(raw)
-      assert_equal 'sévérin', parsed['2']['name'], 'legacy binary entry sanitized at save (no GeneratorError)'
+      assert_equal 'sévérin', parsed['2']['name'], 'legacy binary entry sanitized during persistence (no GeneratorError)'
       assert_equal 'alice', parsed['1']['name'], 'clean entry survives'
     end
 
@@ -614,13 +627,11 @@ class TestServerMode < Minitest::Test
       db2 = PlayerDatabase.new(path)
       db2[1] = {name: 'alice', admin: true}
       db2[2] = {name: 'bob', admin: false}
-      db2.save
       reloaded = PlayerDatabase.new(path)
       assert_equal [true, false, false], [reloaded['alice'][:admin], reloaded['bob'][:admin], (reloaded['unknown'] || {})[:admin] || false], 'admin survives reload'
 
       # explicit false persists after update
       db2['alice'] = {admin: false}
-      db2.save
       reloaded2 = PlayerDatabase.new(path)
       refute (reloaded2['alice'] || {})[:admin], 'explicit false persists'
       assert_equal [false, false], [(reloaded2['alice'] || {})[:admin] || false, (reloaded2['bob'] || {})[:admin] || false]
@@ -631,7 +642,6 @@ class TestServerMode < Minitest::Test
       path = File.join(dir, 'players-cache.json')
       legacy = PlayerDatabase.new(path)
       legacy[1] = {name: 'carol'}            # admin defaults to nil (legacy injection)
-      legacy.save
       reloaded_legacy = PlayerDatabase.new(path)
       refute (reloaded_legacy['carol'] || {})[:admin], 'missing admin defaults to false'
     end

@@ -67,13 +67,11 @@ class PlayerDatabase
   # Names are forced to UTF-8 + scrubbed on Entry: packet-derived names can
   # still carry a binary encoding tag with non-ASCII bytes (hot-reload state
   # written by an older build, or a decode path that missed the scrub), and a
-  # binary name makes JSON.pretty_generate in #save raise JSON::GeneratorError
+  # binary name makes JSON.pretty_generate during persistence raise JSON::GeneratorError
   # — killing Ctrl-C shutdown/reload. Sanitizing here keeps the DB self-
   # healing regardless of caller.
-  # Persist immediately when a player mapping actually changes (new id
-  # or name change), so the cache survives a crash/kill mid-session —
-  # previously the mapping was only saved on quit/reload (FactorioSniffer
-  # #finish / Ctrl-C), losing every player learned after the last save.
+  # Persist immediately when a player mapping changes, so the cache survives
+  # a crash/kill mid-session.
   # Record accessors. Index (Numeric) or name (String) keys both work.
   # `[]` reads; `[]=` merges into the existing record (or creates one)
   # and persists immediately. Admin lives here (players-cache.json).
@@ -178,12 +176,6 @@ class PlayerDatabase
   # All overrides as {name -> [langs]} (for the /locales console list).
   def all_locale_overrides
     @mutex.synchronize { @overrides.dup }
-  end
-
-  # Explicit flush (finish / reload / --map-player). The mutators above
-  # persist eagerly on their own; this covers callers that only flush.
-  def save
-    @mutex.synchronize { persist }
   end
 
   private

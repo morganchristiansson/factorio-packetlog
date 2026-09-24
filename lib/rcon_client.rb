@@ -2,7 +2,6 @@
 
 require 'json'
 require 'rcon'
-require_relative 'server_detect'
 
 # RCON wrapper for the Factorio server, used to query the connected-player
 # roster ({index, name} pairs) at startup.
@@ -55,16 +54,6 @@ class RconClient
     'local function d(k,f) local n={} for x in pairs(prototypes[k]) do n[#n+1]=x end ' \
     'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n"), false, 0) end ' \
     'd("item","factorio-sniffer-items.txt") d("entity","factorio-sniffer-entities.txt")'
-
-  # Build a client from ServerDetect.detect output, or nil when no RCON
-  # endpoint was detected.
-  def self.from_detected(detected)
-    return nil unless detected && detected[:rcon_port]
-    new(host: detected[:rcon_host] || 'localhost',
-        port: detected[:rcon_port],
-        password: detected[:rcon_password],
-        script_output_dir: ServerDetect.script_output_dir(detected[:pid]))
-  end
 
   # Parse a bare rcon.print roster payload into [{index:, name:}].
   # Returns [] for a valid empty roster, nil when the payload isn't a roster.
@@ -213,23 +202,10 @@ class RconClient
   # model passes full commands like "/players" or "/sc rcon.print(...)".
   # Reconnects once on failure, same as #execute.
   def command(cmd)
-    log_rcon_command(cmd)
-    body = nil
-    @mutex.synchronize { body = @client.execute(cmd).body.to_s }
-    body
-  rescue => e
-    begin
-      @client = connect
-      @mutex.synchronize { @client.execute(cmd).body.to_s }
-    rescue => e2
-      warn "RCON execute failed: #{e2.class}: #{e2.message}"
-      ''
-    end
+    run_command(cmd)
   end
 
-  private
-
-  # Lua double-quoted string escaping shared by #say and #set_player_tag:
+  # Lua double-quoted string escaping shared by #say, #set_player_tag, and TranslationAgent:
   # every backslash and quote gets a literal backslash prefix so content
   # can't break out of the string or inject Lua; newlines collapse to
   # spaces (single-line contexts). Char loop on purpose: gsub with a
@@ -244,6 +220,8 @@ class RconClient
     out
   end
 
+  private
+
   def connect
     c = Rcon::Client.new(host: @host, port: @port, password: @password)
     c.authenticate!(ignore_first_packet: false)  # Factorio sends ONE auth reply
@@ -251,17 +229,19 @@ class RconClient
   end
 
   def execute(cmd)
-    log_rcon_command("/sc #{cmd}")
-    body = nil
-    @mutex.synchronize { body = @client.execute("/sc #{cmd}").body.to_s }
-    body
-  rescue => e
+    run_command("/sc #{cmd}")
+  end
+
+  def run_command(cmd)
+    log_rcon_command(cmd)
+    @mutex.synchronize { @client.execute(cmd).body.to_s }
+  rescue
     # Connection lost (server restart, network blip) — reconnect once.
     begin
       @client = connect
-      @mutex.synchronize { @client.execute("/sc #{cmd}").body.to_s }
-    rescue => e2
-      warn "RCON execute failed: #{e2.class}: #{e2.message}"
+      @mutex.synchronize { @client.execute(cmd).body.to_s }
+    rescue => e
+      warn "RCON execute failed: #{e.class}: #{e.message}"
       ''
     end
   end

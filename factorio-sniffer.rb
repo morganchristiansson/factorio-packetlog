@@ -257,10 +257,9 @@ if __FILE__ == $PROGRAM_NAME
   db = PlayerDatabase.new(options[:player_db])
   (options[:player_maps] || []).each do |m|
     id, name = m.split(':', 2)
-    db.add(id.to_i, name)
+    db[id.to_i] = {name: name}
     puts "Mapped Player #{id} -> #{name}"
   end
-  db.save
 
   unless options[:interface] || options[:pcap]
     puts op

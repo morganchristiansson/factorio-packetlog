@@ -2,6 +2,7 @@
 
 require 'zlib'
 require 'stringio'
+require 'tempfile'
 require 'fileutils'
 
 # PCAP Writer (for saving live capture)
@@ -17,8 +18,7 @@ class PcapWriter
   # timestamped: write straight to a timestamped file
   #   (`base-<YYYYMMDD-HHMMSS>.pcap`) — the latest file IS the live one,
   #   no renames, no stable path. Restarts just open a new file. Used for
-  #   the always-on auto-named capture; explicit paths (e.g.
-  #   --save-unknowns) keep the legacy exact-path behavior.
+  #   both the normal capture and the small unknown-packet capture.
   def initialize(path, gzip: false, keep: nil, max_size: nil, timestamped: false)
     @base_path = path
     @timestamped = timestamped
@@ -37,10 +37,6 @@ class PcapWriter
     write_global_header
     # Ruby IO (or GzipWriter) and the kernel buffer writes. No per-record
     # flush/fsync; close on rotation/shutdown finalizes the buffered stream.
-  end
-
-  def write_packet(ip_payload)
-    write_record(Time.now, ip_payload)
   end
 
   # Write a real captured Ethernet frame as-is (fast path for live capture;
@@ -65,6 +61,7 @@ class PcapWriter
   end
 
   def write_record(ts, data)
+    return unless data
     ts_sec = ts.to_i
     ts_usec = ((ts.to_f - ts_sec) * 1_000_000).to_i
     hdr = [ts_sec, ts_usec, data.bytesize, data.bytesize].pack('VVVV')
@@ -130,8 +127,13 @@ class PcapWriter
   end
 
   def timestamped_path(ts)
-    ext = File.extname(@base_path)
-    "#{@base_path[0...-ext.length]}-#{ts}#{ext}"
+    suffix = if @base_path.end_with?('.pcap.gz')
+               '.pcap.gz'
+             else
+               File.extname(@base_path)
+             end
+    stem = @base_path[0...-suffix.length]
+    "#{stem}-#{ts}#{suffix}"
   end
 
   # First free `base-<ts>.pcap` at or after `time` (same-second restarts
@@ -188,10 +190,27 @@ class PcapReader
     @path = path
   end
 
+  def each_packet
+    if gzip?
+      Tempfile.create(['factorio-pcap', '.pcap']) do |file|
+        file.binmode
+        file.write(gunzip_best_effort(File.binread(@path)))
+        file.flush
+        read_capture(file.path) { |*args| yield(*args) }
+      end
+    else
+      read_capture(@path) { |*args| yield(*args) }
+    end
+  end
+
   private
 
-  # Decompress a gzip stream, tolerating a missing trailer (capture being
-  # written concurrently): return everything that decompresses.
+  def gzip?
+    raw = File.binread(@path, 2)
+    raw.getbyte(0) == 0x1f && raw.getbyte(1) == 0x8b
+  end
+
+  # Decompress what is available when a live gzip capture has no trailer yet.
   def gunzip_best_effort(raw)
     out = +''.b
     gz = Zlib::GzipReader.new(StringIO.new(raw))
@@ -204,63 +223,36 @@ class PcapReader
     out
   end
 
-  public
-
-  def each_packet(&block)
-    raw = File.binread(@path)
-    # Gzip-autodetect: [0x1f 0x8b] magic → gunzip in memory (keeps all
-    # downstream tools — extract_save_from_pcap, analysis — working on
-    # compressed captures unchanged). A gz file being written concurrently
-    # has no trailer yet; read what decompresses and warn on truncation.
-    data =
-      if raw.bytesize >= 2 && raw.getbyte(0) == 0x1f && raw.getbyte(1) == 0x8b
-        gunzip_best_effort(raw)
-      else
-        raw
-      end
-
-    magic = data.unpack1('V')
-    endian = (magic == 0xa1b2c3d4) ? :little : :big
-    raise "Not a pcap file" unless [:little, :big].include?(endian)
-
-    gh = data.unpack(endian == :little ? 'VvvVVVV' : 'NnnNNNN')
-    linktype = gh[6]
+  def read_capture(path)
+    old_verbose = $VERBOSE
+    $VERBOSE = nil
+    require 'pcaprub'
+    capture = PCAPRUB::Pcap.open_offline(path)
+    header_size = case capture.datalink
+                 when PCAPRUB::Pcap::DLT_NULL then 4
+                 when PCAPRUB::Pcap::DLT_EN10MB then 14
+                 when PCAPRUB::Pcap::DLT_LINUX_SLL then 16
+                 else 0
+                 end
     pkt_num = 0
-
-    offset = 24
-    while offset + 16 <= data.bytesize
-      ph = data.unpack(endian == :little ? 'VVVV' : 'NNNN', offset: offset)
-      ts_sec, ts_usec, incl_len, _ = ph
-      offset += 16
-      break if offset + incl_len > data.bytesize
-      pkt_data = data[offset, incl_len]
-      offset += incl_len
+    capture.each_packet do |packet|
       pkt_num += 1
+      frame = packet.data
+      raw = frame[header_size..]
+      next if raw.nil? || raw.bytesize < 28 || raw.getbyte(9) != 17
 
-      # Strip link layer
-      raw = case linktype
-      when 1 then pkt_data[14..]
-      when 0 then pkt_data[4..]
-      when 113 then pkt_data[16..]
-      else pkt_data
-      end
-      next if raw.nil? || raw.bytesize < 28
-
-      # Parse IP + UDP
-      ihl = (raw.getbyte(0) & 0x0F) * 4
-      next unless raw.getbyte(9) == 17  # UDP only
+      ihl = (raw.getbyte(0) & 0x0f) * 4
       next if raw.bytesize < ihl + 8
-
-      sport = raw.unpack1('n', offset: ihl)
-      dport = raw.unpack1('n', offset: ihl + 2)
       udp_data = raw[ihl + 8, raw.bytesize - ihl - 8]
-      next if udp_data.nil? || udp_data.bytesize < 1
+      next if udp_data.nil? || udp_data.empty?
 
-      src_ip = raw[12..15].bytes.join('.')
-      dst_ip = raw[16..19].bytes.join('.')
-
-      yield(pkt_num, ts_sec + ts_usec / 1_000_000.0,
-            src_ip, dst_ip, sport, dport, udp_data)
+      yield(pkt_num, packet.time + packet.microsec / 1_000_000.0,
+            raw[12..15].bytes.join('.'), raw[16..19].bytes.join('.'),
+            raw.unpack1('n', offset: ihl), raw.unpack1('n', offset: ihl + 2),
+            udp_data, frame)
     end
+  ensure
+    capture&.close
+    $VERBOSE = old_verbose
   end
 end

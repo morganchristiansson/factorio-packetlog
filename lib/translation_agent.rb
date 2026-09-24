@@ -116,7 +116,7 @@ class TranslationAgent
   # after the join are ignored by design.
   def note_joined(game_index, name)
     return unless @rcon
-    escaped = lua_quote(name)
+    escaped = @rcon.lua_quote(name)
     lua = %(do local p = game.players["#{escaped}"] rcon.print(p and p.locale or "nil") end)
     locale = @rcon.command("/sc #{lua}").strip
     if locale && !locale.empty? && locale != 'nil' && locale != 'false'
@@ -211,11 +211,11 @@ class TranslationAgent
       # already saw it.
       next if text == message
       tag = "#{msg_lang}>#{target}"
-      entries << %([#{index}]="[#{tag}] #{lua_quote(speaker_name)}: #{lua_quote(text)}")
+      entries << %([#{index}]="[#{tag}] #{@rcon.lua_quote(speaker_name)}: #{@rcon.lua_quote(text)}")
     end
     return if entries.empty?
 
-    lua = %(do local t = {#{entries.join(',')}}; local n = "#{lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.index]; if x then p.print(x, ps) end end end)
+    lua = %(do local t = {#{entries.join(',')}}; local n = "#{@rcon.lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.index]; if x then p.print(x, ps) end end end)
     @rcon.command("/sc #{lua}")
   rescue StandardError => e
     warn "[translation] in-game relay failed: #{e.class}: #{e.message}"
@@ -231,15 +231,5 @@ class TranslationAgent
   def whitelisted?(locale)
     norm = locale.to_s.split('-').first&.downcase
     @whitelist.include?(norm)
-  end
-
-  # Lua string escaping
-  def lua_quote(str)
-    out = +''
-    str.to_s.each_char do |ch|
-      out << "\\" if ch == '"' || ch == "\\"
-      out << ((ch == "\n" || ch == "\r") ? ' ' : ch)
-    end
-    out
   end
 end

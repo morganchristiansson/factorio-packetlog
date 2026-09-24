@@ -85,7 +85,12 @@ class FactorioSniffer
         @pending_capture = dir  # client: resolve the server identity on the first packet
       end
     end
-    @unknown_writer = options[:save_unknowns] ? PcapWriter.new(options[:save_unknowns]) : nil
+    # Protocol-development capture is always on. Keep this separate from the
+    # normal rolling capture so decoder failures can be replayed later.
+    unknown_path = File.join(default_capture_dir, 'unknown.packets.pcap')
+    @unknown_writer = PcapWriter.new(unknown_path, keep: effective_keep,
+                                     max_size: effective_max_size, timestamped: true)
+    puts "saving unknown packets to #{@unknown_writer.path}"
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
       @item_db = ItemDB.new(options[:item_db])
@@ -143,7 +148,7 @@ class FactorioSniffer
       # Explicit --server-ip wins; else the auto-detected list (default-route
       # interface first); else all local IPv4s as a last resort.
       @server_ips = options[:server_ips] ||
-                    (options[:server_ip] ? [options[:server_ip]] : detect_local_ipv4)
+                    (options[:server_ip] ? [options[:server_ip]] : ServerDetect.local_ipv4)
       # src_ip -> username, learned from ConnectionRequestReplyConfirm (msg 4,
       # incoming). Bound to the real game index by the client's first C→S
       # heartbeat action below. (@ip_names, defined above for all modes.)
@@ -297,13 +302,12 @@ class FactorioSniffer
     retry
   end
 
-  # Finalize the session: summary, persist player names, close writers.
+  # Finalize the session: summary and close writers.
   # Memory is NOT distilled here — compaction is manual only (`/compact`).
   def finish
     @agent&.close_events
     @translation_agent&.close_events
     print_summary
-    @player_db.save
     @pcap_writer&.close
     @unknown_writer&.close
   end
@@ -331,7 +335,6 @@ class FactorioSniffer
   def reload_code!
     puts "\nInterrupt — reloading code in place; session preserved."
     puts "  Press Ctrl+C (or SIGHUP) again within #{QUIT_WINDOW} seconds to quit."
-    @player_db.save
     old_verbose = $VERBOSE
     $VERBOSE = nil
     begin
@@ -382,20 +385,6 @@ class FactorioSniffer
     (f & 0x01) != 0 || (f & 0x10) != 0 || ((f & 0x02) != 0 && (f & 0x08) == 0)
   end
 
-  # Local IPv4 addresses, used in server mode to classify packet direction
-  # (dst = incoming/client→server, src = outgoing/server→client).
-  def detect_local_ipv4
-    require 'socket'
-    Socket.getifaddrs
-          .select { |a| a.addr&.ipv4? }
-          .map { |a| a.addr.ip_address }
-          .reject { |ip| ip.start_with?('127.') }
-          .uniq
-  rescue => e
-    warn "Warning: could not detect local IPs (#{e}); pass --server-ip"
-    []
-  end
-
   def process_packet(pkt_num, ts, src_ip, dst_ip, sport, dport, udp_data, raw_frame = nil)
     @stats[:packets] += 1
 
@@ -436,12 +425,7 @@ class FactorioSniffer
     # they contain no player actions and added ~12% to a 4.9M-packet capture.
     if (udp_data.getbyte(0) & 0x1F) == 13
       if @pcap_writer && (@options[:save_transfer_blocks] || @options[:full_capture])
-        if raw_frame
-          @pcap_writer.write_frame(raw_frame, Time.at(ts))
-        else
-          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
-          @pcap_writer.write_packet(pkt)
-        end
+        @pcap_writer.write_frame(raw_frame, Time.at(ts))
       else
         @stats[:capture_skipped] += 1 if @pcap_writer
       end
@@ -455,12 +439,7 @@ class FactorioSniffer
     # outgoing broadcasts from the file — analysis-uninteresting packets.
     if @pcap_writer
       if capture_recordable?(src_ip, dst_ip, udp_data)
-        if raw_frame
-          @pcap_writer.write_frame(raw_frame, Time.at(ts))
-        else
-          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
-          @pcap_writer.write_packet(pkt)
-        end
+        @pcap_writer.write_frame(raw_frame, Time.at(ts))
       else
         @stats[:capture_skipped] += 1
       end
@@ -637,20 +616,24 @@ class FactorioSniffer
     # Ghost flag is in bit 0 of next_receive timeshift
     @ghost_mode = hb[:next_receive] ? (hb[:next_receive] & 1) == 1 : false
     
-    # Validation warning when hit_unknown occurs
-    if hb[:hit_unknown]
-      tc = hb[:tick_closures]&.last
-      if tc&.dig(:actions, -1)
-        last_act = tc[:actions][-1]
-        if @options[:validate]
-          warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
-        end
-        # Save unknown packet for analysis
-        if @unknown_writer
-          pkt = build_fake_ip_udp(src_ip, dst_ip, sport, dport, udp_data)
-          @unknown_writer.write_packet(pkt)
-        end
+    # Keep protocol-development packets that expose a decoder failure. Besides
+    # hit_unknown, an action attributed to a player absent from the authoritative
+    # roster is evidence that an earlier action length desynchronized the stream.
+    known_players = @player_db.players.keys
+    known_players.concat(@attrs.roster_pairs.map { |p| p[:index] })
+    invalid_players = if known_players.empty?
+                        []
+                      else
+                        hb[:tick_closures]&.filter_map do |tc|
+                          tc[:actions]&.map { |a| a[:game_player] }&.uniq
+                        end&.flatten&.reject { |pid| known_players.include?(pid) } || []
+                      end
+    if hb[:hit_unknown] || invalid_players.any?
+      last_act = hb[:tick_closures]&.filter_map { |tc| tc[:actions]&.last }&.last
+      if @options[:validate] && hb[:hit_unknown] && last_act
+        warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
       end
+      @unknown_writer&.write_frame(raw_frame, Time.at(ts))
     end
     
     hb[:tick_closures]&.each do |tc|
@@ -662,53 +645,6 @@ class FactorioSniffer
   ensure
     # Check AFTER this packet refreshes liveness, including sender-index binding.
     check_timeouts_if_due
-  end
-
-  # Build a minimal Ethernet+IP+UDP packet for pcap storage.
-  # Optimized: per-flow template with a fast checksum (the old version
-  # recomputed the IP checksum with a byte loop for every packet, which was
-  # a bottleneck during map-download bursts).
-  def build_fake_ip_udp(src_ip, dst_ip, sport, dport, payload)
-    # Template per flow: eth(14) + IP header(20, len+cksum placeholder) +
-    # UDP header(8). Only the length words and checksum vary per packet.
-    @pkt_templates ||= {}
-    key = [src_ip, dst_ip, sport, dport]
-    tmpl = @pkt_templates[key] ||= begin
-      src_bytes = src_ip.split('.').map(&:to_i).pack('C4')
-      dst_bytes = dst_ip.split('.').map(&:to_i).pack('C4')
-      eth = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff].pack('C6') +  # dest MAC
-            [0x00, 0x00, 0x00, 0x00, 0x00, 0x00].pack('C6') +  # src MAC
-            [0x0800].pack('n')                                  # EtherType IPv4
-      # IP header prefix: ver/ihl, tos, LEN(2B @16), id, flags/frag,
-      # ttl, proto(17), CKSUM(2B @24), src(4), dst(4)
-      ip = "\x45\x00" + "\x00\x00" + "\x00\x00\x00\x00" +
-           "\x40\x11" + "\x00\x00" + src_bytes + dst_bytes
-      udp = [sport, dport].pack('nn')
-      # precomputed base of the IP checksum (16-bit words, minus the
-      # length word and checksum word, one's-complement folding deferred)
-      words = ip.unpack('n10')
-      # words: [ver/ihl+tos, len, id, frag, ttl/proto, cksum, src_hi,
-      #         src_lo, dst_hi, dst_lo] — include all constant words
-      base = words[0] + words[2] + words[3] + words[4] +
-             words[6] + words[7] + words[8] + words[9]
-      [eth + ip, udp, base]
-    end
-    eth_ip, udp_hdr, csum_base = tmpl
-
-    udp_len = 8 + payload.bytesize
-    total_len = 20 + udp_len
-
-    # IP checksum = ~ones_complement_sum(words); only the length word varies.
-    sum = csum_base + total_len
-    sum = (sum >> 16) + (sum & 0xFFFF)
-    sum += sum >> 16
-    cksum = (~sum) & 0xFFFF
-
-    pkt = eth_ip.dup
-    pkt[16, 2] = [total_len].pack('n')
-    pkt[24, 2] = [cksum].pack('n')
-    pkt << udp_hdr << [udp_len, 0].pack('nn') << payload
-    pkt
   end
 
   def format_action_data(act)

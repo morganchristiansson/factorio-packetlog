@@ -22,7 +22,7 @@ puts "Extracting fixtures from pcap..."
 
 types_found = Hash.new(0)
 
-PcapReader.new('factorio_capture.pcap').each_packet do |pkt_num, udp_data|
+PcapReader.new('factorio_capture.pcap').each_packet do |pkt_num, _ts, _src, _dst, _sport, _dport, udp_data, _frame|
   parsed = FactorioProtocol.parse_udp_payload(udp_data)
   next unless parsed
   hdr = parsed[:header]

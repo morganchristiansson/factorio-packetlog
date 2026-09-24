@@ -21,7 +21,6 @@ no_rcon: false
 full_capture: false
 save_transfer_blocks: false
 save_capture_gz: true
-save_unknowns: null
 keep: 72
 max_size: 256
 

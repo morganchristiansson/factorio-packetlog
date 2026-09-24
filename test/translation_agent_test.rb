@@ -48,6 +48,7 @@ class TestTranslationAgent < Minitest::Test
       commands << command
       ''
     end
+    rcon.define_singleton_method(:lua_quote) { |value| RconClient.allocate.lua_quote(value) }
     [rcon, commands]
   end
 
@@ -188,6 +189,7 @@ class TestTranslationAgent < Minitest::Test
       commands << command
       'ru'
     end
+    rcon.define_singleton_method(:lua_quote) { |value| RconClient.allocate.lua_quote(value) }
     player_db = PlayerDatabase.new(nil)
     player_db[5] = {name: 'StarBurtS'}
     agent = make_agent(rcon: rcon, player_db: player_db)
@@ -204,6 +206,7 @@ class TestTranslationAgent < Minitest::Test
       nil_commands << command
       'nil'
     end
+    nil_rcon.define_singleton_method(:lua_quote) { |value| RconClient.allocate.lua_quote(value) }
     nil_db = PlayerDatabase.new(nil)
     nil_db[6] = {name: 'Unknown'}
     make_agent(rcon: nil_rcon, player_db: nil_db).note_joined(6, 'Unknown')

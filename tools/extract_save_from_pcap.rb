@@ -27,51 +27,22 @@
 #     some zlib chunks; intact chunks are decompressed, others are skipped.
 
 require 'zlib'
+require_relative '../lib/pcap'
 
 PCAP_PATH = ARGV[0] || 'factorio_capture.pcap'
 OUTDIR = ARGV[1] || 'save_extract'
 DOWNLOAD = (ARGV[2] && ARGV[2].to_i) || 1
 
 # ── pcap reading ──────────────────────────────────────────────────────────
-data = File.binread(PCAP_PATH)
-magic = data.unpack1('V')
-endian = (magic == 0xa1b2c3d4) ? :little : :big
-raise "Not a pcap file" unless [:little, :big].include?(endian)
-gh = data.unpack(endian == :little ? 'VvvVVVV' : 'NnnNNNN')
-linktype = gh[6]
-
 blocks = {}   # block_number -> 503-byte payload
 conn_ts = []  # timestamps of ConnectionRequest packets
-pkt_num = 0
-offset = 24
-while offset + 16 <= data.bytesize
-  ph = data.unpack(endian == :little ? 'VVVV' : 'NNNN', offset: offset)
-  ts_sec, ts_usec, incl_len, _ = ph
-  offset += 16
-  break if offset + incl_len > data.bytesize
-  pkt_data = data[offset, incl_len]
-  offset += incl_len
-  pkt_num += 1
-
-  raw = case linktype
-        when 1 then pkt_data[14..]
-        when 0 then pkt_data[4..]
-        when 113 then pkt_data[16..]
-        else pkt_data
-        end
-  next if raw.nil? || raw.bytesize < 28
-  ihl = (raw.getbyte(0) & 0x0F) * 4
-  next unless raw.getbyte(9) == 17
-  next if raw.bytesize < ihl + 8
-  udp = raw[ihl + 8, raw.bytesize - ihl - 8]
-  next if udp.nil? || udp.bytesize < 1
+PcapReader.new(PCAP_PATH).each_packet do |_pkt_num, ts, _src, _dst, _sport, _dport, udp, _frame|
+  next if udp.nil? || udp.empty?
   mt = udp.getbyte(0) & 0x1F
-  ts = ts_sec + ts_usec / 1_000_000.0
   conn_ts << ts if mt == 2
   next unless mt == 13
 
   # Separate downloads: each ConnectionRequest starts a new connection.
-  # Download 1 = packets before the 2nd connection request, etc.
   dl_index = conn_ts.count { |t| t <= ts }
   next unless dl_index == DOWNLOAD
   bn = udp.unpack1('V', offset: 1)

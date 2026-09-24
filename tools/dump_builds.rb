@@ -10,10 +10,6 @@ abort "usage: ruby tools/dump_builds.rb CAPTURE [--ver 2.0|2.1] [--min-only]" un
 FactorioProtocol.select_version(VER)
 MIN_ONLY = ARGV.include?('--min-only')
 
-def px(signed32raw)
-  signed32raw >= 0x80000000 ? signed32raw - 0x100000000 : signed32raw
-end
-
 TX, TY = 558.0, 83.0
 builds = []
 mining = {}   # gp => [[ts, tick, name], ...]

@@ -13,10 +13,6 @@ ENDT = ARGV.find_index('--end') ? ARGV[ARGV.find_index('--end') + 1] : nil
 abort "usage: ruby tools/timeline.rb CAPTURE --player N [--start HH:MM:SS] [--end HH:MM:SS]" unless path && PLAYER
 FactorioProtocol.select_version(VER)
 
-def px(signed32raw)
-  signed32raw >= 0x80000000 ? signed32raw - 0x100000000 : signed32raw
-end
-
 t0 = START ? Time.parse(START) : nil
 t1 = ENDT ? Time.parse(ENDT) : nil
 

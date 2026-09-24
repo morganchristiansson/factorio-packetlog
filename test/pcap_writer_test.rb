@@ -4,6 +4,29 @@ require 'tmpdir'
 require 'pcap'
 
 class TestPcapWriter < Minitest::Test
+  def test_reader_round_trips_plain_and_gzip_with_original_frame
+    [false, true].each do |gzip|
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "capture#{gzip ? '.pcap.gz' : '.pcap'}")
+        frame = udp_frame('10.0.0.1', '10.0.0.2', 34_197, 34_198, "\x10hello".b)
+        writer = PcapWriter.new(path, gzip: gzip)
+        writer.write_frame(frame, Time.at(123, 456_000))
+        writer.close
+
+        rows = []
+        PcapReader.new(path).each_packet { |*args| rows << args }
+        assert_equal 1, rows.size
+        assert_equal 123.456, rows[0][1]
+        assert_equal '10.0.0.1', rows[0][2]
+        assert_equal '10.0.0.2', rows[0][3]
+        assert_equal 34_197, rows[0][4]
+        assert_equal 34_198, rows[0][5]
+        assert_equal "\x10hello".b, rows[0][6]
+        assert_equal frame, rows[0][7]
+      end
+    end
+  end
+
   def test_buffered_plain_and_gzip_writes_rotate_and_close_without_threads
     [false, true].each do |gzip|
       Dir.mktmpdir do |dir|
@@ -30,5 +53,13 @@ class TestPcapWriter < Minitest::Test
         refute File.exist?(empty.path)
       end
     end
+  end
+
+  private
+
+  def udp_frame(src, dst, sport, dport, payload)
+    ip = "\x45\x00" + [20 + 8 + payload.bytesize].pack('n') + "\x00\x00\x00\x00\x40\x11\x00\x00" +
+         src.split('.').map(&:to_i).pack('C4') + dst.split('.').map(&:to_i).pack('C4')
+    ("\x00" * 12 + [0x0800].pack('n')) + ip + [sport, dport, 8 + payload.bytesize, 0].pack('nnnn') + payload
   end
 end

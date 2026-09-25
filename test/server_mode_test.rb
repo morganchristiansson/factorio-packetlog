@@ -186,6 +186,16 @@ class TestServerMode < Minitest::Test
     assert_includes output, 'barely get any iron', 'server echo still processed in client mode'
   end
 
+  # Regression: the build-action formatter looked up
+  # FactorioTypes::DIR_NAMES, which did not exist — every positioned build
+  # raised NameError and killed the capture thread.
+  def test_format_build_action_names_the_direction
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP])
+    data = [0x80, 0x2e, 0x02, 0x00, 0x80, 0x55, 0x00, 0x00, 0x06].pack('C*').b
+    assert_equal ' pos=(558.500, 85.500) dir=southeast',
+                 sniffer.send(:format_action_data, { name: 'build', data: data })
+  end
+
   # ── Test 4: server mode auto-detection ────────────────────────────────
 
   def test_server_mode_auto_detects_server_ip

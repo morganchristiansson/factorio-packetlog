@@ -19,6 +19,11 @@ class TestPosition < Minitest::Test
 
   # ── build ────────────────────────────────────────────────────────
 
+  def test_build_direction_names
+    data = [0x80, 0x2e, 0x02, 0x00, 0x80, 0x55, 0x00, 0x00, 0x06].pack('C*')
+    assert_equal 'southeast', FactorioTypes::DIR_NAMES[data.getbyte(8)] # 0-15 table, 6 = southeast
+  end
+
   def test_build_positive_tile
     # (558.5, 85.5) = raw i32 142976, 21888 LE + dir byte 0
     data = [0x80, 0x2e, 0x02, 0x00, 0x80, 0x55, 0x00, 0x00, 0x00].pack('C*')

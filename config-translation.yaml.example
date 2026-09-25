@@ -15,7 +15,7 @@ backend: argos
 # Google Cloud Translation key — used by the google and hybrid backends
 # only. The env var overrides this, so ops/CI can inject it without
 # editing the file; this file is gitignored, so a key here stays local.
-# google_api_key: "AIza..."
+# google_api_key: AIza...
 
 # Equivalent env override (wins over the value above):
 #   GOOGLE_TRANSLATE_API_KEY=... sudo ruby factorio-sniffer.rb

@@ -55,7 +55,7 @@ max_size: 512             # total budget for the rotated files (oldest
 
 # OPTIONAL (auto) — RCON helpers.game_version (cached); set 2.0 or 2.1
 # only for pcap analysis with no RCON
-# protocol_version: "2.1"
+# protocol_version: 2.1
 
 dump_raw_types: false     # print raw type ids for unknown action types
 validate: false           # verify decoded actions against the game

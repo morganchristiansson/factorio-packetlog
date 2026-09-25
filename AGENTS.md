@@ -165,13 +165,14 @@ var (applies to new AND existing knobs):
    run that sets it to a non-default value. (`memories/` remains hardcoded.)
 2. **One source per setting.** Hivemind behavior comes from
    `config-hivemind.yaml`; no Hivemind CLI args or non-secret env vars.
-3. **Secrets are env-only** (one documented exception: the Google
-   Translate key may sit in the gitignored `config-translation.yaml` as
-   `google_api_key:`, env still wins) — never a CLI flag (shell history / `ps` /
+3. **Secrets are env-first**: env var, else a key in the gitignored
+   `config*.yaml` (`google_api_key:` in config-translation.yaml, `api_key:`
+   on a Hivemind provider group) — never a CLI flag (shell history / `ps` /
    committed scripts leak it). `HIVE_API_KEY` is the only Hivemind env var.
 4. **One feature = one toggle.** No flag AND env for the same on/off
    switch (there's no `--ai-agent`/`HIVE_AGENT` pair — the agent is
-   implicit: on in server mode iff `HIVE_API_KEY` is set).
+   implicit: on in server mode iff the startup model has a key, env or
+   the group's `api_key:`).
 5. **Deterministic defaults don't get knobs.** If a value can only ever
    be one thing, hardcode it.
 
@@ -179,9 +180,9 @@ Current AI config surface:
 
 | Knob | Source | Type |
 |------|--------|------|
-| agent on/off | implicit (server mode + `HIVE_API_KEY`) | — |
-| api key | `HIVE_API_KEY` | env (secret) |
-| required models, per-model provider/api_base/api_key_env, prompts, limits | `config-hivemind.yaml` | YAML |
+| agent on/off | implicit (server mode + a key for the startup model) | — |
+| api key | `api_key_env` (default `HIVE_API_KEY`) / `api_key:` | env (secret), YAML fallback |
+| required models, per-provider provider/api_base, prompts, limits | `config-hivemind.yaml` | YAML |
 
 ## Usage
 

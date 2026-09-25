@@ -5,7 +5,9 @@
 # file and every TOP-LEVEL setting below (it refuses to start on a
 # missing one). Only the per-provider fields marked OPTIONAL may be
 # left out or commented.
-# The API key is the only secret and is read from HIVE_API_KEY.
+# The API key comes from the env (HIVE_API_KEY by default) or the
+# provider group's `api_key:` here; env wins. The file is gitignored,
+# so a key in it stays local.
 # The sniffer exposes no Hivemind CLI args.
 
 # Current startup model; must appear under some provider below.
@@ -21,8 +23,11 @@ providers:
     # defaults, so a second group can't silently reuse the first one's.
     provider: openai
     api_base: "https://opencode.ai/zen/go/v1"
-    # OPTIONAL — the key env var for this group (HIVE_API_KEY when omitted)
+    # OPTIONAL — the key for this group. The env var overrides it
+    # (api_key_env names the var, HIVE_API_KEY by default), so CI can
+    # inject it without touching this file.
     # api_key_env: HIVE_API_KEY
+    # api_key: "sk-..."
     models:
       - deepseek-v4-flash
       # OPTIONAL form — a hash may override any group field but `provider`

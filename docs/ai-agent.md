@@ -231,20 +231,24 @@ Set the key (the agent's only config):
 HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-on
 ```
 
-The key is read from the `HIVE_API_KEY` environment variable **only** —
-deliberately no CLI flag and no `OPENAI_API_KEY` fallback. Every other
-Hivemind setting is required from `config-hivemind.yaml`; the file must
-exist and contain all keys shown in `config-hivemind.yaml.example`. There
-are no code defaults for model, provider, endpoint, prompts, limits, or
-compaction thresholds. The API key is never read from YAML or a constructor
-argument.
+The key comes from the environment **first** (`api_key_env`, by default
+`HIVE_API_KEY`), then from the provider group's `api_key:` in
+`config-hivemind.yaml` — the file is gitignored, so a key stored there
+stays local, and the env still overrides it for CI/ops. Deliberately no CLI
+flag and no `OPENAI_API_KEY` fallback. Every other Hivemind setting is
+required from `config-hivemind.yaml`; the file must exist and contain all
+keys shown in `config-hivemind.yaml.example`. There are no code defaults for
+model, provider, endpoint, prompts, limits, or compaction thresholds. The
+agent auto-enables in server mode iff the startup model has a key
+(`HiveMindAgent.key_configured?`).
 
 `providers:` defines the endpoints and the models available to `/model` and
 `/try`, plus the ordered automatic fallback list. One entry per
 endpoint/credential set: it carries the RubyLLM `provider` and `api_base`
 (required — the endpoint lives with the group, there are no top-level
 defaults, so a second group can never silently reuse the first one's) plus
-the optional `api_key_env` (defaults to `HIVE_API_KEY`), shared by every
+the optional `api_key_env`/`api_key` (env var name, default
+`HIVE_API_KEY`; the key itself), shared by every
 `models:` entry under it. A model entry may override any group field except
 `provider` (bare name, or a `name:` hash). Order — providers, then models
 within a provider — is the `/model`, `/try` and fallback order, so group

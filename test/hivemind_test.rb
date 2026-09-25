@@ -64,6 +64,40 @@ class TestHiveMindAgent < Minitest::Test
     end
   end
 
+  def test_api_key_from_group_with_env_override
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    group = config['providers'].values.first
+    group['api_key'] = 'yaml-key'
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      with_env('HIVE_API_KEY' => nil) do
+        agent = make_agent(config_file: path)
+        assert_equal 'yaml-key', agent.send(:api_key_for, agent.model)
+        assert HiveMindAgent.key_configured?(path), 'a group key turns the agent on'
+      end
+      with_env('HIVE_API_KEY' => 'env-key') do
+        assert_equal 'env-key', make_agent(config_file: path).send(:api_key_for, config['model'])
+      end
+    end
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config.reject { |k, _| k == 'providers' }.merge('providers' => {})))
+      with_env('HIVE_API_KEY' => nil) do
+        refute HiveMindAgent.key_configured?(path), 'no key anywhere = no agent'
+        assert_raises(ArgumentError) { make_agent(config_file: path) }
+      end
+    end
+  end
+
+  def with_env(vars)
+    old = vars.to_h { |k, _| [k, ENV[k]] }
+    vars.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    yield
+  ensure
+    old.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  end
+
   def test_config_is_required
     assert_raises(Errno::ENOENT) { HiveMindAgent.load_config('/nonexistent/config-hivemind.yaml') }
     Dir.mktmpdir do |dir|

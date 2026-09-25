@@ -44,7 +44,8 @@ class HiveMindAgent
   include HiveMindCompaction   # long-term memory distillation (/compact)
   include HiveMindFollowUps    # scheduled follow-ups + scheduler thread
   # Non-secret Hivemind settings live only in config-hivemind.yaml.
-  # HIVE_API_KEY remains the sole environment secret.
+  # HIVE_API_KEY remains the sole environment secret; api_key: in this
+  # (gitignored) file is the per-provider fallback for it.
   CONFIG_FILE = 'config-hivemind.yaml'
   REQUIRED_CONFIG = %w[
     model providers history_size history_line_len
@@ -181,9 +182,26 @@ class HiveMindAgent
     model_settings(model)[:api_base]
   end
 
+  # Env wins (ops/CI injects it without editing the file), then the
+  # provider group's `api_key:` (config-hivemind.yaml is gitignored), then
+  # HIVE_API_KEY as the shared fallback.
   def api_key_for(model)
-    env_name = model_settings(model)[:api_key_env] || 'HIVE_API_KEY'
-    ENV[env_name] || ENV['HIVE_API_KEY']
+    settings = model_settings(model)
+    ENV[settings[:api_key_env] || 'HIVE_API_KEY'] || settings[:api_key] || ENV['HIVE_API_KEY']
+  end
+
+  # Implicit on/off: the sniffer builds the agent in server mode iff the
+  # STARTUP model has a key somewhere. Checked without constructing the
+  # agent (a config without a key must stay silent, not raise).
+  def self.key_configured?(path = CONFIG_FILE)
+    config = load_config(path)
+    group = config['providers'].values.find do |fields|
+      Array(fields['models']).any? { |m| (m.is_a?(Hash) ? m['name'] : m).to_s == config['model'].to_s }
+    end
+    return false unless group
+    [group['api_key'], ENV[group['api_key_env'] || 'HIVE_API_KEY'], ENV['HIVE_API_KEY']].any? { |v| !v.to_s.empty? }
+  rescue StandardError
+    false
   end
   # Stable OpenCode session id (x-opencode-session), one per conversation.
   # Reload-safe like the mutexes above: a hot-reloaded agent keeps its
@@ -268,7 +286,8 @@ class HiveMindAgent
     # `provider` — the group names the RubyLLM provider for its models).
     # Flattened once here, so model_settings stays a plain lookup. Order
     # (providers, then models within a provider) IS the /model + fallback
-    # order. api_key_env is the one optional field (HIVE_API_KEY default).
+    # order. api_key_env + api_key are the optional key fields (env wins,
+    # api_key_env defaults to HIVE_API_KEY).
     @model_configs = hive_config.fetch('providers').flat_map do |group_name, fields|
       group = (fields || {}).transform_keys(&:to_sym)
       missing = %i[provider api_base models] - group.keys

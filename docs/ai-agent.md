@@ -241,16 +241,17 @@ argument.
 
 `providers:` defines the endpoints and the models available to `/model` and
 `/try`, plus the ordered automatic fallback list. One entry per
-endpoint/credential set: it carries the RubyLLM `provider`, `api_base` and
-`api_key_env` shared by every `models:` entry under it, and a model entry
-may override any of those (bare name, or a `name:` hash). A group that
-omits `provider` or `api_base` falls back to the required top-level
-`provider`/`api_base`. Order — providers, then models within a provider —
-is the `/model`, `/try` and fallback order, so group same-credential models
-together. There is no top-level `models:`. `/try` rejects any model not
-listed here. The current `model:` is the startup choice. A
-`ModelNotFoundError` switches to the next configured model; ordinary
-transient errors are not treated as permanent model removal.
+endpoint/credential set: it carries the RubyLLM `provider` and `api_base`
+(required — the endpoint lives with the group, there are no top-level
+defaults, so a second group can never silently reuse the first one's) plus
+the optional `api_key_env` (defaults to `HIVE_API_KEY`), shared by every
+`models:` entry under it. A model entry may override any group field except
+`provider` (bare name, or a `name:` hash). Order — providers, then models
+within a provider — is the `/model`, `/try` and fallback order, so group
+same-credential models together. There is no top-level `models:`. `/try`
+rejects any model not listed here. The current `model:` is the startup
+choice. A `ModelNotFoundError` switches to the next configured model;
+ordinary transient errors are not treated as permanent model removal.
 
 System prompt role: RubyLLM sends the system prompt as role `developer`
 by default (OpenAI's newer convention). Some endpoints/models (e.g.

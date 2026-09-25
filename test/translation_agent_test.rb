@@ -77,6 +77,34 @@ class TestTranslationAgent < Minitest::Test
     assert_nil player_db.locale_overrides('KrlosUltimate')
   end
 
+  def test_google_api_key_from_yaml_with_env_override
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        File.write('config-translation.yaml', YAML.dump('backend' => 'google', 'google_api_key' => 'yaml-key'))
+        with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
+          agent = make_agent(backend: nil)
+          assert agent.google_api_key?, 'key picked up from config-translation.yaml'
+        end
+        with_env('GOOGLE_TRANSLATE_API_KEY' => 'env-key') do
+          agent = make_agent(backend: nil)
+          assert agent.google_api_key?
+        end
+        File.write('config-translation.yaml', YAML.dump('backend' => 'google'))
+        with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
+          refute make_agent(backend: nil).google_api_key?, 'no key anywhere'
+        end
+      end
+    end
+  end
+
+  def with_env(vars)
+    old = vars.to_h { |k, _| [k, ENV[k]] }
+    vars.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    yield
+  ensure
+    old.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  end
+
   def test_backend_wiring
     argos = make_agent(backend: :argos)
     assert_instance_of ArgosTranslateService, argos.translation_service
@@ -86,10 +114,10 @@ class TestTranslationAgent < Minitest::Test
     mock = make_agent
     assert_instance_of MockTranslationService, mock.translation_service
 
-    google = make_agent(backend: :google, api_key: 'fake-key')
+    google = make_agent(backend: :google, google_api_key: 'fake-key')
     assert_instance_of GoogleCloudTranslateService, google.translation_service
 
-    hybrid = make_agent(backend: :hybrid, api_key: 'fake-key')
+    hybrid = make_agent(backend: :hybrid, google_api_key: 'fake-key')
     assert_instance_of HybridTranslationService, hybrid.translation_service
     assert_instance_of ArgosTranslateService, hybrid.translation_service.instance_variable_get(:@argos)
     assert_instance_of GoogleCloudTranslateService, hybrid.translation_service.instance_variable_get(:@google)

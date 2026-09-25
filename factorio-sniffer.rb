@@ -151,6 +151,11 @@ if __FILE__ == $PROGRAM_NAME
 
   config = load_config
   options = { player_db: DEFAULT_PLAYER_DB }.merge(config)
+  # `ip:` is this host's Factorio IP(s) — the server's bind IPs in server
+  # mode, our game client in client mode. The MODE decides which direction
+  # is kept (server: incoming C→S; client: outgoing S→C); the IP only
+  # filters. String or list, comma-separated allowed.
+  options[:host_ips] = Array(options[:ip]).flat_map { |v| v.to_s.split(',') }.map(&:strip).reject(&:empty?)
 
   op = OptionParser.new do |opts|
     opts.banner = "Usage: #{$PROGRAM_NAME} [options]"
@@ -164,18 +169,16 @@ if __FILE__ == $PROGRAM_NAME
 
   op.parse!
 
-  if options[:server_ip] && !options[:server]
-    warn 'Warning: --server-ip has no effect without --server'
-  end
+
 
   # Auto-enable server mode: when no explicit mode was chosen (no server config,
-  # no local_ip, no pcap) and a factorio server is running on THIS host, run in
+  # no ip, no pcap) and a factorio server is running on THIS host, run in
   # server mode with the detected config. Live capture only — for pcap analysis
   # the capture may come from a different machine, so an automatic server-IP
   # filter would silently drop everything. The capture interface is auto-picked
   # below (server's --bind IP → its interface, else default route), so `-i` is optional.
   auto_server = false
-  if !options[:server] && !options[:local_ip] && !options[:pcap]
+  if !options[:server] && !options[:ip] && !options[:pcap]
     detected = ServerDetect.detect
     if detected[:serving]
       auto_server = true
@@ -198,7 +201,7 @@ if __FILE__ == $PROGRAM_NAME
       warn 'Warning: no running factorio process found; using defaults/auto-detect'
     else
       options[:port] ||= detected[:game_port]
-      options[:server_ips] = detected[:server_ips] if !options[:server_ip] && detected[:server_ips]&.any?
+      options[:host_ips] = detected[:server_ips] if !options[:ip] && detected[:server_ips]&.any?
       # Capture interface: with one non-loopback interface there's nothing
       # to choose; otherwise prefer the server's --bind IP, then default route.
       options[:interface] ||= ServerDetect.capture_iface(detected[:cmdline]) if !options[:pcap]
@@ -208,7 +211,8 @@ if __FILE__ == $PROGRAM_NAME
       end
       puts "Auto-detected running factorio server (pid #{detected[:pid]}):"
       puts "  game port: #{detected[:game_port]}"
-      puts "  server IP: #{options[:server_ips]&.join(', ') || options[:server_ip]}"
+      ips = (options[:host_ips] || []).join(', ')
+      puts "  server IP: #{ips}" unless ips.empty?
       puts "  interface: #{options[:interface]}" if options[:interface]
       puts "  rcon: #{detected[:rcon_host] || 'localhost'}:#{detected[:rcon_port]}" if detected[:rcon_port]
       if detected[:rcon_port] && !options[:no_rcon]
@@ -252,14 +256,6 @@ if __FILE__ == $PROGRAM_NAME
   # Console history from here on (auto-detect chatter, joins, chat —
   # everything below prints through the tee).
   setup_output_log(config[:log_keep_days])
-
-  # Apply player mappings to the DB before starting
-  db = PlayerDatabase.new(options[:player_db])
-  (options[:player_maps] || []).each do |m|
-    id, name = m.split(':', 2)
-    db[id.to_i] = {name: name}
-    puts "Mapped Player #{id} -> #{name}"
-  end
 
   unless options[:interface] || options[:pcap]
     puts op

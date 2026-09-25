@@ -47,7 +47,7 @@ class HiveMindAgent
   # HIVE_API_KEY remains the sole environment secret.
   CONFIG_FILE = 'config-hivemind.yaml'
   REQUIRED_CONFIG = %w[
-    api_base provider model providers history_size history_line_len
+    model providers history_size history_line_len
     max_reply_len trim_tail_chars auto_compaction_min_chars triggers
     log_turn_events min_interval greet_interval log_event_interval
   ].freeze
@@ -171,12 +171,14 @@ class HiveMindAgent
     @model_configs.find { |config| config[:name] == model } || {}
   end
 
+  # provider/api_base live on the provider GROUP (validated at load), so
+  # a model's own entry can only narrow them, never inherit a global.
   def model_provider(model)
-    (model_settings(model)[:provider] || @configured_provider).to_sym
+    model_settings(model)[:provider].to_sym
   end
 
   def api_base_for(model)
-    model_settings(model)[:api_base] || @default_api_base
+    model_settings(model)[:api_base]
   end
 
   def api_key_for(model)
@@ -261,25 +263,26 @@ class HiveMindAgent
     #    Missing config/key or bad provider config raises; FactorioSniffer
     #    rescues and leaves @agent=nil.
     hive_config = self.class.load_config(config_file)
-    @default_api_base = hive_config.fetch('api_base')
-    @configured_provider = hive_config.fetch('provider').to_sym
-    @provider_groups = (hive_config['providers'] || {}).to_h do |name, fields|
-      [name.to_s, (fields || {}).transform_keys(&:to_sym)]
-    end
-    # Models live UNDER their provider group: the group's provider/api_base/
-    # api_key_env apply to all of them, a model entry may override any field.
+    # Models live UNDER their provider group, and the endpoint lives with
+    # the group: a model entry may override any group field (except
+    # `provider` — the group names the RubyLLM provider for its models).
     # Flattened once here, so model_settings stays a plain lookup. Order
     # (providers, then models within a provider) IS the /model + fallback
-    # order.
-    @model_configs = @provider_groups.flat_map do |_group_name, group|
+    # order. api_key_env is the one optional field (HIVE_API_KEY default).
+    @model_configs = hive_config.fetch('providers').flat_map do |group_name, fields|
+      group = (fields || {}).transform_keys(&:to_sym)
+      missing = %i[provider api_base models] - group.keys
+      raise ArgumentError, "provider #{group_name.inspect} is missing #{missing.join(', ')}" unless missing.empty?
+
       Array(group[:models]).map do |entry|
         config = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
         name = config[:name].to_s
         next if name.empty?
 
-        group.merge(config).merge(name: name, provider: group[:provider] || @configured_provider)
+        group.merge(config).merge(name: name, provider: group[:provider])
       end
     end.uniq { |config| config[:name] }
+    raise ArgumentError, 'no models configured' if @model_configs.empty?
     @models = @model_configs.map { |config| config[:name] }
     @model = hive_config.fetch('model')
     raise ArgumentError, "model #{@model.inspect} is not present in models" unless @models.include?(@model)

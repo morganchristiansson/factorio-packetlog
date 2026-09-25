@@ -13,17 +13,21 @@ class PcapWriter
   # gzip: true = write the stream gzip-compressed (use a .gz path).
   # keep: rolling retention in HOURS — rotate the capture every hour and
   #   delete files older than `keep` hours. nil = keep everything.
-  # max_size: rotate a capture file when it exceeds this size (MB) and
-  #   prune files so TOTAL size stays ≤ max_size.
+  # rotate_size: rotate a capture file once it exceeds this size (MB).
+  # max_size: TOTAL size budget for the rotated files of this capture
+  #   (MB) — oldest deleted first once the total is exceeded. nil = no
+  #   byte budget (age only). Separate from rotate_size on purpose: one
+  #   file is what a reader gets, the total is what the disk allows.
   # timestamped: write straight to a timestamped file
   #   (`base-<YYYYMMDD-HHMMSS>.pcap`) — the latest file IS the live one,
   #   no renames, no stable path. Restarts just open a new file. Used for
   #   both the normal capture and the small unknown-packet capture.
-  def initialize(path, gzip: false, keep: nil, max_size: nil, timestamped: false)
+  def initialize(path, gzip: false, keep: nil, rotate_size: nil, max_size: nil, timestamped: false)
     @base_path = path
     @timestamped = timestamped
     @gzip = gzip
     @keep_hours = keep
+    @rotate_bytes = rotate_size ? rotate_size * 1024 * 1024 : nil
     @max_size_bytes = max_size ? max_size * 1024 * 1024 : nil
     @start_time = Time.now
     @file_start = Time.now
@@ -93,11 +97,11 @@ class PcapWriter
   # rename; the finished file's name was final from the start), then prune
   # beyond the retention bounds. Single owner: the capture thread.
   # Size rotation counts uncompressed bytes, including buffered data; for
-  # gzip this is conservative. Retention still counts actual file sizes.
+  # gzip this is conservative.
   def rotate_if_due
     due = @keep_hours && (Time.now - @file_start) >= 3600
-    if @max_size_bytes
-      due = true if @bytes_written >= @max_size_bytes
+    if @rotate_bytes
+      due = true if @bytes_written >= @rotate_bytes
     end
     return unless due
     @file.close
@@ -147,9 +151,9 @@ class PcapWriter
     end
   end
 
-  # Delete rotated files beyond the retention bounds: older than `keep`
-  # hours, and — when max_size is set — the OLDEST files until total
-  # rotated size is ≤ max_size.
+  # Retention: age first (`keep` hours), then — when max_size is set —
+  # the OLDEST rotated files until the total rotated size fits. The
+  # ACTIVE file is never pruned (it is still being written).
   def prune_rotated
     rotated = rotated_files
     if @keep_hours

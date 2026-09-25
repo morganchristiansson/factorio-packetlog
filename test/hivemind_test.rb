@@ -22,7 +22,7 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal config['model'], @agent.model
     assert_equal group['models'], @agent.models
     assert_equal group['api_base'], @agent.send(:api_base_for, @agent.model)
-    assert_equal config['provider'].to_sym, @agent.instance_variable_get(:@provider)
+    assert_equal group['provider'].to_sym, @agent.instance_variable_get(:@provider)
     assert_equal config['history_size'], @agent.instance_variable_get(:@history_size)
     assert_equal config['triggers'], @agent.triggers
     assert_equal config['log_turn_events'], @agent.instance_variable_get(:@log_turn_events)
@@ -38,7 +38,7 @@ class TestHiveMindAgent < Minitest::Test
     config['providers'] = {
       'alpha' => { 'provider' => 'openai', 'api_base' => 'https://alpha/v1',
                    'api_key_env' => 'ALPHA_KEY', 'models' => ['a-model', { 'name' => 'a-special', 'api_base' => 'https://alpha/special/v1' }] },
-      'beta' => { 'provider' => 'anthropic', 'models' => ['b-model'] }
+      'beta' => { 'provider' => 'anthropic', 'api_base' => 'https://beta/v1', 'models' => ['b-model'] }
     }
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'config-hivemind.yaml')
@@ -47,9 +47,20 @@ class TestHiveMindAgent < Minitest::Test
       assert_equal %w[a-model a-special b-model], agent.models
       assert_equal 'https://alpha/v1', agent.send(:api_base_for, 'a-model')
       assert_equal 'https://alpha/special/v1', agent.send(:api_base_for, 'a-special')
-      assert_equal config['api_base'], agent.send(:api_base_for, 'b-model') # group omits api_base
+      assert_equal 'https://beta/v1', agent.send(:api_base_for, 'b-model') # each group carries its own
       assert_equal :anthropic, agent.send(:model_provider, 'b-model')
       assert_equal :openai, agent.send(:model_provider, 'a-model')
+    end
+  end
+
+  def test_provider_group_must_carry_its_own_endpoint
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    config['providers'] = { 'beta' => { 'provider' => 'openai', 'models' => ['deepseek-v4-flash'] } }
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      error = assert_raises(ArgumentError) { make_agent(config_file: path) }
+      assert_includes error.message, 'api_base'
     end
   end
 
@@ -59,7 +70,7 @@ class TestHiveMindAgent < Minitest::Test
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, "model: test\n")
       error = assert_raises(ArgumentError) { HiveMindAgent.load_config(path) }
-      assert_includes error.message, 'api_base'
+      assert_includes error.message, 'providers'
     end
   end
 

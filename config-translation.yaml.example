@@ -1,13 +1,24 @@
 # ─────────────────────────────────────────────────────────────
 # Translation agent — config example
 # ─────────────────────────────────────────────────────────────
-# Copy to config-translation.yaml and edit. Settings here
-# document the defaults — unchanged values apply their hardcoded
-# defaults. API keys (GOOGLE_TRANSLATE_API_KEY) are env-only.
+# Copy to config-translation.yaml and edit. OPTIONAL in full — the file
+# may be absent; settings document the defaults. The Google key goes
+# here as `google_api_key:` or in the env (which wins).
 # ─────────────────────────────────────────────────────────────
 
 # Translation backend: argos, google, hybrid, mock. Default: argos.
+# ONE backend is active at a time — hybrid is argos primary with Google
+# Cloud as fallback for pairs argos lacks (pt<->ru), not a list you
+# configure. No key needed for argos/mock.
 backend: argos
+
+# Google Cloud Translation key — used by the google and hybrid backends
+# only. The env var overrides this, so ops/CI can inject it without
+# editing the file; this file is gitignored, so a key here stays local.
+# google_api_key: "AIza..."
+
+# Equivalent env override (wins over the value above):
+#   GOOGLE_TRANSLATE_API_KEY=... sudo ruby factorio-sniffer.rb
 
 # Locales to translate between. 'en' is always the pivot
 # (translation target) — English speakers get relayed to other

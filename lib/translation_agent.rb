@@ -26,23 +26,27 @@ class TranslationAgent
   # decide per-player who needs a translated line and address them by game
   # index — Lua can't see the language overrides, so the decision is made
   # here and Lua just prints to the computed indexes.
-  def initialize(rcon:, player_db:, backend: nil, api_key: nil, roster: nil)
+  def initialize(rcon:, player_db:, backend: nil, google_api_key: nil, roster: nil)
     # Load config-translation.yaml for defaults (param > config > hardcoded).
     trans_config = File.exist?('config-translation.yaml') ? (YAML.load_file('config-translation.yaml') || {}) : {}
     backend ||= (trans_config['backend'] || 'argos').to_sym
-    # Google API key for hybrid/google backend — env-only (secret).
-    if (backend == :hybrid || backend == :google) && api_key.nil? && ENV['GOOGLE_TRANSLATE_API_KEY']
-      api_key = ENV['GOOGLE_TRANSLATE_API_KEY']
+    # Google key for the hybrid/google backend. Env wins (ops/CI
+    # override without editing the file); the YAML `google_api_key:` is
+    # the fallback. config-translation.yaml is gitignored, so a key there
+    # stays local.
+    if (backend == :hybrid || backend == :google) && google_api_key.nil?
+      google_api_key = ENV['GOOGLE_TRANSLATE_API_KEY'] || trans_config['google_api_key']
     end
     @rcon = rcon
     @player_db = player_db
     @backend = backend
+    @google_api_key = google_api_key
     @enabled = !@rcon.nil? && !@player_db.nil?
     @whitelist = (trans_config['whitelist'] || WHITELIST.to_a).map(&:downcase).to_set
     @roster = roster
 
     # Initialize translation backend
-    @translation_service = create_translation_service(backend, api_key)
+    @translation_service = create_translation_service(backend, google_api_key)
 
     # player_name -> last translation time (for cooldown)
     @last_translate = {}
@@ -51,6 +55,10 @@ class TranslationAgent
     @announced_players = Set.new
     initialize_events
   end
+
+  # True when a Google key is available (env or config-translation.yaml) —
+  # google/hybrid without one can't call the API.
+  def google_api_key? = !@google_api_key.to_s.empty?
 
   # Called by sniffer for each incoming chat message
   # act: the decoded action hash (has :game_player = 1-indexed game index, matching players-cache.json)
@@ -134,7 +142,7 @@ class TranslationAgent
   # Create translation service based on backend
   # Only ONE backend is ever active per agent — load just that file (the
   # others stay out of memory and off the reload path).
-  def create_translation_service(backend, api_key)
+  def create_translation_service(backend, google_api_key)
     case backend
     when :mock
       require_relative 'translation_mock'
@@ -144,10 +152,10 @@ class TranslationAgent
       ArgosTranslateService.new
     when :google
       require_relative 'translation_google'
-      GoogleCloudTranslateService.new(api_key)
+      GoogleCloudTranslateService.new(google_api_key)
     when :hybrid
       require_relative 'translation_hybrid'
-      HybridTranslationService.new(api_key)
+      HybridTranslationService.new(google_api_key)
     else
       warn "Unknown translation backend #{backend.inspect}; using argos"
       require_relative 'translation_argos'

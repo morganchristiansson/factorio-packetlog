@@ -127,7 +127,7 @@ class TestServerMode < Minitest::Test
 
   def test_server_mode_live_capture
     output, sniffer = run_sniffer(
-      server: true, server_ip: SERVER_IP, player_db: nil
+      server: true, host_ips: [SERVER_IP], player_db: nil
     ) do |sniffer|
       ts = 1_700_000_000.0
       # incoming client chat (msg 6) — should be analyzed
@@ -162,7 +162,7 @@ class TestServerMode < Minitest::Test
   # ── Test 2: server mode, pcap-read path ────────────────────────────────
 
   def test_server_mode_pcap_read_path
-    output, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, debug: true) do |sniffer|
+    output, = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil, debug: true) do |sniffer|
       ts = 1_700_000_000.0
       sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_selected_entity_cleared'))
       sniffer.send(:process_packet, 2, ts, SERVER_IP, CLIENT_IP, 34197, 34197, fixture_packet('server_open_gui_echo_14b'))
@@ -194,7 +194,7 @@ class TestServerMode < Minitest::Test
     non_loopback = local_ips.find { |ip| ip != '127.0.0.1' }
     skip 'no non-loopback IPv4 interface found' if non_loopback.nil?
 
-    output, = run_sniffer(server: true, server_ip: nil, player_db: nil, debug: true) do |sniffer|
+    output, = run_sniffer(server: true, host_ips: [], player_db: nil, debug: true) do |sniffer|
       sniffer.send(:process_packet, 1, 1.0, CLIENT_IP, non_loopback, 34197, 34197, fixture_packet('client_pipette'))
     end
 
@@ -215,7 +215,7 @@ class TestServerMode < Minitest::Test
       writer.write_frame(frame)
       writer.close
 
-      output, = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, pcap: run_pcap) do |sniffer|
+      output, = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil, pcap: run_pcap) do |sniffer|
         sniffer.run
       end
       assert_includes output, 'SERVER MODE', 'server mode banner printed in run()'
@@ -281,7 +281,7 @@ class TestServerMode < Minitest::Test
   # ── Test 7: hot reload — in-place, same objects ───────────────────────
 
   def test_hot_reload_preserves_state
-    sniffer = make_test_sniffer(server: true, server_ip: SERVER_IP)
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP])
     sniffer.instance_variable_set(:@player_db, PlayerDatabase.new(nil))
     sniffer.instance_variable_get(:@player_db)[7] = {name: 'hotreload_user'}
     sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_pipette'))
@@ -339,7 +339,7 @@ class TestServerMode < Minitest::Test
 
     # refresh_roster → load_roster: initial load only (new players come from
     # the packet stream, no periodic refresh)
-    sr = make_test_sniffer(server: true, server_ip: SERVER_IP)
+    sr = make_test_sniffer(server: true, host_ips: [SERVER_IP])
     fake = Object.new
     fake.define_singleton_method(:player_attributes) do
       [{ index: 1, name: 'morganc', connected: true, admin: true, online_time: 0, afk_time: 0, locale: nil },
@@ -354,7 +354,7 @@ class TestServerMode < Minitest::Test
     # empty server / failed query: no crash, no output
     fake2 = Object.new
     fake2.define_singleton_method(:player_attributes) { nil }
-    sr2 = make_test_sniffer(server: true, server_ip: SERVER_IP)
+    sr2 = make_test_sniffer(server: true, host_ips: [SERVER_IP])
     sr2.instance_variable_set(:@rcon, fake2)
     failed_output, = capture_io { sr2.send(:load_roster) }
     assert_empty failed_output, 'failed roster query is silent'
@@ -368,7 +368,7 @@ class TestServerMode < Minitest::Test
       [{ index: 1, name: 'morganc', connected: true, online_time: 0, afk_time: 0, locale: nil }]
     end
     fake3.define_singleton_method(:server_version) { nil }
-    sr3 = make_test_sniffer(server: true, server_ip: SERVER_IP)
+    sr3 = make_test_sniffer(server: true, host_ips: [SERVER_IP])
     sr3.instance_variable_set(:@rcon, fake3)
     sr3.send(:load_roster)              # startup query
     sr3.send(:load_player_attrs)        # attrs seed — must REUSE the roster dump, not re-query
@@ -387,7 +387,7 @@ class TestServerMode < Minitest::Test
     # S→C echoed heartbeat (flags 0x02) — outgoing, dropped in server mode
     s2c = "\x07\x02\x00\x00\x00\x00".b
 
-    _, sniffer = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |sniffer|
+    _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       ts = 1_700_000_000.0
       sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
       sniffer.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
@@ -399,7 +399,7 @@ class TestServerMode < Minitest::Test
            'kept record is the C→S action heartbeat'
 
     # full-capture keeps everything (keepalives + outgoing echo + msg13)
-    _, sniffer = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil, full_capture: true) do |sniffer|
+    _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil, capture: "full") do |sniffer|
       ts = 1_700_000_000.0
       sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, keepalive, "\x00" * 14 + keepalive)
       sniffer.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
@@ -407,7 +407,17 @@ class TestServerMode < Minitest::Test
       sniffer.send(:process_packet, 4, ts, SERVER_IP, CLIENT_IP, 34197, 34197, msg13_packet, "\x00" * 14 + msg13_packet)
     end
     records = capture_records(sniffer)
-    assert_equal 4, records.size, "--full-capture records all 4 packets (got #{records.size})"
+    assert_equal 4, records.size, "`capture: full` records all 4 packets (got #{records.size})"
+
+    # `capture: save` records ONLY the TransferBlocks — in server mode too
+    # (the old save_transfer_blocks flag was dropped before it got there).
+    _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil, capture: "save") do |sniffer|
+      ts = 1_700_000_000.0
+      sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, acting, "\x00" * 14 + acting)
+      sniffer.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg13_packet, "\x00" * 14 + msg13_packet)
+    end
+    records = capture_records(sniffer)
+    assert_equal [msg13_packet], records, "`capture: save` records only the msg 13 TransferBlock"
   end
 
   def test_unknown_player_packet_is_saved_for_followup
@@ -415,7 +425,7 @@ class TestServerMode < Minitest::Test
       Dir.chdir(dir) do
         path = File.join('captures', 'unknown.packets.pcap')
         packet = fixture_packet('client_chat_message_0x0b')
-        _, sniffer = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |s|
+        _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
           s.instance_variable_get(:@player_db)[1] = {name: 'known'}
           s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34_197, 34_197,
                    packet, "\x00" * 14 + packet)
@@ -438,7 +448,7 @@ class TestServerMode < Minitest::Test
     # quit signal; msg 14 is kept as a fallback).
     joined = left = nil
     online_after_quit = nil
-    result = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |sniffer|
+    result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
       sniffer.instance_variable_set(:@agent, agent)
       ts = 1_700_000_000.0
@@ -461,7 +471,7 @@ class TestServerMode < Minitest::Test
 
     # msg 14 RequestForHeartbeatWhenDisconnecting — kept fallback, still works.
     left14 = nil
-    result = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |sniffer|
+    result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
       sniffer.instance_variable_set(:@agent, agent)
       ts = 1_700_000_000.0
@@ -476,7 +486,7 @@ class TestServerMode < Minitest::Test
 
     # A disconnected-but-never-confirmed src_ip should not produce a leave.
     events = nil
-    result = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |sniffer|
+    result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
       sniffer.instance_variable_set(:@agent, agent)
       sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
@@ -494,7 +504,7 @@ class TestServerMode < Minitest::Test
     # Each packet carries ONE segment; the agent must receive the merged text.
     messages = []
     agent = recording_agent_with_messages
-    result = run_sniffer(server: true, server_ip: SERVER_IP, player_db: nil) do |sniffer|
+    result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       sniffer.instance_variable_set(:@agent, agent)
       ts = 1_700_000_000.0
       # fragment 0: [0x15][29] + first 18 chars
@@ -521,7 +531,7 @@ class TestServerMode < Minitest::Test
       Dir.chdir(dir) do
         # server mode: timestamped at init (captures/server-34197-<ts>.pcap) —
         # the file IS the live one, no stable path, no renames
-        result = run_sniffer(server: true, server_ip: SERVER_IP, port: 34197, player_db: nil, autoname: true) do |sniffer|
+        result = run_sniffer(server: true, host_ips: [SERVER_IP], port: 34197, player_db: nil, autoname: true) do |sniffer|
           writer = sniffer.instance_variable_get(:@pcap_writer)
           assert_match %r{captures/server-34197-\d{8}-\d{6}\.pcap\z}, writer&.path,
                        "server auto-name, timestamped directly (got #{writer&.path})"
@@ -530,7 +540,7 @@ class TestServerMode < Minitest::Test
         sniffer = result[1]
 
         # client mode: deferred until the first packet reveals the server
-        result = run_sniffer(local_ip: '10.0.0.50', player_db: nil, autoname: true) do |sniffer|
+        result = run_sniffer(host_ips: ['10.0.0.50'], player_db: nil, autoname: true) do |sniffer|
           assert_equal File.join(dir, 'captures'), sniffer.instance_variable_get(:@pending_capture),
                        'client capture pending until first packet'
           pkt = "\x06\x02".b + ([0] * 10).pack('C*')
@@ -646,7 +656,7 @@ class TestServerMode < Minitest::Test
     wd_events = []
     # NOTE: no :interface in opts → ensure_timeout_watchdog must NOT start a
     # thread in tests (guarded). We drive check_heartbeat_timeouts directly.
-    sniffer = make_test_sniffer(server: true, server_ip: SERVER_IP)
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP])
     refute sniffer.instance_variable_get(:@timeout_watchdog),
            'no watchdog thread in tests (no :interface)'
     agent = Object.new

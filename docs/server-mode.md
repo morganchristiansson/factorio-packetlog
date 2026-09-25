@@ -17,8 +17,9 @@ traffic silence delays timeout announcements until another packet arrives.
 Pcap records go directly to buffered Ruby IO/GzipWriter; no custom buffer,
 flush thread, per-record flush, or fsync. Close/rotation finalizes the stream.
 Live readers may see buffered batches. Rotation counts uncompressed bytes
-(conservative for gzip); retention counts actual disk sizes. Slow storage
-can still block capture—this is not a lossless-capture guarantee.
+(conservative for gzip); the total-size budget counts actual disk sizes.
+Slow storage can still block capture—this is not a lossless-capture
+guarantee.
 
 **Restart fully when installing this threading change.** Existing objects
 retain the old writer/watchdog state across hot reloads.
@@ -33,16 +34,18 @@ Run the sniffer ON the game server host.
 sudo ruby factorio-sniffer.rb
 
 # Server mode is AUTO-ENABLED for live capture when no explicit mode is
-# given (no --server, no --local-ip) and a serving factorio process is
-# detected on this host:
+# given (no `server:`, no `ip:` in config.yaml) and a serving factorio
+# process is detected on this host:
 sudo ruby factorio-sniffer.rb -i ens18
 #   → "Auto-enabled SERVER mode: running factorio server detected (pid N)"
 
-# Explicit overrides (any combination)
-sudo ruby factorio-sniffer.rb --server --server-ip 10.0.99.121 -p 34197 -i ens18
+# Explicit overrides live in config.yaml:
+#   server: true     # force server mode
+#   ip: 10.0.99.121  # this host's Factorio IP(s) — filters, and (without
+#                    # `server:`) forces client mode
 
-# Force client mode
-sudo ruby factorio-sniffer.rb -i eth0 --local-ip 192.168.1.144
+# Force client mode: set `ip:` to your game client's IP in config.yaml
+# (no `server:` key) — or `server: false`.
 ```
 
 Behavior:
@@ -57,7 +60,7 @@ Behavior:
 - **Capture is C→S only by default** (capture is always on in live
   mode): the capture filter records only packets destined for the server,
   so the pcap mirrors the analysis (no S→C broadcast duplicates).
-  `--full-capture` records both directions (still excepting
+  `capture: full` records both directions (still excepting
   TransferBlocks).
 - **Roster learning**: every client's ConnectionRequestReplyConfirm (msg 4,
   incoming) registers `src_ip → username`; their first C→S heartbeat action

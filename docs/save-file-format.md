@@ -64,8 +64,8 @@ sudo tcpdump -i eth0 -w session.pcap 'udp port 34197'
   from the pcap and decompress intact level.dat chunks (handles internally-
   zlib method-0 chunks; outputs `level.dat`, per-chunk files, other entries).
   Requires the capture to include TransferBlocks: run the sniffer with
-  `--save-transfer-blocks` (off by default since 2025 — TransferBlocks are
-  ~12% of file size and contain no player actions).
+  `capture: save` in config.yaml (off by default since 2025 —
+  TransferBlocks are ~12% of file size and contain no player actions).
 - `tools/extract_players_from_save.rb` — parse the console buffer from a
   decompressed level.dat → 1-indexed name→index JSON.
 
@@ -83,8 +83,8 @@ actions in ~86 MB of heartbeat payload across 4.9M tiny packets.
 The sniffer's always-on capture filters and can compress/rotate:
 
 - **TransferBlocks (msg 13)** are excluded by default (no player actions,
-  ~12% of file size); `--save-transfer-blocks` keeps them for save
-  extraction, `--full-capture` records everything.
+  ~12% of file size); `capture: save` keeps ONLY them for save
+  extraction, `capture: full` records everything.
 - **Keepalive-only heartbeats** (flags byte: no heartbeat requests 0x01, no
   synchronizer action 0x10, tick closures all-empty 0x08) are dropped —
   ~40% of packets in a typical session. This is a single-byte check, no
@@ -98,10 +98,9 @@ The sniffer's always-on capture filters and can compress/rotate:
   once keepalives are filtered). `PcapReader` auto-detects and gunzips,
   so `-r` analysis and `tools/extract_save_from_pcap.rb` work unchanged.
 - **Rolling retention**: the capture rotates every hour AND when it
-  exceeds 256 MB (timestamped files); rotated files older than 72h — or
-  beyond 256 MB total — are deleted. `--keep HOURS` / `--max-size MB`
-  override the defaults when you need more history. Combine with `.gz`
-  paths.
+  exceeds 256 MB (timestamped files); rotated files are deleted once older
+  than 72h (`keep`) or the rotated total passes 512 MB (`max_size`, oldest
+  first). Change them in config.yaml when you need more history. Combine
+  with `.gz` paths.
 
-All of it is bypassed with `--full-capture` (record every packet as-is,
-implies `--save-transfer-blocks`).
+All of it is bypassed with `capture: full` (record every packet as-is).

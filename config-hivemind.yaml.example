@@ -1,8 +1,10 @@
 # ─────────────────────────────────────────────────────────────
 # Hivemind AI agent — required configuration
 # ─────────────────────────────────────────────────────────────
-# Copy this file to config-hivemind.yaml. The sniffer requires this file;
-# every setting below is required unless a model explicitly overrides it.
+# Copy this file to config-hivemind.yaml. The sniffer requires this
+# file and every TOP-LEVEL setting below (it refuses to start on a
+# missing one). Only the per-provider fields marked OPTIONAL may be
+# left out or commented.
 # The API key is the only secret and is read from HIVE_API_KEY.
 # The sniffer exposes no Hivemind CLI args.
 
@@ -10,21 +12,23 @@
 model: "deepseek-v4-flash"
 
 # One entry per endpoint/credential set. Every model listed under a
-# provider uses that provider's RubyLLM provider, api_base and api_key_env
-# (a model entry may still override any of them). Order — providers, then
-# models within a provider — is the /model, /try and fallback order.
+# provider uses that provider's provider/api_base/api_key_env; a model
+# entry may still override any of them. Order — providers, then models
+# within a provider — is the /model, /try and fallback order.
 providers:
   opencode-zen:
+    # The endpoint lives with the group — required here, no top-level
+    # defaults, so a second group can't silently reuse the first one's.
     provider: openai
     api_base: "https://opencode.ai/zen/go/v1"
-    api_key_env: HIVE_API_KEY
+    # OPTIONAL — the key env var for this group (HIVE_API_KEY when omitted)
+    # api_key_env: HIVE_API_KEY
     models:
       - deepseek-v4-flash
+      # OPTIONAL form — a hash may override any group field but `provider`
+      #   - name: gpt-4o
+      #     api_base: "https://elsewhere/v1"
       - gpt-4o
-
-# Default provider/endpoint for a provider group that omits one.
-provider: openai
-api_base: "https://opencode.ai/zen/go/v1"
 
 # Max unread console lines kept between prompts.
 history_size: 1000

@@ -94,7 +94,7 @@ class TestAgentEvents < Minitest::Test
 
   def test_lazy_timeouts_run_after_packet_liveness_refresh_and_not_for_replay
     Dir.mktmpdir do |dir|
-      sniffer = FactorioSniffer.new({server: true, server_ip: '10.0.0.1', interface: 'fake'},
+      sniffer = FactorioSniffer.new({server: true, host_ips: ['10.0.0.1'], interface: 'fake'},
                                     pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
       attrs = sniffer.instance_variable_get(:@attrs)
       attrs.roster_online('active', 1)

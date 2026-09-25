@@ -109,21 +109,22 @@ either on a client or on the game server host (server mode, with RCON).
   because reloads swap code on the SAME objects.
 - **Server mode** (default when run on the server host): analyzes only
   incoming C→S packets (no broadcast duplicates), drops save-download
-  TransferBlocks. `--local-ip` forces client mode. Capture is ALWAYS on for live
+  TransferBlocks. Setting `ip:` in config.yaml without `server:` forces
+  client mode. Capture is ALWAYS on for live
   capture (pcap-read `-r` doesn't re-capture): auto-named timestamped files
   (`server-<port>-<ts>.pcap` / `client-<ip>-<ts>.pcap`) — the latest file
   IS the live one, no renames —
-  and retention prunes across ALL runs of that identity (defaults: rotate
-  hourly / at 256 MB, keep 72h / 256 MB total — `--keep HOURS` /
-  `--max-size MB` override); restarts just open a new file (previous runs
+  and retention prunes across ALL runs of that identity (three bounds:
+  rotate hourly / at 256 MB (`rotate_size:`), delete rotated files older
+  than 72h (`keep:`), keep the rotated total under 512 MB (`max_size:`,
+  oldest first); restarts open a new file (previous runs
   are already timestamped; empty files deleted on close). Captured
   pcaps are filtered by default: TransferBlocks (msg 13),
   keepalive-only heartbeats, and (server mode) outgoing S→C broadcasts are
-  excluded — a 5h server capture went from ~460MB to ~20MB. `--full-capture`
-  records everything; `--save-transfer-blocks` keeps just the TransferBlocks
+  excluded — a 5h server capture went from ~460MB to ~20MB. `capture: full`
+  records everything; `capture: save` keeps just the TransferBlocks
   (needed for `tools/extract_save_from_pcap.rb`). A `.gz` path compresses
-  the pcap stream (~3-4x); retention defaults to 72h / 256 MB (flags
-  override). See `docs/server-mode.md`.
+  the pcap stream (~3-4x). See `docs/server-mode.md`.
 - **Hot reload**: Ctrl-C once reloads the lib code IN PLACE — no rebuild,
   no state snapshot, no capture reopen (zero packet loss; the memoized
   `@capturer` handle stays open). Ctrl-C again within QUIT_WINDOW quits.
@@ -164,7 +165,9 @@ var (applies to new AND existing knobs):
    run that sets it to a non-default value. (`memories/` remains hardcoded.)
 2. **One source per setting.** Hivemind behavior comes from
    `config-hivemind.yaml`; no Hivemind CLI args or non-secret env vars.
-3. **Secrets are env-only** — never a CLI flag (shell history / `ps` /
+3. **Secrets are env-only** (one documented exception: the Google
+   Translate key may sit in the gitignored `config-translation.yaml` as
+   `google_api_key:`, env still wins) — never a CLI flag (shell history / `ps` /
    committed scripts leak it). `HIVE_API_KEY` is the only Hivemind env var.
 4. **One feature = one toggle.** No flag AND env for the same on/off
    switch (there's no `--ai-agent`/`HIVE_AGENT` pair — the agent is
@@ -198,10 +201,10 @@ ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0
 # Validate input-action wire IDs against /toggle-action-logging (root):
 sudo ruby tools/validate_actions.rb --capture 60 --toggle --table 20 --suggest
 
-# Client mode / pcap analysis:
-sudo ruby factorio-sniffer.rb -i eth0 -p 34197 --local-ip 192.168.1.144
+# Client mode / pcap analysis (client mode: `ip: <client ip>` in config.yaml,
+# with no `server:` key):
+sudo ruby factorio-sniffer.rb
 ruby factorio-sniffer.rb -r capture.pcap
-ruby factorio-sniffer.rb -r capture.pcap --item-db external/item_prototypes_runtime.txt --entity-db external/entity_prototypes_runtime.txt
 
 # RCON admin:
 ruby tools/rcon.rb status          # version/players/admins/time/evolution

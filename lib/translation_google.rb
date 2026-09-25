@@ -2,7 +2,7 @@
 
 # GoogleCloudTranslateService — Google Cloud Translation API (v2 REST).
 # Supports direct translation between any language pair (pt <-> ru, etc).
-# Env: GOOGLE_TRANSLATE_API_KEY
+# Key: GOOGLE_TRANSLATE_API_KEY (env, wins) or `api_key:` in config-translation.yaml
 require 'net/http'
 require 'uri'
 require 'json'

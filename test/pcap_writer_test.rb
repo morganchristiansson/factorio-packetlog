@@ -31,8 +31,8 @@ class TestPcapWriter < Minitest::Test
     [false, true].each do |gzip|
       Dir.mktmpdir do |dir|
         writer = PcapWriter.new("#{dir}/capture#{gzip ? '.gz' : '.pcap'}", gzip: gzip,
-                                timestamped: true, max_size: 1)
-        writer.instance_variable_set(:@max_size_bytes, 60)
+                                timestamped: true, rotate_size: 1)
+        writer.instance_variable_set(:@rotate_bytes, 60)
         first = writer.path
         writer.write_frame('x' * 20, Time.at(123))
         writer.write_frame('y' * 20, Time.at(124))
@@ -52,6 +52,26 @@ class TestPcapWriter < Minitest::Test
         empty.close
         refute File.exist?(empty.path)
       end
+    end
+  end
+
+  def test_max_size_prunes_oldest_rotated_files
+    Dir.mktmpdir do |dir|
+      writer = PcapWriter.new("#{dir}/capture.pcap", timestamped: true, rotate_size: 1, max_size: 1)
+      writer.instance_variable_set(:@rotate_bytes, 60) # rotate every 2 frames
+      writer.write_frame('x' * 20, Time.at(123))
+      first = writer.path
+      sleep 0.01
+      writer.write_frame('y' * 20, Time.at(124))
+      second = writer.path
+      # The rotated file holds ~60 B (the active one is still buffered):
+      # shrink the 1MB budget below that and the oldest file falls out.
+      writer.instance_variable_set(:@max_size_bytes, 40)
+      writer.send(:prune_rotated)
+      refute File.exist?(first), 'oldest rotated file deleted (over max_size total)'
+      assert File.exist?(second), 'newest rotated file kept'
+      assert File.exist?(writer.path), 'active file never pruned'
+      writer.close
     end
   end
 

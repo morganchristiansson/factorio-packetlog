@@ -51,17 +51,26 @@ class FactorioSniffer
   # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
   QUIT_WINDOW = 5
 
-  # Always-on capture rotation defaults (hardcoded — flags override, no new
-  # knobs). Without ANY bound the active capture grows forever (observed:
+  # Always-on capture rotation defaults (hardcoded — config.yaml can
+  # override). Without ANY bound the active capture grows forever (observed:
   # a 511 MB server-34197.pcap plus 2.9 GB of never-pruned restarts) and
-  # rotation only happened on restart. So: rotate the active file when it
-  # exceeds 256 MB, rotate hourly, and prune rotated files older than 72h
-  # / beyond 256 MB total — worst case ≈ 512 MB on disk. Pass --keep /
-  # --max-size explicitly to keep more history (e.g. for grief analysis).
+  # rotation only happened on restart. Three independent bounds, three
+  # knobs: rotate hourly or at `rotate_size`, keep for `keep` hours, and
+  # keep the rotated files under `max_size` MB in total.
   DEFAULT_KEEP_HOURS = 72
-  DEFAULT_MAX_SIZE_MB = 256
+  DEFAULT_ROTATE_SIZE_MB = 256
+  DEFAULT_MAX_SIZE_MB = 512
 
   def initialize(options, pcap_writer: nil)
+    # What lands in the pcap is ONE axis (was two half-overlapping flags):
+    #   normal — filtered (drop keepalive-only heartbeats, server-mode
+    #            outgoing broadcasts, msg 13 map-download blocks)
+    #   full   — record everything
+    #   save   — record ONLY the msg 13 TransferBlocks, for
+    #            tools/extract_save_from_pcap.rb
+    @capture_mode = (options[:capture] || 'normal').to_s
+    raise ArgumentError, "capture: #{@capture_mode.inspect} (normal, full, save)" unless
+      %w[normal full save].include?(@capture_mode)
     @options = options
     @player_db = PlayerDatabase.new(options[:player_db])
     @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
@@ -89,7 +98,7 @@ class FactorioSniffer
     # normal rolling capture so decoder failures can be replayed later.
     unknown_path = File.join(default_capture_dir, 'unknown.packets.pcap')
     @unknown_writer = PcapWriter.new(unknown_path, keep: effective_keep,
-                                     max_size: effective_max_size, timestamped: true)
+                                     rotate_size: effective_rotate_size, max_size: effective_max_size, timestamped: true)
     puts "saving unknown packets to #{@unknown_writer.path}"
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
@@ -145,10 +154,10 @@ class FactorioSniffer
     # (client→server) traffic — the outgoing direction is a broadcast of
     # every action to all N clients (N duplicates per action).
     if options[:server]
-      # Explicit --server-ip wins; else the auto-detected list (default-route
-      # interface first); else all local IPv4s as a last resort.
-      @server_ips = options[:server_ips] ||
-                    (options[:server_ip] ? [options[:server_ip]] : ServerDetect.local_ipv4)
+      # This host's IPs: the configured `ip:` (the entry point normalizes
+      # it into :host_ips) or the auto-detected list; else all local IPv4s.
+      @host_ips = (options[:host_ips] || []).dup
+      @host_ips = ServerDetect.local_ipv4 if @host_ips.empty?
       # src_ip -> username, learned from ConnectionRequestReplyConfirm (msg 4,
       # incoming). Bound to the real game index by the client's first C→S
       # heartbeat action below. (@ip_names, defined above for all modes.)
@@ -225,13 +234,13 @@ class FactorioSniffer
 
       # Translation agent: auto-translates chat for foreign players.
       # Enabled in server mode when RCON is available (no API key needed).
-      # Backend and Google API key are read from config-translation.yaml
-      # and env (GOOGLE_TRANSLATE_API_KEY for hybrid/google backends).
+      # Backend and Google API key come from config-translation.yaml
+      # (`google_api_key:`) with the env overriding it.
       if @rcon
         begin
           @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
           backend = @translation_agent.backend
-          if [:hybrid, :google].include?(backend) && ENV['GOOGLE_TRANSLATE_API_KEY']
+          if [:hybrid, :google].include?(backend) && @translation_agent.google_api_key?
             puts "[translate] Translation agent online — auto-translating foreign player chat (hybrid: argos + google cloud fallback)"
           else
             puts "[translate] Translation agent online — auto-translating foreign player chat (#{backend} backend)"
@@ -254,21 +263,21 @@ class FactorioSniffer
   # entry point calls #finish when actually shutting down, so a hot reload
   # can keep the capture file and state alive.
   def run
-    if @options[:server] && @server_ips.empty?
-      puts 'Error: --server mode could not determine the server IP.'
-      puts '  Pass --server-ip <ip> to set it explicitly.'
+    if @options[:server] && @host_ips.empty?
+      puts 'Error: server mode could not determine the server IP.'
+      puts '  Set `ip: <ip>` in config.yaml to set it explicitly.'
       exit 1
     end
 
     if @options[:server]
       puts 'SERVER MODE: analyzing only incoming (client→server) packets — no broadcast duplicates'
-      puts "  server IP(s): #{@server_ips.join(', ')}"
+      puts "  server IP(s): #{@host_ips.join(', ')}"
       puts '  map-download TransferBlocks (save file) excluded from analysis and capture'
-      if @pcap_writer && !@options[:full_capture]
-        puts '  capture: incoming-only + no keepalive-only heartbeats (~20MB per 5h vs ~460MB; --full-capture to record everything)'
+      if @pcap_writer && @capture_mode == 'normal'
+        puts '  capture: incoming-only + no keepalive-only heartbeats (~20MB per 5h vs ~460MB; `capture: full` records everything)'
       end
-    elsif @pcap_writer && !@options[:save_transfer_blocks] && !@options[:full_capture]
-      puts '  capture: TransferBlocks (msg 13) and keepalive-only heartbeats excluded (--full-capture to record everything)'
+    elsif @pcap_writer && @capture_mode == 'normal'
+      puts '  capture: TransferBlocks (msg 13) and keepalive-only heartbeats excluded (`capture: full` records everything)'
     end
 
     if @options[:pcap]
@@ -287,13 +296,13 @@ class FactorioSniffer
       @capturer ||= LiveCapture.new(
         interface: @options[:interface],
         port: @options[:port],
-        transfer_block_sink: (@options[:save_transfer_blocks] || @options[:full_capture] ? @pcap_writer : nil),
+        transfer_block_sink: (@capture_mode == 'normal' ? nil : @pcap_writer),
       )
       puts "Listening on #{@options[:interface]} port #{@options[:port]}..."
       puts 'Press Ctrl+C to reload code; Ctrl+C again to quit.'
       puts 'Decoded per-action lines hidden — use /debug (or --debug) to show them (chat + events + warnings always print).' unless @debug
-      if @options[:local_ip]
-        puts "Filtering: showing only packets involving #{@options[:local_ip]}"
+      if (ips = @options[:host_ips].to_a).any?
+        puts ips.size > 1 ? "Filtering: #{@options[:server] ? 'to' : 'from'} #{ips.join(', ')}" : "Filtering: #{@options[:server] ? 'to' : 'from'} #{ips.first}"
       end
       @capturer.each_packet { |*args| process_packet(*args) }
     end
@@ -358,16 +367,17 @@ class FactorioSniffer
 
   private
 
-  # Whether to persist this packet to the capture file. --full-capture keeps
-  # everything; otherwise drop (a) keepalive-only heartbeats (no input
+  # Whether to persist this packet to the capture file. `capture: full`
+  # keeps everything, `capture: save` only the TransferBlocks; the
+  # default drops (a) keepalive-only heartbeats (no input
   # actions / sync actions / heartbeat requests — ~40% of packets in a
   # typical session) and (b) in server mode, outgoing (server→client)
   # broadcasts: analysis only reads incoming packets, so the outgoing
   # direction is N duplicates of the same data (~47% of a server capture).
   def capture_recordable?(src_ip, dst_ip, udp_data)
-    return true if @options[:full_capture]
+    return @capture_mode != 'save' unless @capture_mode == 'normal'
     if @options[:server]
-      return false unless @server_ips.include?(dst_ip)
+      return false unless @host_ips.include?(dst_ip)
     end
     recordable_heartbeat?(udp_data)
   end
@@ -411,9 +421,10 @@ class FactorioSniffer
     # Server mode: the server already has the save on disk, so the map
     # download (msg 13 TransferBlocks, ~40 MB per joining player) is dropped
     # entirely — no analysis, no capture. Avoids capture-buffer pressure and
-    # pointless disk usage from N copies of the same save. --full-capture
-    # overrides (falls through to the msg-13 gate below, which writes).
-    if @options[:server] && (udp_data.getbyte(0) & 0x1F) == 13 && !@options[:full_capture]
+    # pointless disk usage from N copies of the same save. `capture: full`
+    # / `save` keep them (falls through to the msg-13 gate below, which
+    # writes).
+    if @options[:server] && (udp_data.getbyte(0) & 0x1F) == 13 && @capture_mode == 'normal'
       @stats[:capture_skipped] += 1 if @pcap_writer
       return
     end
@@ -424,7 +435,7 @@ class FactorioSniffer
     # (--save-transfer-blocks / --full-capture); the default is to drop them:
     # they contain no player actions and added ~12% to a 4.9M-packet capture.
     if (udp_data.getbyte(0) & 0x1F) == 13
-      if @pcap_writer && (@options[:save_transfer_blocks] || @options[:full_capture])
+      if @pcap_writer && @capture_mode != 'normal'
         @pcap_writer.write_frame(raw_frame, Time.at(ts))
       else
         @stats[:capture_skipped] += 1 if @pcap_writer
@@ -451,15 +462,13 @@ class FactorioSniffer
     # duplicates. Tradeoff (documented): incoming packets have not yet been
     # validated/echoed by the server — cross-check with RCON if needed.
     if @options[:server]
-      unless @server_ips.include?(dst_ip)
+      unless @host_ips.include?(dst_ip)
         @stats[:outgoing_skipped] += 1
         return
       end
-    end
-
-    # Apply local IP filter if specified (client mode)
-    if @options[:local_ip]
-      return unless src_ip == @options[:local_ip]
+    elsif (client_ips = @options[:host_ips].to_a).any?
+      # Client mode: only packets FROM our game (the `ip:` setting).
+      return unless client_ips.include?(src_ip)
     end
 
     parsed = FactorioProtocol.parse_udp_payload(udp_data)
@@ -1299,7 +1308,7 @@ class FactorioSniffer
   # ── Always-on auto-named capture ────────────────────────────────
 
   def new_pcap_writer(path)
-    PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: effective_keep, max_size: effective_max_size, timestamped: true)
+    PcapWriter.new(path, gzip: @options[:save_capture_gz], keep: effective_keep, rotate_size: effective_rotate_size, max_size: effective_max_size, timestamped: true)
   end
 
   # Default captures/ directory (created on demand), relative to cwd.
@@ -1319,7 +1328,7 @@ class FactorioSniffer
 
   # Human hint about rotation for the capture startup line.
   def retention_hint
-    " (rotating hourly/at #{effective_max_size}MB, keep #{effective_keep}h)"
+    " (rotating hourly/at #{effective_rotate_size}MB, keep #{effective_keep}h / #{effective_max_size}MB total)"
   end
 
   # Effective retention: explicit flags win, otherwise the hardcoded
@@ -1328,19 +1337,24 @@ class FactorioSniffer
     @options[:keep] || DEFAULT_KEEP_HOURS
   end
 
+  def effective_rotate_size
+    @options[:rotate_size] || DEFAULT_ROTATE_SIZE_MB
+  end
+
+  # Total budget for the rotated files (nil = age-only retention).
   def effective_max_size
-    @options[:max_size] || DEFAULT_MAX_SIZE_MB
+    @options.key?(:max_size) ? @options[:max_size] : DEFAULT_MAX_SIZE_MB
   end
 
   # Client mode: the server IP is unknown at startup — resolve it from the
-  # first packet where one endpoint is the local client (--local-ip) and
-  # the other is the server; fall back to plain "client" otherwise.
+  # first packet where one endpoint is one of our host IPs (`ip:`) and the
+  # other is the server; fall back to plain "client" otherwise.
   def ensure_pcap_writer(src_ip, dst_ip)
     return unless @pending_capture
-    local = @options[:local_ip]
-    server_ip = if local && src_ip == local
+    local = Array(@options[:host_ips])
+    server_ip = if local.include?(src_ip)
       dst_ip
-    elsif local && dst_ip == local
+    elsif local.include?(dst_ip)
       src_ip
     end
     id = server_ip ? "client-#{server_ip}" : 'client'

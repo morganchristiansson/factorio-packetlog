@@ -1,41 +1,71 @@
 # ─────────────────────────────────────────────────────────────
 # Factorio Packet Sniffer — config example
 # ─────────────────────────────────────────────────────────────
-# Copy this to config.yaml and edit. Settings here document the
-# defaults — unchanged values apply their hardcoded defaults.
-# Secrets (RCON password, API keys, credentials) are env-only:
-#   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY,
-#   FACTORIO_USERNAME, FACTORIO_TOKEN) are env-only — do not put
-#   them here.
+# Copy to config.yaml and edit. THE WHOLE FILE IS OPTIONAL: with no
+# config.yaml the sniffer runs on its defaults, and anything commented
+# out below keeps that default. Values document the defaults, so
+# copying this file unchanged changes nothing.
+#
+# Secrets (RCON password, API keys, credentials: RCON_PASSWORD,
+# HIVE_API_KEY, FACTORIO_USERNAME, FACTORIO_TOKEN) are env-only — never
+# here. Exception: the Google Translate key may live in
+# config-translation.yaml as `google_api_key:` (env still overrides it).
 # ─────────────────────────────────────────────────────────────
 
 # Capture source (one: port, interface, or server mode)
-port: 34197
-interface: null
-local_ip: null
-server: null
-server_ip: null
+
+# OPTIONAL (auto) — server mode: game port of the running server
+# (default 34197)
+# port: 34197
+
+# OPTIONAL (auto) — the server's --bind IP's interface, else the
+# default route; with a single non-loopback interface, just that one
+# interface: null
+
+# OPTIONAL (auto) — this host's Factorio IP(s): the server's bind IPs
+# in server mode, our game client's IP in client mode (string or
+# list, comma-separated allowed). The MODE decides which direction is
+# kept — server mode keeps incoming client→server, client mode keeps
+# server→client; the IP only filters. Setting it without `server:`
+# forces client mode.
+# ip: 192.168.1.10
+
+# OPTIONAL (auto) — auto-true when a factorio server runs on this host;
+# set false to force client mode
+# server: true
+
+# OPTIONAL — server mode only: skip RCON entirely
 no_rcon: false
 
 # Capture settings
-full_capture: false
-save_transfer_blocks: false
-save_capture_gz: true
-keep: 72
-max_size: 256
 
-# Player
-player_maps: []
+# What lands in the pcap: normal (filtered — no keepalive-only
+# heartbeats, no server-mode outgoing broadcasts, no map-download
+# blocks), full (everything), save (ONLY the msg 13 map-download
+# blocks, for tools/extract_save_from_pcap.rb)
+capture: normal
+
+save_capture_gz: true      # compress the pcap stream
+keep: 72                  # retention: delete rotated files older than this
+rotate_size: 256          # rotate the active capture file at this size (MB)
+max_size: 512             # total budget for the rotated files (oldest
+                           # deleted first); null = no byte budget
 
 # Protocol
-protocol_version: null
-dump_raw_types: false
-validate: false
+
+# OPTIONAL (auto) — RCON helpers.game_version (cached); set 2.0 or 2.1
+# only for pcap analysis with no RCON
+# protocol_version: "2.1"
+
+dump_raw_types: false     # print raw type ids for unknown action types
+validate: false           # verify decoded actions against the game
 
 # Logging
-log_keep_days: 7
-debug: false
+log_keep_days: 7          # prune logs/ older than this
+debug: false              # decoded per-action lines (also /debug at runtime)
 
 # Item/entity prototype dumps
-item_db: null
-entity_db: null
+# OPTIONAL — paths to dump files; when absent, server mode generates
+# both from RCON at startup
+# item_db: external/item_prototypes_runtime.txt
+# entity_db: external/entity_prototypes_runtime.txt

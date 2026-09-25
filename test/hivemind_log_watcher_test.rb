@@ -57,7 +57,7 @@ class TestHivemindLogWatcher < Minitest::Test
 
   def test_auto_compaction_runs_after_trigger_when_history_sufficient
     compacted = collect_compactions
-    pad = 'x' * HiveMindAgent::AUTO_COMPACTION_MIN_CHARS
+    pad = 'x' * @agent.auto_compaction_min_chars
     @agent.instance_variable_get(:@chat).add_message(role: :user, content: pad)
     @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
     wait_for_turn_thread

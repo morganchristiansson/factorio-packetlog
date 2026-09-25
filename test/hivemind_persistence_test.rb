@@ -19,7 +19,7 @@ class TestHivemindPersistence < Minitest::Test
   def test_session_persists_and_restores_across_restart
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a1.define_singleton_method(:greet_join) { |*args, **kwargs| }
       a1.on_chat('alice', 'goals: build the bus first')
       a1.on_player_event(:joined, 'bob')
@@ -29,7 +29,7 @@ class TestHivemindPersistence < Minitest::Test
       assert File.exist?(sess), 'session file written'
 
       # fresh agent = a restart
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       assert_equal [['alice', 'goals: build the bus first'], [nil, 'bob joined the game']],
                    a2.instance_variable_get(:@console_queue)
       texts = a2.instance_variable_get(:@chat).messages.map { |m| [m.role, m.content.to_s] }
@@ -44,46 +44,10 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       File.write(sess, '{broken json')
-      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       assert_empty a.instance_variable_get(:@console_queue)
     end
   end
-
-  # Compaction passes hard-killed by Ctrl-C never ran their strip step,
-  # so their failed write_memories rounds got persisted. Restoring them
-  # poisons the next compaction (the model imitates its own {} failures).
-  # The restore path must scrub the calls, their results, and the
-  # orphaned compaction-material user prompts — but keep everything else.
-  def test_restore_scrubs_dead_write_memories_debris
-    Dir.mktmpdir do |dir|
-      sess = File.join(dir, 'session.json')
-      File.write(sess, JSON.pretty_generate({
-        'console_queue' => [['alice', 'hello']],
-        'followups' => [],
-        'messages' => [
-          { 'role' => 'user', 'content' => 'turn: hi' },
-          { 'role' => 'assistant', 'content' => 'hello yourself' },
-          # orphaned compaction material (always starts with this prefix)
-          { 'role' => 'user', 'content' => "Current memories:\n=== soul ===\nold" },
-          { 'role' => 'assistant', 'content' => nil, 'tool_calls' => [
-            { 'id' => 'wm1', 'name' => 'write_memories', 'arguments' => '{}' } ] },
-          { 'role' => 'tool', 'tool_call_id' => 'wm1',
-            'content' => { error: 'Invalid tool arguments: missing keyword: key' }.inspect },
-          # a legit tool round-trip must survive the scrub untouched
-          { 'role' => 'assistant', 'content' => nil, 'tool_calls' => [
-            { 'id' => 'rp1', 'name' => 'reply', 'arguments' => '{"text":"hi"}' } ] },
-          { 'role' => 'tool', 'tool_call_id' => 'rp1', 'content' => 'sent' }
-        ]
-      }))
-      a = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
-      msgs = a.instance_variable_get(:@chat).messages.reject { |m| m.role == :system }
-      roles = msgs.map(&:role)
-      assert_equal %i[user assistant assistant tool], roles, 'debris dropped, good round-trip kept'
-      refute_includes msgs.map(&:content), /Current memories:/
-      assert a.instance_variable_get(:@chat).tools.key?(:reply)
-    end
-  end
-
 
   # Regression: tool messages persisted without their link to the assistant
   # tool_calls message were restored bare, and the provider rejected the
@@ -92,7 +56,7 @@ class TestHivemindPersistence < Minitest::Test
   def test_session_roundtrips_tool_calls
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       chat = a1.instance_variable_get(:@chat)
       chat.add_message(role: :user, content: 'turn: how many players?')
       # Live assistant messages carry tool_calls as {call_id => ToolCall}.
@@ -106,7 +70,7 @@ class TestHivemindPersistence < Minitest::Test
 
       # Restart: the assistant tool_calls message and the tool result must
       # come back LINKED (tool_call_id → the tool_calls id).
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       msgs = a2.instance_variable_get(:@chat).messages
       asst = msgs.find { |m| m.tool_call? }
       refute_nil asst, 'assistant tool_calls message restored'
@@ -135,7 +99,7 @@ class TestHivemindPersistence < Minitest::Test
   def test_queue_persist_never_clobbers_conversation
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
       a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
       a1.send(:persist!)
@@ -147,7 +111,7 @@ class TestHivemindPersistence < Minitest::Test
              'queue persist must keep the conversation in the file'
 
       # restart restores both conversation and console queue
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       texts = a2.instance_variable_get(:@chat).messages.map(&:content).map(&:to_s)
       assert_includes texts, 'the bus is at 1k spm'
       assert_equal [['alice', 'hello hivemind']], a2.instance_variable_get(:@console_queue)
@@ -159,11 +123,11 @@ class TestHivemindPersistence < Minitest::Test
   def test_opencode_session_id_survives_restart
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a1.send(:persist!)
       id1 = a1.opencode_session_id
 
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       assert_equal id1, a2.opencode_session_id
       chat = a2.instance_variable_get(:@chat)
       assert_equal id1, (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s

@@ -1,9 +1,9 @@
 # Protocol Notes (reverse-engineering findings)
 
 Session-verified findings about the Factorio multiplayer protocol. The
-authoritative reference docs are `docs/README.md` (network layer),
-`docs/packets/` (per-message), `docs/actions.md` (input actions). This file
-holds the *verified-by-capture* notes, fixes, and open questions.
+network-layer reference and compact payload table live in `docs/README.md`;
+input actions are listed in `docs/actions.md`. This file holds the
+*verified-by-capture* notes, fixes, and open questions.
 
 ## ACTIONS Table (`lib/factorio_protocol.rb`)
 
@@ -13,6 +13,15 @@ includes:
 - Core actions (build=68, wire_dragging=86, etc.)
 - Internal-only actions (nothing=0, stop_walking=1, stop_mining=3)
 - Session-verified protocol IDs for some types (wire_dragging at 84 vs 86)
+
+## Parsed Message Coverage
+
+`FactorioProtocol.parse_udp_payload` fully decodes connection request (2),
+connection confirm (4), connection accept (5), heartbeats (6/7), and game
+information reply (17). Other types retain only their network header. The
+README payload table is the single per-message reference; the sections
+below contain the capture-verified details and regressions that are not
+obvious from the table.
 
 ## Key Protocol Findings
 

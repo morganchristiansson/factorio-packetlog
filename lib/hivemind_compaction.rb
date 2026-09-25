@@ -230,7 +230,7 @@ module HiveMindCompaction
   end
 
   # Gate for AUTOMATIC compaction triggers (map reset): only run a pass
-  # when the session holds at least AUTO_COMPACTION_MIN_CHARS of history —
+  # when the session holds at least the configured auto-compaction gate of history —
   # below that there's little to distill and the pass would mostly echo
   # the current blobs back. Manual /compact bypasses this gate.
   def auto_compaction_worthwhile?

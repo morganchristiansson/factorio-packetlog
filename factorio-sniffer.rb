@@ -187,7 +187,7 @@ if __FILE__ == $PROGRAM_NAME
   # set (HIVE_API_KEY), the agent auto-enables — there is no --ai-agent
   # flag. No key = no AI. Client/pcap mode never auto-enables (the agent
   # needs RCON/game.print, which only server mode has).
-  options[:ai_agent] = true if options[:server] && !options[:pcap]
+  options[:ai_agent] = true if options[:server] && !options[:pcap] && ENV['HIVE_API_KEY'] && !ENV['HIVE_API_KEY'].empty?
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring

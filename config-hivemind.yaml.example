@@ -1,26 +1,28 @@
 # ─────────────────────────────────────────────────────────────
-# Hivemind AI agent — config example
+# Hivemind AI agent — required configuration
 # ─────────────────────────────────────────────────────────────
+# Copy this file to config-hivemind.yaml. The sniffer requires this file;
+# every setting below is required unless a model explicitly overrides it.
 # The API key is the only secret and is read from HIVE_API_KEY.
-# Other settings belong here; the sniffer exposes no Hivemind CLI args.
+# The sniffer exposes no Hivemind CLI args.
 
-# Current startup model.
+# Current startup model; must appear under some provider below.
 model: "deepseek-v4-flash"
 
-# Models available to /model and automatic fallback, in order.
-# Each entry may define provider, api_base, api_key_env, or api_key.
-# api_key_env is preferred for secrets; HIVE_API_KEY overrides api_key.
-models:
-  - name: deepseek-v4-flash
+# One entry per endpoint/credential set. Every model listed under a
+# provider uses that provider's RubyLLM provider, api_base and api_key_env
+# (a model entry may still override any of them). Order — providers, then
+# models within a provider — is the /model, /try and fallback order.
+providers:
+  opencode-zen:
     provider: openai
     api_base: "https://opencode.ai/zen/go/v1"
     api_key_env: HIVE_API_KEY
-  - name: gpt-4o
-    provider: openai
-    api_base: "https://opencode.ai/zen/go/v1"
-    api_key_env: HIVE_API_KEY
+    models:
+      - deepseek-v4-flash
+      - gpt-4o
 
-# Optional global defaults for models that omit a field.
+# Default provider/endpoint for a provider group that omits one.
 provider: openai
 api_base: "https://opencode.ai/zen/go/v1"
 
@@ -50,3 +52,10 @@ triggers:
 # Game-log events that fire a dedicated turn.
 log_turn_events:
   - map-reset
+
+# Per-player chat/greeting rate limits, in seconds.
+min_interval: 5
+greet_interval: 10
+
+# Minimum seconds between dedicated log-event turns.
+log_event_interval: 300

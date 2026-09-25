@@ -55,16 +55,13 @@ compaction overwrites a memory entirely with the model's new content.
 ### Compaction
 
 A **compaction pass** is a one-shot LLM call that reviews the session and
-updates these memories. It runs **inside the live conversation** (same
-chat object) so the provider's input-token cache covers the whole thread —
-the only new tokens are the compaction prompt itself — but it is **never
-allowed to become part of the session**: its messages are stripped again
-and the toolset restored, so a session that continues is unchanged.
+updates these memories. It uses a throwaway chat that replays the live
+thread, so the provider's input-token cache covers the conversation. The
+pass has no tools and returns all memory sections as plain text; its
+messages never enter the live session.
 
-- The compaction prompt exposes only the **`write_memories`** tool (never
-  `say`/`rcon_query` — it is not talking to players) and demands **all
-  updates in a single batched call** — one API round trip, not one per
-  memory.
+- The compaction prompt asks for all memory updates in one plain-text
+  reply, one delimited section per key, so there is one API round trip.
 - Input: the conversation thread (already in the chat) plus current
   memories, a fresh server context snapshot, and console lines not yet in
   the conversation.
@@ -115,7 +112,7 @@ player chat ──► write_to_console action (C→S packet)
         lib/hivemind.rb  HiveMindAgent#on_chat(player, message)
                    │  message contains "hivemind" (case-insensitive)?
                    ▼
-        RubyLLM chat (OpenAI-compatible endpoint, default opencode.ai/zen)
+        RubyLLM chat (endpoint/provider/model from config-hivemind.yaml)
          system context: currently-online player list (from the sniffer)
                    │  model responds by calling the say tool
                    ▼
@@ -182,9 +179,9 @@ player chat ──► write_to_console action (C→S packet)
   states the player's admin status ("they have played 2d3h in total and
   are an admin" — from the same attrs query), and the player's long-term
   memory is injected into the prompt once per session. Runs off the packet
-  loop with its own rate limit (`GREET_INTERVAL`, so a join burst can't
+  loop with its configured `greet_interval` rate limit, so a join burst can't
   block chat questions or spam the channel). Recorded in the history like
-  a reply. Disable with `greet_on_join: false` on the agent (default on).
+  a reply.
   In server mode the join signal is the msg-4 + first-C→S-heartbeat
   confirm (the server's S→C NewPeerInfo broadcast isn't analyzed); clean
   leaves arrive as a `PeerDisconnect` synchronizer action in the client's
@@ -204,8 +201,8 @@ player chat ──► write_to_console action (C→S packet)
   PLAYER's long-term memory (the player who triggered, or the roster on a
   fresh session). The list comes from the sniffer's packet-driven online
   tracking (`online_players`) and mirrored `PlayerAttrs` (seeded from
-  RCON, maintained by packets); if the sniffer's attrs are empty, the
-  agent falls back to a direct RCON `player_attributes` query (targeted on joins, full for standalone).
+  RCON, maintained by packets). A newly joined player gets one targeted
+  RCON `player_attributes` query for enrichment.
 - **Reply = a tool**: the model responds by calling the `reply` tool (`HivemindReply`)
   (`say(text: ...)`), a RubyLLM tool that sends the text through RCON
   `game.print` (`RconClient#say`, Lua-quoted so output can't inject code)
@@ -235,14 +232,23 @@ HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-
 ```
 
 The key is read from the `HIVE_API_KEY` environment variable **only** —
-deliberately no CLI flag and no `OPENAI_API_KEY` fallback, so an ambient
-key elsewhere on the box can't silently turn the agent on (or off). All
-other Hivemind settings, including endpoint, model, provider, triggers, and
-limits, come from `config-hivemind.yaml`. The constructor's `api_key:` param
-is a spec-only injection point — production code never passes it. `models:` defines the models available to `/model` and the ordered automatic
-fallback list. Each model can set its own `provider`, `api_base`, and
-secret source via `api_key_env`; `api_key` is also supported for a local
-ignored config. The current `model:` is the startup choice. A
+deliberately no CLI flag and no `OPENAI_API_KEY` fallback. Every other
+Hivemind setting is required from `config-hivemind.yaml`; the file must
+exist and contain all keys shown in `config-hivemind.yaml.example`. There
+are no code defaults for model, provider, endpoint, prompts, limits, or
+compaction thresholds. The API key is never read from YAML or a constructor
+argument.
+
+`providers:` defines the endpoints and the models available to `/model` and
+`/try`, plus the ordered automatic fallback list. One entry per
+endpoint/credential set: it carries the RubyLLM `provider`, `api_base` and
+`api_key_env` shared by every `models:` entry under it, and a model entry
+may override any of those (bare name, or a `name:` hash). A group that
+omits `provider` or `api_base` falls back to the required top-level
+`provider`/`api_base`. Order — providers, then models within a provider —
+is the `/model`, `/try` and fallback order, so group same-credential models
+together. There is no top-level `models:`. `/try` rejects any model not
+listed here. The current `model:` is the startup choice. A
 `ModelNotFoundError` switches to the next configured model; ordinary
 transient errors are not treated as permanent model removal.
 
@@ -351,14 +357,14 @@ map-reset, research-finished, evo-stage, apex-spitter, artillery-target,
 fluid-flushed) are queued for the next prompt (timestamp and `Script
 `@...lua:NNN:` prefix stripped — the model sees e.g.
 `event=player-died, actor=morganc, position=118.9,-167.0, cause=small-worm-turret`).
-- **Only map resets** (`LOG_TURN_EVENTS`: `map-reset`, matched by parsed
-event name via `#log_event_name`)
+- **Only map resets** (`log_turn_events` in `config-hivemind.yaml`,
+matched by parsed event name via `#log_event_name`)
   additionally fire a dedicated turn on the **first match in 5 minutes** so
   the agent can react in chat right away, then run an **auto-compaction**
   (`compact_memory!("map reset")`) — a reset closes a round, so memories
   are distilled while fresh. The compaction is gated on history size:
-  below `AUTO_COMPACTION_MIN_CHARS` (2x `TRIM_TAIL_CHARS`, what trimming
-  keeps anyway) there is little to distill and the pass is skipped.
+  below `auto_compaction_min_chars` there is little to distill and the
+  pass is skipped.
   On success the session is trimmed (same as `/compact`), so a repeated
   map reset finds a thin session and skips instead of re-compacting the
   same round. Repeats inside the 5-minute window never reach compaction

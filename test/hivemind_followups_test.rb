@@ -93,13 +93,13 @@ class TestHivemindFollowUps < Minitest::Test
   def test_followups_survive_restart
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a1.schedule_followup(delay_seconds: 60, task: 'remind spawn defense', name: 'spawn')
       a1.send(:persist!)
       data = JSON.parse(File.read(sess))
       assert_equal 1, data['followups'].size, 'follow-up persisted with its deadline'
 
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a2.define_singleton_method(:complete) { |_p| '' }
       fups = a2.instance_variable_get(:@followups)
       assert_equal 1, fups.size
@@ -113,7 +113,7 @@ class TestHivemindFollowUps < Minitest::Test
   def test_overdue_followup_fires_after_restart
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
-      a1 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a1.schedule_followup(delay_seconds: 60, task: 'ping', name: 'ping-timer')
       # Rewrite the persisted deadline to the near future (simulates downtime)
       data = JSON.parse(File.read(sess))
@@ -121,7 +121,7 @@ class TestHivemindFollowUps < Minitest::Test
       data['followups'] = { 'ping-timer' => { 'due_at' => Time.now.to_f + 0.4, 'task' => 'ping' } }
       File.write(sess, JSON.generate(data))
 
-      a2 = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a2.define_singleton_method(:complete) { |_p| '' }
       deadline = Time.now + 3
       sleep 0.05 until a2.instance_variable_get(:@followups).empty? || Time.now > deadline
@@ -139,7 +139,7 @@ class TestHivemindFollowUps < Minitest::Test
           ['tuple-name', Time.now.to_f + 60, 'string-tuple legacy']
         ]
       ))
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: sess, memory_dir: false)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       assert_empty agent.instance_variable_get(:@followups), 'non-hash formats are discarded, not migrated'
     end
   end
@@ -150,7 +150,7 @@ class TestHivemindFollowUps < Minitest::Test
   # never started) is revived at the sniffer's reconstruction seam via
   # ensure_followup_scheduler.
   def test_hot_reloaded_agent_gets_scheduler_revived_at_seam
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     agent.instance_variable_get(:@scheduler)&.kill
     agent.instance_variable_get(:@scheduler)&.join(0.1)
 

@@ -21,27 +21,54 @@ Bit 7:    LastFragment
 
 ### Message Types
 
-| ID | Name | Direction | Description |
-|----|------|-----------|-------------|
-| 0  | [Ping](packets/00-ping.md) | Bidirectional | Keepalive ping |
-| 1  | [PingReply](packets/01-ping-reply.md) | Bidirectional | Ping response |
-| 2  | [ConnectionRequest](packets/02-connection-request.md) | Client→Server | Initial connection request with version info |
-| 3  | [ConnectionRequestReply](packets/03-connection-request-reply.md) | Server→Client | Server response to connection request |
-| 4  | [ConnectionRequestReplyConfirm](packets/04-connection-request-reply-confirm.md) | Client→Server | Client confirms with username/password |
-| 5  | [ConnectionAcceptOrDeny](packets/05-connection-accept-or-deny.md) | Server→Client | Server accepts or denies connection, assigns peer ID |
-| 6  | [ClientToServerHeartbeat](packets/06-client-to-server-heartbeat.md) | Client→Server | Regular heartbeat with tick closures |
-| 7  | [ServerToClientHeartbeat](packets/07-server-to-client-heartbeat.md) | Server→Client | Regular heartbeat with tick closures |
-| 8  | [GetOwnAddress](packets/08-get-own-address.md) | Client→Server | NAT traversal: ask server for own public address |
-| 9  | [GetOwnAddressReply](packets/09-get-own-address-reply.md) | Server→Client | NAT traversal: server replies with client's public address |
-| 10 | [NatPunchRequest](packets/10-nat-punch-request.md) | Client→Server | NAT punch request |
-| 11 | [NatPunch](packets/11-nat-punch.md) | Server→Client | NAT punch response |
-| 12 | [TransferBlockRequest](packets/12-transfer-block-request.md) | Client→Server | Request a download block by number |
-| 13 | [TransferBlock](packets/13-transfer-block.md) | Server→Client | 503-byte download block (map save chunks) |
-| 14 | [RequestForHeartbeatWhenDisconnecting](packets/14-request-heartbeat-disconnect.md) | Client→Server | Request heartbeat before disconnect |
-| 15 | [LANBroadcast](packets/15-lan-broadcast.md) | Server→LAN | LAN server discovery broadcast |
-| 16 | [GameInformationRequest](packets/16-game-info-request.md) | Client→Server | Request game information |
-| 17 | [GameInformationRequestReply](packets/17-game-info-reply.md) | Server→Client | Game information response |
-| 18 | [Empty](packets/18-empty.md) | Bidirectional | Empty keepalive |
+| ID | Name | Direction | Payload summary |
+|----|------|-----------|-----------------|
+| 0 | Ping | Bidirectional | Header only; keepalive/latency probe |
+| 1 | PingReply | Bidirectional | uint32 ping number |
+| 2 | ConnectionRequest | Client→Server | major/minor/patch bytes, uint32 build, uint32 client id |
+| 3 | ConnectionRequestReply | Server→Client | uint16 maximum packet size |
+| 4 | ConnectionRequestReplyConfirm | Client→Server | client/server/instance ids, length-prefixed connection strings, uint64 timestamp |
+| 5 | ConnectionAcceptOrDeny | Server→Client | connection status, game/host metadata, mods, and network peer list |
+| 6 | ClientToServerHeartbeat | Client→Server | sequence, tick closures, synchronizer actions, requests, next-receive tick |
+| 7 | ServerToClientHeartbeat | Server→Client | sequence, echoed tick closures, synchronizer actions, requests |
+| 8 | GetOwnAddress | Client→Server | Header only; NAT address discovery |
+| 9 | GetOwnAddressReply | Server→Client | IPv4 address + UDP port in network byte order |
+| 10 | NatPunchRequest | Client→Server | Header only |
+| 11 | NatPunch | Server→Client | Target IPv4 address + UDP port |
+| 12 | TransferBlockRequest | Client→Server | Block id, offset, and requested size |
+| 13 | TransferBlock | Server→Client | uint32 block number + raw archive bytes (normally 503-byte chunks) |
+| 14 | RequestForHeartbeatWhenDisconnecting | Client→Server | Header only; final-heartbeat request fallback |
+| 15 | LANBroadcast | Server→LAN | Human-readable server discovery data |
+| 16 | GameInformationRequest | Client→Server | Header only |
+| 17 | GameInformationRequestReply | Server→Client | Name, version/build, description, uptime, host, mods, tags, players |
+| 18 | Empty | Bidirectional | Header only; filler/keepalive |
+
+The decoder currently extracts full payloads for connection messages 2, 4,
+and 5, heartbeats 6/7, and game-information reply 17. Other message types
+retain their network header and are ignored by the analysis path.
+
+## Heartbeat Layout
+
+Messages 6 and 7 share this framing after the network header:
+
+```text
+flags(1) sequence(4)
+[tick closures when flags bit 1 is set]
+[next-receive tick(8), client heartbeats only]
+[synchronizer actions when flags bit 4 is set]
+[heartbeat requests when flags bit 0 is set]
+```
+
+Heartbeat flag bits are: 0 requests, 1 tick closures, 2 one tick closure,
+3 all closures empty, and 4 synchronizer actions. Each tick closure starts
+with a uint64 game tick. Its action count is a uint32v whose low bit says
+whether input-action segments follow. Client heartbeat actions use two
+uint16v fields (type and player delta); version- and direction-specific data
+lengths and trailers are documented in `protocol-notes.md`.
+
+A synchronizer action is a type byte plus type-specific data. The decoder
+uses NewPeerInfo (type 2) to learn usernames and PeerDisconnect (type 1)
+for clean leave events. Heartbeat requests are uint32 sequence numbers.
 
 ## Input Actions
 

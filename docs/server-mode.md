@@ -63,9 +63,8 @@ Behavior:
   incoming) registers `src_ip → username`; their first C→S heartbeat action
   binds the real game index (like the old client-side "self" learning, but
   for every client).
-- **RCON roster load**: at startup (live capture, server mode) the
-  connected-player roster is loaded via RCON (`game.connected_players` +
-  `serpent.line`, 1-indexed indexes) and merged into the player DB — so
+- **RCON roster load**: at startup (live capture, server mode) one
+  `player_attributes` query seeds `PlayerAttrs` and the player DB, so
   existing players are named immediately. Later joiners are learned from
   the packet stream (msg 4 + heartbeat), so no periodic refresh is needed.
   `--no-rcon` disables.
@@ -116,16 +115,10 @@ Getting data OUT of a Lua command over RCON: the console's `rcon` object
 sends its argument back through the RCON connection as the command response
 — the one clean channel:
 
-```lua
-local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(serpent.line(t))
-```
-
-→ body == `{{i = 1, n = "morganc"}}` (1-indexed game indexes).
-
-- `rcon.print` is the ONLY channel (no error/log fallbacks).
-- The built-in `/players` works but lists NAMES only, no index — can't bind
-  actions (which carry game player indexes) to names.
-- `serpent.line` is available in the console environment.
+RCON data queries use `rcon.print` with `helpers.table_to_json`; the
+`player_attributes` query carries the 1-indexed game id, name, flags,
+online/afk ticks, and locale. The built-in `/players` works but lists names
+only, so it cannot bind packet actions to players.
 - Auth quirk: `authenticate!(ignore_first_packet: false)` — Factorio sends
   ONE auth reply, the gem's default expects two and times out.
 - `/sc` (silent) instead of `/c` so commands don't print to players.

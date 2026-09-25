@@ -126,9 +126,8 @@ module HiveMindPrompts
   # replaying the bounded thread under the LIVE system prompt, then a single
   # turn asking for every memory as delimited plain-text sections
   # (COMPACTION_TURN_ALL). One request instead of one per key. Plain text
-  # is the ONLY channel this gateway delivers reliably — tool-call arguments
-  # are dropped in transport (write_memories died batched, per-call, strict,
-  # and flat) — and the per-section word budgets below keep the single reply
+  # is the ONLY channel this gateway delivers reliably; the per-section word
+  # budgets below keep the single reply
   # to a few KB, well inside the gateway's request window (giant single-shot
   # replies get HTTP 500 at ~60-90s). Sections are validated locally; a
   # malformed reply gets one retry, then the pass fails with the session

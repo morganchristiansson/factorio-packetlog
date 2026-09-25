@@ -17,18 +17,56 @@ class TestHiveMindAgent < Minitest::Test
   end
 
   def test_hivemind_yaml_options_are_applied
-    config = YAML.safe_load_file('config-hivemind.yaml')
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    group = config['providers'].values.first
     assert_equal config['model'], @agent.model
-    assert_equal config['models'].map { |m| m['name'] }, @agent.models
-    assert_equal config['models'].first['api_base'], @agent.send(:api_base_for, @agent.model)
+    assert_equal group['models'], @agent.models
+    assert_equal group['api_base'], @agent.send(:api_base_for, @agent.model)
     assert_equal config['provider'].to_sym, @agent.instance_variable_get(:@provider)
     assert_equal config['history_size'], @agent.instance_variable_get(:@history_size)
     assert_equal config['triggers'], @agent.triggers
     assert_equal config['log_turn_events'], @agent.instance_variable_get(:@log_turn_events)
     assert_equal config['max_reply_len'], @agent.max_reply_len
     assert_equal config['auto_compaction_min_chars'], @agent.auto_compaction_min_chars
-    assert_match(/Model switched to #{config['models'].last['name']}/, @agent.switch_model!(config['models'].last['name']))
-    assert_equal config['models'].last['name'], @agent.model
+    assert_match(/Model switched to #{@agent.models.last}/, @agent.switch_model!(@agent.models.last))
+    assert_equal @agent.models.last, @agent.model
+  end
+
+  def test_provider_groups_share_and_override_credentials
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    config['model'] = 'a-model'
+    config['providers'] = {
+      'alpha' => { 'provider' => 'openai', 'api_base' => 'https://alpha/v1',
+                   'api_key_env' => 'ALPHA_KEY', 'models' => ['a-model', { 'name' => 'a-special', 'api_base' => 'https://alpha/special/v1' }] },
+      'beta' => { 'provider' => 'anthropic', 'models' => ['b-model'] }
+    }
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      agent = make_agent(config_file: path)
+      assert_equal %w[a-model a-special b-model], agent.models
+      assert_equal 'https://alpha/v1', agent.send(:api_base_for, 'a-model')
+      assert_equal 'https://alpha/special/v1', agent.send(:api_base_for, 'a-special')
+      assert_equal config['api_base'], agent.send(:api_base_for, 'b-model') # group omits api_base
+      assert_equal :anthropic, agent.send(:model_provider, 'b-model')
+      assert_equal :openai, agent.send(:model_provider, 'a-model')
+    end
+  end
+
+  def test_config_is_required
+    assert_raises(Errno::ENOENT) { HiveMindAgent.load_config('/nonexistent/config-hivemind.yaml') }
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, "model: test\n")
+      error = assert_raises(ArgumentError) { HiveMindAgent.load_config(path) }
+      assert_includes error.message, 'api_base'
+    end
+  end
+
+  def test_try_rejects_unconfigured_model
+    error = @agent.try_model!('not-in-config', 'hello')
+    assert_includes error, 'not configured'
+    assert_includes error, @agent.models.join(', ')
   end
 
   def test_unavailable_model_falls_back_to_next_configured_model
@@ -75,9 +113,10 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_history_caps_unread_lines_with_eviction
-    (HiveMindAgent::HISTORY_SIZE + 5).times { |i| @agent.send(:append_history, 'p', "msg #{i}") }
+    limit = @agent.instance_variable_get(:@history_size)
+    (limit + 5).times { |i| @agent.send(:append_history, 'p', "msg #{i}") }
     history = @agent.instance_variable_get(:@console_queue)
-    assert_equal HiveMindAgent::HISTORY_SIZE, history.size
+    assert_equal limit, history.size
     assert_equal 'msg 5', history.first[1]  # oldest 5 dropped
   end
 
@@ -132,7 +171,7 @@ class TestHiveMindAgent < Minitest::Test
   # Regression: invalid UTF-8 from the wire crashed strip/regex
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     agent.define_singleton_method(:handle) { |*args, **kwargs| false }
     agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
     agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
@@ -246,7 +285,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     agent.on_player_event(:joined, 'alice')
     assert_equal [nil, 'alice joined the game (2d3h played)'],
@@ -257,7 +296,7 @@ class TestHiveMindAgent < Minitest::Test
   # No RCON attrs for the player (fresh server / query miss): no playtime
   # is known, so the join line carries no "(... played)" suffix.
   def test_on_player_event_playtime_absent_without_rcon_attrs
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     agent.define_singleton_method(:greet_join) { |*args, **kwargs| }
     agent.on_player_event(:joined, 'bob')
     assert_equal [nil, 'bob joined the game'],
@@ -350,7 +389,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_unread_console_clips_long_lines
     @agent.send(:append_history, 'alice', 'x' * 500)
     line = @agent.send(:unread_console).first
-    assert_operator line.length, :<=, HiveMindAgent::HISTORY_LINE_LEN + 20
+    assert_operator line.length, :<=, @agent.instance_variable_get(:@history_line_len) + 20
   end
 
 
@@ -366,7 +405,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_uses_llm_and_sends
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -387,7 +426,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -405,7 +444,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_prompt_omits_playtime_when_unknown
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -418,7 +457,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_join_greeting_recorded_in_history
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     agent.define_singleton_method(:complete) do |_prompt|
       clean_reply('Welcome, alice. The factory is watching.')
     end
@@ -431,7 +470,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_respects_greet_interval
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     agent.define_singleton_method(:complete) { |_p| clean_reply('hi') }
     agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
     agent.on_player_event(:joined, 'alice')
@@ -442,7 +481,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_leave_does_not_greet
     rcon = FakeRcon.new
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     agent.on_player_event(:left, 'alice')
     assert_empty rcon.sent
   end
@@ -454,7 +493,7 @@ class TestHiveMindAgent < Minitest::Test
   # stub the model and assert the trigger reaches the LLM with the message.
 
   def test_good_bot_triggers_reply
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     asked = nil
     agent.define_singleton_method(:complete) { |p| asked = p; '' }
     agent.on_chat('alice', 'good bot')
@@ -465,7 +504,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_good_bot_variants_are_triggers
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     asks = 0
     agent.define_singleton_method(:complete) { |_p| asks += 1; '' }
     ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
@@ -478,7 +517,7 @@ class TestHiveMindAgent < Minitest::Test
     # a reply must get their own turn (queued on the complete mutex, so
     # sequential and seeing the prior Q&A) — never dropped just because
     # someone else asked recently.
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     asked = []
     agent.define_singleton_method(:complete) do |p|
       asked << p
@@ -511,7 +550,7 @@ class TestHiveMindAgent < Minitest::Test
   # @rate_mutex, so on_chat must return promptly while a completion is
   # stuck.
   def test_hung_llm_call_does_not_block_packet_thread
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     mutex = agent.instance_variable_get(:@mutex)
     gate = Queue.new
     # Emulate production complete(): the ENTIRE LLM call (incl. retry
@@ -534,9 +573,9 @@ class TestHiveMindAgent < Minitest::Test
   end
 
 
-  def test_triggers_constant_lists_all_phrases
+  def test_configured_triggers_list_all_phrases
     %w[hivemind good\ bot goodbot hm hive].each do |t|
-      assert_includes HiveMindAgent::TRIGGERS, t
+      assert_includes @agent.triggers, t
     end
   end
 
@@ -546,7 +585,7 @@ class TestHiveMindAgent < Minitest::Test
   # bot" (it would page on "shmoose"), so it fires only as a standalone
   # word, case-insensitively: "hm, hello", "HM: hello", "wdyt? hm".
   def test_hm_word_trigger_matches_standalone_word
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     ['hm', 'hm, hello', 'HM, hello', 'HM: hello', 'wdyt? hm', 'hi hm here',
      'hello-hm', 'hm!', 'say hm.', "[hm]"].each do |m|
       assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
@@ -555,7 +594,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_hm_does_not_trigger_on_substrings
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     ['shmoose', 'shmoo', 'hmm', 'hmm, hello', 'ahm', 'hmx', 's-h-m-oose'].each do |m|
       refute agent.send(:trigger_match?, m), "expected #{m.inspect} NOT to trigger"
     end
@@ -564,7 +603,7 @@ class TestHiveMindAgent < Minitest::Test
 
   # ── Word-boundary trigger: "hive" ─────────────────────────────
   def test_hive_trigger_matches_standalone_word_only
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     ['hive', 'hey hive', 'hive?', 'HIVE, hello'].each do |m|
       assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
     end
@@ -577,7 +616,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_hm_trigger_reaches_llm
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     asked = nil
     agent.define_singleton_method(:complete) { |p| asked = p; '' }
     agent.on_chat('alice', 'wdyt? hm')
@@ -587,7 +626,7 @@ class TestHiveMindAgent < Minitest::Test
 
 
   def test_shmoose_does_not_trigger
-    agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
     called = false
     agent.define_singleton_method(:complete) { |_p| called = true; '' }
     agent.on_chat('alice', 'shmoose is back')
@@ -598,7 +637,7 @@ class TestHiveMindAgent < Minitest::Test
 
   def test_join_greeting_includes_player_memory
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       agent.instance_variable_get(:@memory_store).write_key('alice', 'alice once nuked the bus on purpose')
       seen_prompt = nil
       agent.define_singleton_method(:complete) do |prompt|
@@ -619,7 +658,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 2, name: 'alice', connected: true, admin: true, online_time: 11_016_000, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt
@@ -636,7 +675,7 @@ class TestHiveMindAgent < Minitest::Test
     rcon.define_singleton_method(:player_attributes) do
       [{ index: 3, name: 'bob', connected: true, admin: false, online_time: 7_200, afk_time: 0 }]
     end
-    agent = HiveMindAgent.new(rcon: rcon, api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
     seen_prompt = nil
     agent.define_singleton_method(:complete) do |prompt|
       seen_prompt = prompt

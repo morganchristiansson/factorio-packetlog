@@ -129,14 +129,12 @@ for name in pairs(prototypes.entity) do ... end   -- entity IDs (pipette src=4)
 
 ## /players
 
-Built-in command lists only player NAMES — no game index. Use
-`game.connected_players` + `p.index`/`p.name` for the roster:
-
-```lua
-local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))
-```
-
-Parsed by `RconClient.parse_roster` (JSON array of `{"i":N,"n":"name"}`).
+Built-in `/players` lists only names, so the sniffer uses one RCON
+`player_attributes` query instead. It returns JSON rows containing the
+1-indexed game id, name, connection/admin flags, online/afk ticks, and
+locale; `FactorioSniffer` seeds `PlayerAttrs` and `PlayerDatabase` from that
+single response. Later joins are learned from C→S packets, with one
+targeted RCON lookup for a newly joined player's attributes.
 
 ## Connection details
 

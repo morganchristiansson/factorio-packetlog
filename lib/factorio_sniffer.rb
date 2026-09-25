@@ -1014,7 +1014,7 @@ class FactorioSniffer
           /filter                      show current filter state
           /stats                       print session stats
           /model [MODEL]               show or switch LLM model at runtime (Hivemind only)
-          /try MODEL [MESSAGE]         one-off dry-run with MODEL — not persisted, not sent to game
+          /try MODEL [MESSAGE]         one-off dry-run with a configured model — not persisted, not sent to game
           /compact                     distill session into memory, then start fresh
           /simulate NAME LANG MSG      test the translation backend with MSG in LANG
           /locales                     list per-player language overrides

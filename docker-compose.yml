@@ -14,14 +14,7 @@ services:
       - /home/morgan/factorio:/factorio:ro
       - /home/morgan/work/factorio-legendary-deathworld:/factorio-legendary-deathworld
       - s25client-home:/home/ubuntu
-    networks:
-      - devnet
+    network_mode: host
     working_dir: /workspace
 volumes:
   s25client-home:
-networks:
-  devnet:
-    enable_ipv6: true
-    ipam:
-      config:
-        - subnet: fd12:3456:789a::/64

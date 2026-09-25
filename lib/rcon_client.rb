@@ -20,16 +20,6 @@ require 'rcon'
 # (no player index), so it can't bind actions — which carry game player
 # indexes — to names.
 class RconClient
-  # One-liner (keeps the reported Lua line number at 1) building
-  # {index, name} pairs for connected players as JSON. Two variants:
-  # WRITE_* writes the JSON to <user-data>/script-output via
-  # helpers.write_file (no 4KB response cap — safe for 100+ player
-  # servers); the print variant is the fallback when script_output_dir is
-  # unavailable (rcon.print truncates around 4KB).
-  ROSTER_FILENAME = 'factorio-sniffer-players.json'
-  ROSTER_WRITE_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end helpers.write_file(' + ROSTER_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
-  ROSTER_PRINT_LUA = 'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name} end rcon.print(helpers.table_to_json(t))'
-
   # One-liner returning player attributes for ALL known players (incl.
   # offline) — index, name, connected, admin, online_time (total ticks
   # across all sessions), afk_time (ticks since last action), locale.
@@ -54,20 +44,6 @@ class RconClient
     'local function d(k,f) local n={} for x in pairs(prototypes[k]) do n[#n+1]=x end ' \
     'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n"), false, 0) end ' \
     'd("item","factorio-sniffer-items.txt") d("entity","factorio-sniffer-entities.txt")'
-
-  # Parse a bare rcon.print roster payload into [{index:, name:}].
-  # Returns [] for a valid empty roster, nil when the payload isn't a roster.
-  # Parse a JSON roster payload (see ROSTER_LUA) into [{index:, name:}].
-  # Returns [] for a valid empty roster, nil when the payload isn't JSON.
-  # A truncated payload (rcon.print cap) parses as a partial list.
-  def self.parse_roster(body)
-    parsed = parse_json(body)
-    return nil unless parsed.is_a?(Array)
-    parsed.filter_map do |r|
-      next unless r.is_a?(Hash) && r['i'] && r['n']
-      { index: r['i'].to_i, name: r['n'].to_s }
-    end
-  end
 
   # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
   # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}].
@@ -110,13 +86,6 @@ class RconClient
 
   # <user-data>/script-output — where helpers.write_file output lands.
   attr_reader :script_output_dir
-
-  # [{index:, name:}] for connected players, or nil if the query failed.
-  # Prefers the write_file path (no 4KB cap) when script_output_dir is
-  # available; falls back to rcon.print.
-  def connected_players
-    self.class.parse_roster(json_query(ROSTER_FILENAME, ROSTER_WRITE_LUA, ROSTER_PRINT_LUA))
-  end
 
   # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}] for
   # the CONNECTED players, or nil if the query failed. Same write_file-first

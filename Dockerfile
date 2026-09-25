@@ -21,7 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dnsutils \
     xxd \
     git \
+    python3-pip \
+    ddgr pandoc \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --break-system-packages trafilatura
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
@@ -32,7 +36,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
 
 # ── npm global packages ─────────────────────────────────────────────────────
-RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 && \
+RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 && \
     pi --version
 
 # ── Ruby gems ──────────────────────────────────────────────
@@ -46,6 +50,3 @@ RUN gem install bundler && \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 USER ubuntu
-
-RUN pi install npm:pi-web-access && \
-    pi install npm:@dietrichgebert/ponytail

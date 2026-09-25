@@ -43,23 +43,26 @@ class HiveMindAgent
   include HiveMindPersistence  # session file: load_session / persist!
   include HiveMindCompaction   # long-term memory distillation (/compact)
   include HiveMindFollowUps    # scheduled follow-ups + scheduler thread
-  # OpenAI-compatible endpoint + model. Configuration comes from
-  # config-hivemind.yaml; HIVE_API_KEY is the only environment secret.
-  DEFAULT_API_BASE = 'https://opencode.ai/zen/go/v1'
-  DEFAULT_MODEL    = 'deepseek-v4-flash'
-  DEFAULT_PROVIDER = :openai
+  # Non-secret Hivemind settings live only in config-hivemind.yaml.
+  # HIVE_API_KEY remains the sole environment secret.
+  CONFIG_FILE = 'config-hivemind.yaml'
+  REQUIRED_CONFIG = %w[
+    api_base provider model providers history_size history_line_len
+    max_reply_len trim_tail_chars auto_compaction_min_chars triggers
+    log_turn_events min_interval greet_interval log_event_interval
+  ].freeze
   # Identity headers for the OpenCode Go gateway (required, not optional):
   # a custom User-Agent (never a generic SDK/HTTP-library name) plus a
   # stable per-conversation session id (x-opencode-session) for routing
   # and prompt caching. Both are hardcoded/deterministic — no knobs.
   USER_AGENT = 'factorio-hivemind/1.0'
 
-  # Models that are only available via the Responses API (Zen: /v1/responses).
-  # Auto-selects :openai_responses for models that require that API.
-  RESPONSES_MODELS = %w[muse-spark-1.3-contributor-free].freeze
-  def self.provider_for(model)
-    return :openai_responses if RESPONSES_MODELS.include?(model) || model.to_s.downcase.include?('muse-spark')
-    DEFAULT_PROVIDER
+  def self.load_config(path = CONFIG_FILE)
+    raise Errno::ENOENT, "missing #{path}; copy config-hivemind.yaml.example" unless File.file?(path)
+    config = YAML.safe_load_file(path) || {}
+    missing = REQUIRED_CONFIG.reject { |key| config.key?(key) }
+    raise ArgumentError, "missing #{path} keys: #{missing.join(', ')}" unless missing.empty?
+    config
   end
 
   # Responses-API-only hack: the gem chains every request onto the last
@@ -81,36 +84,10 @@ class HiveMindAgent
     RubyLLM::Providers::OpenAIResponses.prepend(StatelessResponses) unless RubyLLM::Providers::OpenAIResponses.ancestors.include?(StatelessResponses)
   end
 
-  # Trigger phrases (case-insensitive, WHOLE-WORD match). Word-boundary
-  # matching keeps short/vague phrases from firing inside other words:
-  # "hm" must not page on "shmoose", and a player named "HivemindFan"
-  # shouldn't page the real one just by chatting. Punctuation around a
-  # phrase still matches ("Hivemind?", "hm, hello", "GOOD BOT!").
-  # "good bot"/"goodbot" keep the conversation alive after a reply
-  # (players who get an answer often say thanks — reply in character).
-  TRIGGERS = ['hivemind', 'good bot', 'goodbot', 'hm', 'hive']
   # The agent's OWN name — its replies are queued with this as the player
   # and filtered from live prompts (they live in the conversation). Must
   # never become a compaction target: the agent is not a player.
   AGENT_NAME = 'hivemind'
-  MIN_INTERVAL = 5.0            # min seconds between LLM calls from the SAME player (anti-spam)
-  MAX_REPLY_LEN = 400           # truncate fallback replies (Factorio chat is ~500 chars)
-  # Max UNREAD console lines kept between prompts. NOT a limit on what the
-  # model sees (that's the conversation) — the queue drains on every
-  # prompt, so this only bounds the case of a LONG silence with no
-  # "hivemind" trigger, where thousands of lines would otherwise overflow
-  # the next prompt's context. 1000 ≈ ~40k tokens, far beyond any real
-  # gap; older lines are dropped with a warning if ever exceeded.
-  HISTORY_SIZE = 1000
-  # Recent-context budget (in content characters) kept AFTER a successful
-  # compaction: the pass drops everything it saw EXCEPT the newest
-  # stretch that fits this budget, so the session keeps recent
-  # conversational flow instead of starting cold. Size-based, not count-
-  # based: message sizes vary wildly (a turn can be one short line or a
-  # multi-KB prompt dump).
-  TRIM_TAIL_CHARS = 20_000
-  HISTORY_LINE_LEN = 120        # per-line clip in the history context
-  GREET_INTERVAL = 10.0         # min seconds between join greetings
   # Game-log watcher (factorio-current.log tail): scenario `log()` events
   # in the common `event=<name>, k=v, ...` format from freeplay.lua/reset.lua
   # (player-died, map-reset, research-finished, evo-stage, apex-spitter,
@@ -118,20 +95,12 @@ class HiveMindAgent
   # Only TURN_EVENTS additionally fire a dedicated turn (so the model can
   # react now) followed by an auto-compaction — a map reset closes a
   # round; other events stay queue-only. Repeats inside
-  # LOG_EVENT_INTERVAL stay queue-only. Matching is by parsed event name
+  # the configured log-event interval stay queue-only. Matching is by parsed event name
   # (see #log_event_name), so adding a turn event is one entry here.
   LOG_EVENT_PREFIX = 'event='
-  LOG_TURN_EVENTS = %w[map-reset].freeze
-  LOG_EVENT_INTERVAL = 300.0    # min seconds between log-event turns (5 min)
-  # Auto-compaction gate: only distill when the session holds at least
-  # this many characters of conversation — 20x what post-compaction trim
-  # KEEPS (TRIM_TAIL_CHARS), ~400k chars ≈ 100k tokens ≈ 10% of a 1M-token
-  # window. Below that there is little to distill and the pass would be a
-  # wasted LLM call. Manual /compact ignores this.
-  AUTO_COMPACTION_MIN_CHARS = TRIM_TAIL_CHARS * 20
   # Post-compaction history trim (the /compact path — replaces the old
   # full wipe): drop exactly the messages the pass included, MINUS the
-  # newest stretch that fits TRIM_TAIL_CHARS, which stays so the session
+  # newest stretch that fits the configured trim budget, which stays so the session
   # keeps recent conversational flow and context. Size-based, not count-
   # based: message sizes vary wildly (a turn can be one short line or a
   # multi-KB prompt dump). Console lines that arrived mid-pass are
@@ -177,26 +146,15 @@ class HiveMindAgent
   end
 
   # rcon: an RconClient (for game.print replies). Chat completions need
-  # an API key: HIVE_API_KEY env by default; the api_key PARAM exists as
-  # the specs' injection point ('sk-test') — production never passes it.
+  # an API key from HIVE_API_KEY (or the configured model key env).
   attr_reader :model
   attr_reader :last_trigger
   attr_reader :memory_store
   attr_reader :models
   attr_reader :triggers
 
-  # Cached packet-derived player attributes (lib/player_attrs.rb),
-  # or nil when the agent is used standalone (no @attrs object).
-  attr_accessor :attrs
-
-  # Cached PlayerDatabase (lib/player_db.rb) for admin status and
-  # targeted RCON enrichment writes, or nil for standalone agents
-  # (fall back to direct RCON admin data).
-  attr_accessor :player_db
-
-  # Callable returning the current game tick for cached stats,
-  # or nil. Set by FactorioSniffer to @game_tick.
-  attr_accessor :current_tick
+  # Packet-derived player attributes, database, and current-tick provider.
+  attr_accessor :attrs, :player_db, :current_tick
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
@@ -207,14 +165,14 @@ class HiveMindAgent
   def max_reply_len = @max_reply_len
   def auto_compaction_min_chars = @auto_compaction_min_chars
 
+  # A model's settings are fully resolved at load (its provider group's
+  # provider/api_base/api_key_env, overridden by the model entry itself).
   def model_settings(model)
     @model_configs.find { |config| config[:name] == model } || {}
   end
 
   def model_provider(model)
-    configured = model_settings(model)[:provider]&.to_sym || @configured_provider
-    return configured if configured
-    self.class.provider_for(model)
+    (model_settings(model)[:provider] || @configured_provider).to_sym
   end
 
   def api_base_for(model)
@@ -222,10 +180,8 @@ class HiveMindAgent
   end
 
   def api_key_for(model)
-    return @injected_api_key if @injected_api_key
-    config = model_settings(model)
-    env_name = (config[:api_key_env] || 'HIVE_API_KEY').to_s
-    ENV[env_name] || ENV['HIVE_API_KEY'] || config[:api_key] || @default_api_key
+    env_name = model_settings(model)[:api_key_env] || 'HIVE_API_KEY'
+    ENV[env_name] || ENV['HIVE_API_KEY']
   end
   # Stable OpenCode session id (x-opencode-session), one per conversation.
   # Reload-safe like the mutexes above: a hot-reloaded agent keeps its
@@ -233,9 +189,8 @@ class HiveMindAgent
   # its id lazily on first use instead of sending a blank header.
   def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
-  def initialize(rcon:, api_key: nil, session_path: nil, memory_dir: nil,
-                 attrs: nil, current_tick: nil, player_db: nil,
-                 api_base: nil, model: nil)
+  def initialize(rcon:, attrs:, current_tick:, player_db:,
+                 session_path: nil, memory_dir: nil, config_file: CONFIG_FILE)
     @attrs = attrs
     @current_tick = current_tick
     @player_db = player_db
@@ -243,7 +198,7 @@ class HiveMindAgent
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
     @last_greet = 0.0
-    @last_log_event = 0.0       # last log-event turn time (LOG_EVENT_INTERVAL rate limit)
+    @last_log_event = 0.0       # last log-event turn time
     @log_watcher = nil          # log-tail thread (survives hot reloads; revived if dead)
     @mutex = Mutex.new
     # Separate rate-limit state from completions and log-watcher callbacks.
@@ -301,34 +256,45 @@ class HiveMindAgent
     @session_players = Set.new
     @session_players_mutex = Mutex.new
 
-    # ── LLM wiring. Model/base/provider and limits come from
-    #    config-hivemind.yaml; only the API key is an environment secret.
-    #    Missing key, missing gem, or bad provider config now raises —
-    #    FactorioSniffer rescues and leaves @agent=nil (hard fail, no
-    #    disabled object).
-    hive_config = File.exist?('config-hivemind.yaml') ? (YAML.load_file('config-hivemind.yaml') || {}) : {}
-    @injected_api_key = api_key
-    @default_api_base = api_base || hive_config['api_base'] || DEFAULT_API_BASE
-    @default_api_key = hive_config['api_key']
-    @configured_provider = hive_config['provider']&.to_sym
-    entries = Array(hive_config['models'] || hive_config['model'] || DEFAULT_MODEL)
-    @model_configs = entries.filter_map do |entry|
-      config = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
-      name = config[:name].to_s
-      name.empty? ? nil : config.merge(name: name)
+    # ── LLM wiring. Every non-secret setting is required from
+    #    config-hivemind.yaml; HIVE_API_KEY is the only environment secret.
+    #    Missing config/key or bad provider config raises; FactorioSniffer
+    #    rescues and leaves @agent=nil.
+    hive_config = self.class.load_config(config_file)
+    @default_api_base = hive_config.fetch('api_base')
+    @configured_provider = hive_config.fetch('provider').to_sym
+    @provider_groups = (hive_config['providers'] || {}).to_h do |name, fields|
+      [name.to_s, (fields || {}).transform_keys(&:to_sym)]
+    end
+    # Models live UNDER their provider group: the group's provider/api_base/
+    # api_key_env apply to all of them, a model entry may override any field.
+    # Flattened once here, so model_settings stays a plain lookup. Order
+    # (providers, then models within a provider) IS the /model + fallback
+    # order.
+    @model_configs = @provider_groups.flat_map do |_group_name, group|
+      Array(group[:models]).map do |entry|
+        config = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
+        name = config[:name].to_s
+        next if name.empty?
+
+        group.merge(config).merge(name: name, provider: group[:provider] || @configured_provider)
+      end
     end.uniq { |config| config[:name] }
-    @model = model || hive_config['model'] || @model_configs.first&.fetch(:name, nil) || DEFAULT_MODEL
-    @model_configs << { name: @model } unless @model_configs.any? { |config| config[:name] == @model }
     @models = @model_configs.map { |config| config[:name] }
+    @model = hive_config.fetch('model')
+    raise ArgumentError, "model #{@model.inspect} is not present in models" unless @models.include?(@model)
     @provider = model_provider(@model)
     llm_api_key = api_key_for(@model)
-    @history_size = (hive_config['history_size'] || HISTORY_SIZE).to_i
-    @history_line_len = (hive_config['history_line_len'] || HISTORY_LINE_LEN).to_i
-    @max_reply_len = (hive_config['max_reply_len'] || MAX_REPLY_LEN).to_i
-    @trim_tail_chars = (hive_config['trim_tail_chars'] || TRIM_TAIL_CHARS).to_i
-    @auto_compaction_min_chars = (hive_config['auto_compaction_min_chars'] || AUTO_COMPACTION_MIN_CHARS).to_i
-    @triggers = Array(hive_config['triggers'] || TRIGGERS).map(&:to_s)
-    @log_turn_events = Array(hive_config['log_turn_events'] || LOG_TURN_EVENTS).map(&:to_s)
+    @history_size = hive_config.fetch('history_size').to_i
+    @history_line_len = hive_config.fetch('history_line_len').to_i
+    @max_reply_len = hive_config.fetch('max_reply_len').to_i
+    @trim_tail_chars = hive_config.fetch('trim_tail_chars').to_i
+    @auto_compaction_min_chars = hive_config.fetch('auto_compaction_min_chars').to_i
+    @triggers = Array(hive_config.fetch('triggers')).map(&:to_s)
+    @log_turn_events = Array(hive_config.fetch('log_turn_events')).map(&:to_s)
+    @min_interval = hive_config.fetch('min_interval').to_f
+    @greet_interval = hive_config.fetch('greet_interval').to_f
+    @log_event_interval = hive_config.fetch('log_event_interval').to_f
 
     raise ArgumentError, "no API key configured for #{@model}" if llm_api_key.nil?
 
@@ -531,7 +497,7 @@ class HiveMindAgent
   # per session) so the welcome is informed by who they are.
   def greet_join(name, line, attrs = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     rate_mutex.synchronize do
-      return if now - @last_greet < GREET_INTERVAL
+      return if now - @last_greet < @greet_interval
       @last_greet = now
     end
     prompt = turn_prompt(
@@ -576,7 +542,7 @@ class HiveMindAgent
   # (append_history) so it rides along with whatever prompt comes next;
   # only TURN_EVENTS (a map reset closes a round: distill memories while
   # the session is fresh) additionally fire a dedicated turn on the FIRST
-  # match in LOG_EVENT_INTERVAL — react in chat if players would care —
+  # match within the configured log-event interval — react in chat if players would care —
   # and then an auto-compaction. Rate limit runs on rate_mutex (packet-style
   # thread — never touches @mutex). async:false runs the turn inline
   # (tests / synchronous callers).
@@ -588,7 +554,7 @@ class HiveMindAgent
     return unless @log_turn_events.include?(name)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     rate_mutex.synchronize do
-      return if now - @last_log_event < LOG_EVENT_INTERVAL
+      return if now - @last_log_event < @log_event_interval
       @last_log_event = now
     end
     return run_log_event_turn(text) unless async
@@ -598,7 +564,7 @@ class HiveMindAgent
 
   # The dedicated reaction turn for one log event: build the prompt, get a
   # reply, then distill the round into long-term memory. Compaction is
-  # skipped when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or
+  # skipped when there is little to compact (configured auto-compaction gate) or
   # a pass is already running (compact_memory! guards that itself). On
   # success the session is TRIMMED (same as /compact) so a repeated map
   # reset finds a thin session and skips — without the trim every reset
@@ -613,7 +579,7 @@ class HiveMindAgent
     begin
       send_reply(complete(prompt))
       # After reacting: distill the round into long-term memory. Skipped
-      # when there is little to compact (AUTO_COMPACTION_MIN_CHARS) or a
+      # when there is little to compact (configured auto-compaction gate) or a
       # pass is already running (compact_memory! guards that itself).
       # Trim on success (session_players cleared, compacted history dropped)
       # so repeated resets don't re-compact the same round.
@@ -868,8 +834,6 @@ class HiveMindAgent
   def context_snapshot
     stats = player_stat_lines
     return "Online players (#{stats.size}): #{stats.join('; ')}." unless stats.empty?
-    # No stats available (standalone agent, RCON down): fall back to the
-    # packet-derived online roster's bare names.
     online = online_player_list
     return '' if online.empty?
     "Online players (#{online.size}): #{online.join(', ')}"
@@ -913,7 +877,7 @@ class HiveMindAgent
 
   # Enqueue a chat/console line. player is nil for bare console lines
   # (join/leave events); chat and replies carry the speaker name. When the
-  # queue exceeds HISTORY_SIZE (no hivemind trigger in a long while), the
+  # queue exceeds the configured history limit (no hivemind trigger in a long while), the
   # OLDEST unread lines are dropped with a warning — the next prompt stays
   # bounded.
   def append_history(player, message)
@@ -938,65 +902,39 @@ class HiveMindAgent
     persist_queue! if @session_path
   end
 
-  # Names of players currently in-game. Primary source: the
-  # sniffer's packet-derived online tracking
-  # (PlayerAttrs#online_names). If the agent is standalone
-  # (no @attrs object), fall back to an RCON roster query.
-  # Names are force-cleaned: wire-derived names may be
-  # binary-flagged and must not taint the UTF-8 context snapshot.
+  # Names of players currently in-game from packet-derived tracking.
+  # Names are force-cleaned so wire-derived bytes cannot taint the prompt.
   def online_player_list
-    if @attrs
-      return @attrs.online_names.map { |n| clean_text(n) }
-    end
-    @rcon&.connected_players&.map { |p| clean_text(p[:name]) } || []
+    @attrs.online_names.map { |n| clean_text(n) }
   rescue StandardError => e
-    log_error('online-player query failed', e)
+    log_error('online-player snapshot failed', e)
     []
   end
 
-  # Current game tick for cached stats snapshots, or nil when the
-  # agent is standalone or no tick has been observed yet.
   def current_tick_value
-    @current_tick&.call
+    @current_tick.call
   end
 
-  # Attribute snapshot for a specific player. Primary source:
-  # the cached packet-derived attrs (PlayerAttrs accessors).
-  # Newly joined players are not RCON-seeded yet, so they get
-  # ONE targeted RCON enrichment query (RconClient#player_attributes_for)
-  # folded into PlayerAttrs#connect; after that, cached values are
-  # used. Player admin is read from PlayerDatabase when available;
-  # standalone agents fall back to direct RCON player_attributes.
+  # Attribute snapshot for a specific player. Seeded players use the
+  # packet-derived cache; new players get one targeted RCON enrichment
+  # query (RconClient#player_attributes_for) folded into PlayerAttrs.
   def player_attrs_for(name)
-    if @attrs && @attrs.rcon_seeded?(name)
+    if @attrs.rcon_seeded?(name)
       return {
         name: name,
-        admin: @player_db ? @player_db[name]&.fetch(:admin, false) : (@rcon&.player_attributes_for(name)&.fetch(:admin, false) || false),
+        admin: @player_db[name]&.fetch(:admin, false),
         online_time_ticks: @attrs.online_time_ticks(name, current_tick_value),
       }
     end
-    return nil unless @rcon
-    attrs = nil
-    if @rcon.respond_to?(:player_attributes_for)
-      attrs = @rcon.player_attributes_for(name)
-    end
-    # Targeted lookup can miss offline/disconnected players; fall
-    # back to the full dump for standalone agents / missing data.
-    if attrs.nil? && @rcon.respond_to?(:player_attributes)
-      attrs = @rcon.player_attributes&.find { |p| p[:name] == name }
-    end
+    attrs = @rcon.player_attributes_for(name)
     return nil unless attrs
-    if @attrs && !@attrs.rcon_seeded?(name)
-      @attrs.connect(name, current_tick_value, attrs)
-      @player_db[attrs[:index]] = {name: name, admin: attrs[:admin]}
-      {
-        name: name,
-        admin: @player_db ? @player_db[name]&.fetch(:admin, false) : attrs[:admin],
-        online_time_ticks: @attrs.online_time_ticks(name, current_tick_value),
-      }
-    else
-      attrs
-    end
+    @attrs.connect(name, current_tick_value, attrs)
+    @player_db[attrs[:index]] = {name: name, admin: attrs[:admin]}
+    {
+      name: name,
+      admin: @player_db[name]&.fetch(:admin, false),
+      online_time_ticks: @attrs.online_time_ticks(name, current_tick_value),
+    }
   rescue StandardError => e
     log_error("player attrs query failed for #{name}", e)
     nil
@@ -1017,38 +955,19 @@ class HiveMindAgent
     " — they #{facts.join(' and ')}"
   end
 
-  # Player attribute lines for the system context, queried live from RCON
-  # (LuaPlayer attrs — same reasoning as online_player_list: replies need
-  # RCON anyway). Names are force-cleaned (see online_player_list).
-  # One "Name: total-play-time (flags)" fragment per CONNECTED player.
-  # Offline players are omitted entirely — the prompt covers who is online
-  # right now; lifetime stats of everyone else are noise (and a growing
-  # token cost on long-lived servers). Flags: admin; afk <time> while
-  # connected and idle.
-  # Player attribute lines for the system context. Primary source:
-  # the cached packet-derived attrs (PlayerAttrs#online_names + per-player
-  # accessors) seeded from RCON at startup and maintained by packets.
-  # Offline players are omitted entirely — the prompt covers who is
-  # online right now; lifetime stats of everyone else are noise (and
-  # a growing token cost on long-lived servers). Flags: admin; afk
-  # <time> while connected and idle. If the agent is standalone
-  # (no @attrs object), fall back to a direct RCON player_attributes
-  # query.
+  # One "Name: total-play-time (flags)" fragment per connected player.
+  # Offline players and lifetime stats for players not currently online are
+  # intentionally omitted. Flags: admin; afk while connected and idle.
   def player_stat_lines
-    if @attrs
-      tick = current_tick_value
-      names = @attrs.online_names
-      list = names.map do |name|
-        {
-          name: name,
-          connected: true,
-          admin: @player_db ? @player_db[name]&.fetch(:admin, false) : (@rcon&.player_attributes_for(name)&.fetch(:admin, false) || false),
-          online_time_ticks: @attrs.online_time_ticks(name, tick),
-          afk_time_ticks: @attrs.afk_time_ticks(name, tick),
-        }
-      end
-    else
-      list = @rcon ? (@rcon.player_attributes || []) : []
+    tick = current_tick_value
+    list = @attrs.online_names.map do |name|
+      {
+        name: name,
+        connected: true,
+        admin: @player_db[name]&.fetch(:admin, false),
+        online_time_ticks: @attrs.online_time_ticks(name, tick),
+        afk_time_ticks: @attrs.afk_time_ticks(name, tick),
+      }
     end
     list.select { |p| p[:connected] }.map do |p|
       time = format_ticks(p[:online_time_ticks] || p[:online_time])
@@ -1107,7 +1026,7 @@ class HiveMindAgent
     # must not turn a queued spam burst into separately accepted triggers.
     rate_mutex.synchronize do
       last = @last_ask_at[player]
-      return false if last && now - last < MIN_INTERVAL
+      return false if last && now - last < @min_interval
       @last_ask_at[player] = now
     end
 
@@ -1154,7 +1073,8 @@ class HiveMindAgent
   # queue or marks memories as sent.
   def try_model!(model, message = nil, player: 'tester')
     m = clean_text(model.to_s).strip
-    return "Error: model name empty — usage: /try <model> [message]" if m.empty?
+    return "Error: model name empty — usage: /try <configured-model> [message]" if m.empty?
+    return "Error: model #{m.inspect} is not configured. Available: #{@models.join(', ')}" unless @models.include?(m)
     if message.nil? || clean_text(message.to_s).strip.empty?
       trig = @last_trigger
       return "No previous trigger to try (no hivemind message yet) — pass a message: /try <model> <message>" unless trig

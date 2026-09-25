@@ -18,12 +18,12 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_soal_seeded_on_first_run_only
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
       assert_equal HiveMindAgent::DEFAULT_SOUL, store.soul, 'SOUL seeded from the default personality'
       # An existing/edited SOUL is never overwritten by a new process.
       store.write_key('soul', 'the factory regained its voice')
-      HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       assert_equal 'the factory regained its voice', store.soul
     end
   end
@@ -36,7 +36,7 @@ class TestHivemindCompaction < Minitest::Test
       store = MemoryStore.new(dir)
       store.seed('soul', 'my custom soul')
       store.write_key('knowledge', 'the bus feeds the mall')
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       sys = agent.instance_variable_get(:@chat).messages.find { |m| m.role == :system }
       content = sys.content.to_s
       # SOUL (personality) and KNOWLEDGE (facts) live in the SYSTEM prompt
@@ -53,7 +53,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_turn_prompt_injects_player_memory_with_dedup
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
       store.write_key('alice', 'alice is building the mall')
 
@@ -82,8 +82,8 @@ class TestHivemindCompaction < Minitest::Test
   # seed their memories from the roster — otherwise they'd be unreachable.
   def test_fresh_session_seeds_online_players_memories
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice', 'carol']),
-                                api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new(connected: ['alice', 'carol']),
+                                session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
       store.write_key('alice', 'alice builds malls')
       store.write_key('carol', 'carol hoards circuits')
@@ -103,7 +103,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_ask_llm_injects_triggering_players_memory
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       agent.instance_variable_get(:@memory_store).write_key('alice', 'alice owes the factory a rocket')
       prompt = capture_prompt(agent) { agent.send(:ask_llm, 'alice', 'hivemind whats my build plan?') }
       assert_includes prompt, '=== memory of alice ==='
@@ -113,7 +113,7 @@ class TestHivemindCompaction < Minitest::Test
 
 
   def test_session_players_covers_every_source_including_join_leave_only
-    agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['zoe']), api_key: 'sk-test', session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new(connected: ['zoe']), session_path: false, memory_dir: false)
     # chat lines (player field set)
     agent.send(:append_history, 'alice', 'hello')
     agent.send(:append_history, 'bob', 'i will build a mall')
@@ -151,7 +151,7 @@ class TestHivemindCompaction < Minitest::Test
   # not rewritten).
   def test_compaction_never_writes_agent_self_memory
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new(connected: ['alice']), api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new(connected: ['alice']), session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
       store.write_key('hivemind', 'stray blob from older build')
       live = agent.instance_variable_get(:@chat)
@@ -190,7 +190,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_compact_memory_single_pass_and_leaves_live_chat_alone
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       live = agent.instance_variable_get(:@chat)
       live.add_message(role: :user, content: 'turn: alice wants to build a mall')
       live.add_message(role: :assistant, content: 'the mall will feed the factory')
@@ -259,12 +259,12 @@ class TestHivemindCompaction < Minitest::Test
       agent.trim_session_after_compaction!
       kept = live.messages
       # refreshed system prompt (memories were rewritten on disk) + a tail
-      # of newest messages that fits TRIM_TAIL_CHARS (plus at least one)
+      # of newest messages that fits the configured trim budget (plus at least one)
       assert_equal :system, kept.first.role
       assert_operator kept.size, :>, 2, 'kept a real tail, not just the system prompt'
       body = kept[1..]
       assert_operator body.sum { |m| m.content.to_s.length }, :<=,
-                      HiveMindAgent::TRIM_TAIL_CHARS + 600, 'tail fits the char budget (+1 overshoot msg)'
+                      agent.instance_variable_get(:@trim_tail_chars) + 600, 'tail fits the char budget (+1 overshoot msg)'
       kept.each { |m| refute_includes m.content.to_s, 'alice wants to build' } # compacted range gone
       assert kept.any? { |m| m.content.to_s.include?('filler') }, 'recent tail kept for flow'
     end
@@ -272,7 +272,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_compact_memory_fails_on_unparsable_reply_and_keeps_session
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       live = agent.instance_variable_get(:@chat)
       live.add_message(role: :user, content: 'turn: alice says hi')
       agent.send(:append_history, 'alice', 'hivemind hello')
@@ -300,7 +300,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_compact_skips_empty_session
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       refute agent.compact_memory!, 'nothing to compact'
       refute agent.send(:compactable?)
     end
@@ -309,7 +309,7 @@ class TestHivemindCompaction < Minitest::Test
 
   def test_compaction_material_lists_pending_followups
     Dir.mktmpdir do |dir|
-      agent = HiveMindAgent.new(rcon: FakeRcon.new, api_key: 'sk-test', session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       agent.schedule_followup(delay_seconds: 60, task: 'check the mall', name: 'mall')
       material = agent.send(:compaction_material)
       assert_includes material, 'Pending scheduled follow-ups:'

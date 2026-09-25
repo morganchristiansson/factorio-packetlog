@@ -303,22 +303,9 @@ class TestServerMode < Minitest::Test
     assert_raises(Interrupt) { sniffer.handle_interrupt! }
   end
 
-  # ── Test 8: RCON roster parsing + refresh diff ────────────────────────
+  # ── Test 8: RCON attribute parsing + refresh diff ────────────────────
 
-  def test_rcon_roster_parsing_and_sync
-    # JSON payloads (helpers.table_to_json) — parsed with stdlib JSON.parse
-    roster = RconClient.parse_roster("[{\"i\":1,\"n\":\"morganc\"},{\"i\":2,\"n\":\"bob\"}]\n")
-    assert_equal [{ index: 1, name: 'morganc' }, { index: 2, name: 'bob' }], roster,
-                 'parse_roster parses the JSON body'
-    # escaped quote in a name (JSON handles escaping natively)
-    roster = RconClient.parse_roster("[{\"i\":7,\"n\":\"a \\\"quoted\\\" name\"}]")
-    assert_equal [{ index: 7, name: 'a "quoted" name' }], roster,
-                 'parse_roster unescapes quotes in names'
-    # valid empty roster
-    assert_equal [], RconClient.parse_roster("[]\n"), 'empty roster parses to []'
-    # non-JSON payload
-    assert_nil RconClient.parse_roster('some random error text'), 'non-JSON payload → nil'
-
+  def test_rcon_attribute_parsing_and_sync
     # player attrs parse (JSON). serpent.line was abandoned: it sorts keys
     # alphabetically (a, c, i, k, n, o — NOT insertion order), which silently
     # broke an order-sensitive regex and starved the agent's stats context.
@@ -337,7 +324,7 @@ class TestServerMode < Minitest::Test
     # verified live). A non-zero index writes to that player's CLIENT and via
     # /sc runtime is skipped entirely. Guard: every write_file call's LAST
     # argument must be 0 (or absent).
-    %w[ROSTER_WRITE_LUA PLAYER_ATTRS_WRITE_LUA DUMP_PROTOTYPES_LUA].each do |const_name|
+    %w[PLAYER_ATTRS_WRITE_LUA DUMP_PROTOTYPES_LUA].each do |const_name|
       lua = RconClient.const_get(const_name).to_s
       # Match each helpers.write_file call, allowing one nested paren level
       # (e.g. helpers.table_to_json(t), table.concat(o,"\n")).

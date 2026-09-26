@@ -18,7 +18,7 @@ backend: argos
 # google_api_key: AIza...
 
 # Equivalent env override (wins over the value above):
-#   GOOGLE_TRANSLATE_API_KEY=... sudo ruby factorio-sniffer.rb
+#   GOOGLE_TRANSLATE_API_KEY=... sudo ruby factorio-packettools.rb
 
 # Locales to translate between. 'en' is always the pivot
 # (translation target) — English speakers get relayed to other

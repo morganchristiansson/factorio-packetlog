@@ -121,7 +121,7 @@ player chat ──► write_to_console action (C→S packet)
 ```
 
 - **Input**: packet-decoded `write_to_console` actions, fed from
-  `FactorioSniffer#log_action`. No server-side mods or log tailing needed —
+  `FactorioPacketTools#log_action`. No server-side mods or log tailing needed —
   chat is read straight off the wire. Note: chat arrives as an input-action
   **segment** whose type follows the server's `defines.input_action`
   (2.0: 104, 2.1: 106). The sniffer auto-detects the protocol version via
@@ -228,7 +228,7 @@ enables in **server mode** whenever an API key is set; no key = no AI.
 Set the key (the agent's only config):
 
 ```bash
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb        # server mode; agent auto-on
+HIVE_API_KEY=... sudo ruby factorio-packettools.rb        # server mode; agent auto-on
 ```
 
 The key comes from the environment **first** (`api_key_env`, by default
@@ -276,7 +276,7 @@ conversation identity, and rotated when a compacted session starts.
 Example:
 
 ```bash
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
+HIVE_API_KEY=... sudo ruby factorio-packettools.rb
 ```
 
 In server mode with a key set, the agent is on (watch for the

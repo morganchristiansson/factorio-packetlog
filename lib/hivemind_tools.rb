@@ -4,7 +4,7 @@ require 'ruby_llm'
 
 # RubyLLM tool classes for the Hivemind agent (see hivemind.rb). Kept in
 # their own file so the agent class stays readable; hot-reloadable — listed
-# in SNIFFER_LIBS (factorio-sniffer.rb) so Ctrl-C `load` redefines them.
+# in SNIFFER_LIBS (factorio-packettools.rb) so Ctrl-C `load` redefines them.
 
 # RubyLLM tool: send a chat message to in-game Factorio chat via RCON.
 # The LLM calls this to respond to players. Instantiated with the rcon

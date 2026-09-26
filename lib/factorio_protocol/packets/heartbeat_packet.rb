@@ -189,7 +189,7 @@ module FactorioProtocol
         # packets. Same-closure segments are merged here (ordered by
         # seg_no); cross-packet groups carry seg_no/total_segs on the
         # action for the sniffer to reassemble (see
-        # FactorioSniffer#chat_action_data).
+        # FactorioPacketTools#chat_action_data).
         segs = []
         seg_count.times do
           break if offset >= data.bytesize

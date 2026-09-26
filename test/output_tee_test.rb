@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-# Tests for the console history tee (OutputTee in factorio-sniffer.rb):
+# Tests for the console history tee (OutputTee in factorio-packettools.rb):
 # everything printed lands in both streams, puts keeps its newline
 # semantics, and concurrent threads never interleave mid-line.
 # Run: ruby -Ilib test/output_tee_test.rb
 
 # Entry first: its bundler/setup must run before any gem activation.
-require_relative '../factorio-sniffer'
+require_relative '../factorio-packettools'
 require 'minitest/autorun'
 require 'stringio'
 

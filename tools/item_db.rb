@@ -36,14 +36,14 @@ abort "Cannot locate script-output dir for factorio pid #{detected[:pid]}" unles
 
 rcon.dump_prototype_files
 
-items_f = File.join(sod, "factorio-sniffer-items.txt")
+items_f = File.join(sod, "factorio-packettools-items.txt")
 abort "Item dump failed — no file at #{items_f}" unless File.exist?(items_f) && File.size(items_f) > 0
 out = ARGV[0] || File.expand_path("../external/item_prototypes_runtime.txt", __dir__)
 File.write(out, File.read(items_f))
 puts "Wrote #{File.readlines(items_f).size} items to #{out}"
 
 unless ARGV[0]
-  ents_f = File.join(sod, "factorio-sniffer-entities.txt")
+  ents_f = File.join(sod, "factorio-packettools-entities.txt")
   if File.exist?(ents_f) && File.size(ents_f) > 0
     out = File.expand_path("../external/entity_prototypes_runtime.txt", __dir__)
     File.write(out, File.read(ents_f))

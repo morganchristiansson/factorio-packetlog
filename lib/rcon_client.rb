@@ -27,7 +27,7 @@ class RconClient
   # the packet stream. Same write_file/print duality as the roster — at
   # ~80 B/player the attrs JSON exceeds the 4KB rcon.print cap beyond
   # ~50 players.
-  PLAYER_ATTRS_FILENAME = 'factorio-sniffer-attrs.json'
+  PLAYER_ATTRS_FILENAME = 'factorio-packettools-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
     'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
@@ -43,7 +43,7 @@ class RconClient
   DUMP_PROTOTYPES_LUA =
     'local function d(k,f) local n={} for x in pairs(prototypes[k]) do n[#n+1]=x end ' \
     'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n"), false, 0) end ' \
-    'd("item","factorio-sniffer-items.txt") d("entity","factorio-sniffer-entities.txt")'
+    'd("item","factorio-packettools-items.txt") d("entity","factorio-packettools-entities.txt")'
 
   # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
   # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}].
@@ -121,7 +121,7 @@ class RconClient
   end
 
   # Write item + entity prototype name dumps to the server's script-output
-  # dir (files factorio-sniffer-items.txt / factorio-sniffer-entities.txt)
+  # dir (files factorio-packettools-items.txt / factorio-packettools-entities.txt)
   # via helpers.write_file. Returns true when the command ran; the caller
   # must read the files back (see ServerDetect.script_output_dir).
   def dump_prototype_files

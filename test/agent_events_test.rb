@@ -3,7 +3,7 @@ require 'bundler/setup'
 require 'minitest/autorun'
 require 'timeout'
 require 'tmpdir'
-require_relative '../factorio-sniffer'
+require_relative '../factorio-packettools'
 
 class TestAgentEvents < Minitest::Test
   class Recorder
@@ -28,7 +28,7 @@ class TestAgentEvents < Minitest::Test
       @events << args
     end
     Dir.mktmpdir do |dir|
-      sniffer = FactorioSniffer.new({player_db: nil}, pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
+      sniffer = FactorioPacketTools.new({player_db: nil}, pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
       sniffer.instance_variable_set(:@agent, hive)
       sniffer.instance_variable_set(:@translation_agent, translation)
       action = {name: 'write_to_console', game_player: 1, type: 1, data: "\x01\x02hi".b}
@@ -94,7 +94,7 @@ class TestAgentEvents < Minitest::Test
 
   def test_lazy_timeouts_run_after_packet_liveness_refresh_and_not_for_replay
     Dir.mktmpdir do |dir|
-      sniffer = FactorioSniffer.new({server: true, host_ips: ['10.0.0.1'], interface: 'fake'},
+      sniffer = FactorioPacketTools.new({server: true, host_ips: ['10.0.0.1'], interface: 'fake'},
                                     pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
       attrs = sniffer.instance_variable_get(:@attrs)
       attrs.roster_online('active', 1)

@@ -19,7 +19,7 @@ class TestPacketFixtures < Minitest::Test
     FactorioProtocol.reset_version
   end
 
-  # Simulate FactorioSniffer#chat_action_data reassembly: merge segments of
+  # Simulate FactorioPacketTools#chat_action_data reassembly: merge segments of
   # a split write_to_console (keyed by player, ordered by seg_no) and return
   # the full payload. Mirrors the sniffer so the reassembly path is tested
   # end-to-end.

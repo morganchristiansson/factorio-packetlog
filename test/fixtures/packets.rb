@@ -445,7 +445,7 @@ REAL_PACKET_FIXTURES = [
   # FIRST segment carries the [player_index][total_len][text...] payload
   # header (player 0x00/0x40/0x42/…, total length as a Factorio uint32v —
   # 1 byte for lengths < 0xff, [0xff][uint32 LE] above); continuation
-  # segments are raw text. FactorioSniffer#chat_action_data reassembles
+  # segments are raw text. FactorioPacketTools#chat_action_data reassembles
   # them by (player, total_segs, seg_no). decode_chat must return the FULL
   # message, and players >= 64 (0x40/0x42/…) must NOT be read as a length
   # prefix (that read the player byte as a length and TRUNCATED long

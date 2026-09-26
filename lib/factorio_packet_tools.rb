@@ -22,7 +22,7 @@ require_relative 'player_attrs'
 # ─────────────────────────────────────────────────────────────────────
 # Main Application
 # ─────────────────────────────────────────────────────────────────────
-class FactorioSniffer
+class FactorioPacketTools
   # Seconds without a C→S heartbeat before a player is considered gone
   # (server mode only). Clients heartbeat continuously (every 2 ticks at
   # 60 UPS ≈ 33ms), so this is a very conservative ceiling: a false
@@ -41,7 +41,7 @@ class FactorioSniffer
   # each file (redefining classes); `require` would only load once.
   # Constant-redefinition warnings are expected and silenced during load.
   RELOADABLE_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail agent_events memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_sniffer
+    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail agent_events memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_packet_tools
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -182,14 +182,14 @@ class FactorioSniffer
         begin
           @rcon.dump_prototype_files
           unless @item_db
-            f = File.join(@rcon.script_output_dir, 'factorio-sniffer-items.txt')
+            f = File.join(@rcon.script_output_dir, 'factorio-packettools-items.txt')
             if File.exist?(f) && File.size(f) > 0
               @item_db = ItemDB.new(f)
               puts "Item DB populated from RCON: #{@item_db.size} items"
             end
           end
           unless @entity_db
-            f = File.join(@rcon.script_output_dir, 'factorio-sniffer-entities.txt')
+            f = File.join(@rcon.script_output_dir, 'factorio-packettools-entities.txt')
             if File.exist?(f) && File.size(f) > 0
               @entity_db = ItemDB.new(f)
               puts "Entity DB populated from RCON: #{@entity_db.size} entities"

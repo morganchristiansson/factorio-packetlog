@@ -31,12 +31,12 @@ Run the sniffer ON the game server host.
 ```bash
 # Everything auto-detected — even the interface (only non-loopback
 # interface wins; else server's --bind IP, else default route):
-sudo ruby factorio-sniffer.rb
+sudo ruby factorio-packettools.rb
 
 # Server mode is AUTO-ENABLED for live capture when no explicit mode is
 # given (no `server:`, no `ip:` in config.yaml) and a serving factorio
 # process is detected on this host:
-sudo ruby factorio-sniffer.rb -i ens18
+sudo ruby factorio-packettools.rb -i ens18
 #   → "Auto-enabled SERVER mode: running factorio server detected (pid N)"
 
 # Explicit overrides live in config.yaml:
@@ -182,7 +182,7 @@ press quits. A single Ctrl-C pressed later is another reload — so you can
 reload repeatedly while editing code, and double-tap to shut down.
 Player names are persisted to `players-cache.json` (and language overrides to `players-locale.json`) on reload and at shutdown.
 
-Reloads are IN PLACE: `FactorioSniffer#run` rescues `Interrupt`, calls
+Reloads are IN PLACE: `FactorioPacketTools#run` rescues `Interrupt`, calls
 `reload_code!` (which `load`s every lib file), and `retry`s. Nothing is
 torn down — the running instance keeps ALL its ivars (player DB, stats,
 online map, agent, filters, learned identities) AND the open capture
@@ -194,9 +194,9 @@ mapping (the reload resets segment tables to 2.1) and revives the agent's
 follow-up scheduler thread; `run`'s retry also re-runs `load_roster`, re-
 anchoring the packet-maintained roster to RCON's authoritative view.
 
-Implementation: `factorio-sniffer.rb` is a thin entry point (CLI, traps,
+Implementation: `factorio-packettools.rb` is a thin entry point (CLI, traps,
 one construction); the reloadable classes live in `lib/` and are listed in
-`FactorioSniffer::RELOADABLE_LIBS`. Caveat: reload swaps CODE, not object
+`FactorioPacketTools::RELOADABLE_LIBS`. Caveat: reload swaps CODE, not object
 shape — new ivars need lazy init (`@x ||=`) or a full restart.
 
 ## Tests

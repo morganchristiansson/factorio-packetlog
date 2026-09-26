@@ -132,7 +132,7 @@ for name in pairs(prototypes.entity) do ... end   -- entity IDs (pipette src=4)
 Built-in `/players` lists only names, so the sniffer uses one RCON
 `player_attributes` query instead. It returns JSON rows containing the
 1-indexed game id, name, connection/admin flags, online/afk ticks, and
-locale; `FactorioSniffer` seeds `PlayerAttrs` and `PlayerDatabase` from that
+locale; `FactorioPacketTools` seeds `PlayerAttrs` and `PlayerDatabase` from that
 single response. Later joins are learned from C→S packets, with one
 targeted RCON lookup for a newly joined player's attributes.
 

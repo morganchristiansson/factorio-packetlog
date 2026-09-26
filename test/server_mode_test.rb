@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Test server mode of factorio-sniffer.rb using real packet fixtures.
+# Test server mode of factorio-packettools.rb using real packet fixtures.
 #
 # Verifies:
 #  1. Incoming (C→S, msg 6) packets ARE analyzed
@@ -15,7 +15,7 @@
 
 require 'minitest/autorun'
 require 'tmpdir'
-require_relative '../factorio-sniffer'
+require_relative '../factorio-packettools'
 require_relative 'fixtures/packets'
 
 class TestServerMode < Minitest::Test
@@ -88,7 +88,7 @@ class TestServerMode < Minitest::Test
              else
                { pcap_writer: FakePcapWriter.new }
              end
-    sniffer = FactorioSniffer.new(opts, **kwargs)
+    sniffer = FactorioPacketTools.new(opts, **kwargs)
     begin
       output, = capture_io { yield sniffer }
     ensure
@@ -104,7 +104,7 @@ class TestServerMode < Minitest::Test
     # pcap_writer is a KEYWORD param of new — inside the opts hash it is
     # inert, and swapping the ivar post-hoc orphans the real writer (banner +
     # flusher thread + real files). Pass it as the keyword it is.
-    FactorioSniffer.new(opts, pcap_writer: FakePcapWriter.new)
+    FactorioPacketTools.new(opts, pcap_writer: FakePcapWriter.new)
   end
 
   def capture_records(sniffer)
@@ -682,7 +682,7 @@ class TestServerMode < Minitest::Test
     attrs.roster_online('stale', 2)
     players = attrs.instance_variable_get(:@players)   # internals: age hb directly
     players['alive'][:hb] = now - 1         # heartbeat a second ago → fine
-    players['stale'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)  # silent for timeout+5s → timeout
+    players['stale'][:hb] = now - (FactorioPacketTools::HEARTBEAT_TIMEOUT + 5)  # silent for timeout+5s → timeout
 
     output, = capture_io { sniffer.send(:check_heartbeat_timeouts) }
     refute attrs.online_names.include?('stale'), 'stale player removed from the live roster'
@@ -695,7 +695,7 @@ class TestServerMode < Minitest::Test
     # a heartbeat arriving before the scan must cancel the drop (touch refreshed
     # the timestamp → below the threshold at scan time)
     attrs.roster_online('half', 3)
-    players['half'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 2)
+    players['half'][:hb] = now - (FactorioPacketTools::HEARTBEAT_TIMEOUT + 2)
     sniffer.send(:touch_heartbeat_index, 3, '10.0.0.55')   # fresh proof of life by index
     capture_io { sniffer.send(:check_heartbeat_timeouts) }
     assert attrs.online_names.include?('half'), 'refreshed heartbeat cancels the timeout'
@@ -709,7 +709,7 @@ class TestServerMode < Minitest::Test
     assert_equal 0, players['joiner'][:base_ticks],
                  'connect() gives unseeded records a zero base_ticks'
     sniffer.instance_variable_set(:@game_tick, nil)   # tick never observed
-    players['joiner'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
+    players['joiner'][:hb] = now - (FactorioPacketTools::HEARTBEAT_TIMEOUT + 5)
     output, = capture_io { sniffer.send(:check_heartbeat_timeouts) }
     refute attrs.online_names.include?('joiner'), 'unseeded joiner timed out without raising'
     assert wd_events.include?([:timeout, 'joiner']), 'agent got on_player_event(:timeout) for joiner'
@@ -719,7 +719,7 @@ class TestServerMode < Minitest::Test
     # touch_heartbeat stamps by src_ip resolution too (the packet-top path)
     sniffer.instance_variable_get(:@ip_names)['10.0.0.77'] = ['ripe', true]
     attrs.roster_online('ripe', 4)
-    players['ripe'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 4)
+    players['ripe'][:hb] = now - (FactorioPacketTools::HEARTBEAT_TIMEOUT + 4)
     sniffer.send(:touch_heartbeat, '10.0.0.77')
     capture_io { sniffer.send(:check_heartbeat_timeouts) }
     assert attrs.online_names.include?('ripe'), 'src_ip touch keeps the player alive'
@@ -730,7 +730,7 @@ class TestServerMode < Minitest::Test
     # rejoin; a false negative only registers late).
     sniffer.instance_variable_set(:@rcon, nil)
     attrs.roster_online('gone', 10)
-    players['gone'][:hb] = now - (FactorioSniffer::HEARTBEAT_TIMEOUT + 5)
+    players['gone'][:hb] = now - (FactorioPacketTools::HEARTBEAT_TIMEOUT + 5)
     wd_events.clear
     output, = capture_io { sniffer.send(:check_heartbeat_timeouts) }
     assert wd_events.include?([:timeout, 'gone']), 'disconnected roster player still fires the timeout'

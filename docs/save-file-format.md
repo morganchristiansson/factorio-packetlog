@@ -44,7 +44,7 @@ Two independent loss mechanisms were verified in the live captures:
 2. **Network loss** — the client re-requested blocks it genuinely missed
    (3,719 in one session); retransmissions were byte-identical and captured.
 
-**Fixes in `factorio-sniffer.rb`:**
+**Fixes in `factorio-packettools.rb`:**
 - pcaprub's blocking `each_data` (waits on the fd, no sleep-polling).
 - **Transfer fast path**: msg-13 packets are detected with a one-byte peek
   and written straight to the pcap sink (measured ~5M pps vs 28k pps).

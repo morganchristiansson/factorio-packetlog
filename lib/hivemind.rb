@@ -278,7 +278,7 @@ class HiveMindAgent
 
     # ── LLM wiring. Every non-secret setting is required from
     #    config-hivemind.yaml; HIVE_API_KEY is the only environment secret.
-    #    Missing config/key or bad provider config raises; FactorioSniffer
+    #    Missing config/key or bad provider config raises; FactorioPacketTools
     #    rescues and leaves @agent=nil.
     hive_config = self.class.load_config(config_file)
     # Models live UNDER their provider group, and the endpoint lives with

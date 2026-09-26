@@ -3,7 +3,7 @@ begin
   require 'bundler/setup'
 rescue LoadError
 end
-# factorio-sniffer — live/offline Factorio player action logger
+# factorio-packettools — live/offline Factorio player action logger
 #
 # Captures UDP traffic on the Factorio port, decodes the binary protocol,
 # extracts player actions, and logs them.
@@ -14,9 +14,9 @@ end
 # within QUIT_WINDOW quits.
 #
 # Usage:
-#   Live capture: sudo ruby factorio-sniffer.rb
-#   Server mode:  sudo ruby factorio-sniffer.rb          (auto-detects IP/port/interface from the running factorio process)
-#   Pcap analysis: ruby factorio-sniffer.rb -r capture.pcap
+#   Live capture: sudo ruby factorio-packettools.rb
+#   Server mode:  sudo ruby factorio-packettools.rb          (auto-detects IP/port/interface from the running factorio process)
+#   Pcap analysis: ruby factorio-packettools.rb -r capture.pcap
 #   Player cache (hardcoded): players-cache.json next to the process cwd
 #   Capture: always on for live capture — auto-named captures/server-<port>-<ts>.pcap
 #     (server), latest file is the live one, rotation + retention always on
@@ -39,7 +39,7 @@ require_relative 'lib/pcap'
 require_relative 'lib/live_capture'
 require_relative 'lib/rcon_client'
 require_relative 'lib/hivemind'
-require_relative 'lib/factorio_sniffer'
+require_relative 'lib/factorio_packet_tools'
 require 'yaml'
 
 # ─────────────────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ LOG_KEEP_DAYS = 7
 # Console history log
 # ─────────────────────────────────────────────────────────────────────
 # Tee for $stdout/$stderr: everything printed to the console is also
-# appended to logs/packetlog-<timestamp>.log (same content, nothing
+# appended to logs/packettools-<timestamp>.log (same content, nothing
 # extra) so incident history survives the terminal scrollback. One shared
 # mutex keeps lines from interleaving across the packet/agent threads.
 # Lives here (entry point, never hot-reloaded) so a Ctrl-C reload can't
@@ -118,14 +118,14 @@ def setup_output_log(log_keep_days = LOG_KEEP_DAYS)
   dir = File.join(Dir.pwd, 'logs')
   FileUtils.mkdir_p(dir)
   cutoff = Time.now - log_keep_days * 24 * 3600
-  Dir.glob(File.join(dir, 'packetlog-*.log')).each do |f|
+  Dir.glob(%w[packettools- packetlog-].map { |p| File.join(dir, "#{p}*.log") }).each do |f|
     begin
       File.delete(f) if File.mtime(f) < cutoff
     rescue SystemCallError
       nil
     end
   end
-  path = File.join(dir, "packetlog-#{Time.now.strftime('%Y%m%d-%H%M%S')}.log")
+  path = File.join(dir, "packettools-#{Time.now.strftime('%Y%m%d-%H%M%S')}.log")
   file = File.open(path, 'a')
   file.sync = true
   mutex = Mutex.new
@@ -278,10 +278,10 @@ if __FILE__ == $PROGRAM_NAME
   # The sniffer handles Ctrl-C/SIGHUP itself: first press reloads the lib
   # files IN PLACE (this object keeps every ivar and the open capture
   # handle — zero packet loss, nothing to re-point) and resumes; a second
-  # press within FactorioSniffer::QUIT_WINDOW bubbles up here → finalize
-  # and quit. See FactorioSniffer#handle_interrupt! / #reload_code!.
+  # press within FactorioPacketTools::QUIT_WINDOW bubbles up here → finalize
+  # and quit. See FactorioPacketTools#handle_interrupt! / #reload_code!.
 
-  sniffer = FactorioSniffer.new(options)
+  sniffer = FactorioPacketTools.new(options)
 
   # Interactive filter console: reads commands from stdin in a background
   # thread and dispatches them to the sniffer. Commands: /show /actions

@@ -1,4 +1,4 @@
-# Factorio Packet Sniffer — Agent Context
+# Factorio Packet Tools — Agent Context
 
 ## Project Overview
 
@@ -8,9 +8,9 @@ either on a client or on the game server host (server mode, with RCON).
 
 ## Key Files
 
-- `factorio-sniffer.rb` — Entry point: CLI, signal traps, single sniffer
+- `factorio-packettools.rb` — Entry point: CLI, signal traps, single sniffer
   run (thin)
-- `lib/factorio_sniffer.rb` — Main sniffer class (`FactorioSniffer`); hot
+- `lib/factorio_packet_tools.rb` — Main class (`FactorioPacketTools`); hot
   reload is IN PLACE (`#handle_interrupt!` / `#reload_code!`) — same
   object, same ivars, same capture handle
 - `lib/factorio_protocol.rb` — Protocol parser (ACTIONS table, parsing logic). Input-action IDs are version-dependent (2.0 vs 2.1): `FactorioProtocol.select_version` picks the main + segment maps (auto-detected from RCON `helpers.game_version`; `--protocol-version` overrides). parse_action + format_action_data use the selected table / name-based dispatch (never hardcode 2.1 type IDs). Also parses msg-17 GameInformationRequestReply payloads (`parse_game_info`; fragmented ones reassemble in `server_query.rb`).
@@ -63,7 +63,7 @@ either on a client or on the game server host (server mode, with RCON).
   `players-cache.json`. Add `+1` to decoded values. Network peer ids are NOT game
   indexes (see `docs/player-mapping.md`).
 - **Online tracking**: the sniffer keeps a live `name → index` map of
-  players currently in-game (`FactorioSniffer#online_players`) — seeded
+  players currently in-game (`FactorioPacketTools#online_players`) — seeded
   from the RCON roster, updated on NewPeerInfo / PeerDisconnect / the C→S
   PeerDisconnect quit signal, indexes bound by C→S heartbeats. Survives
   hot reloads. The Hivemind agent reads the packet-derived
@@ -190,16 +190,16 @@ Current AI config surface:
 
 ```bash
 # Server host, everything auto-detected (interface, port, IP, RCON):
-sudo ruby factorio-sniffer.rb
+sudo ruby factorio-packettools.rb
 
 # With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
 # agent auto-enables in server mode (no flag, no extra args):
-HIVE_API_KEY=... sudo ruby factorio-sniffer.rb
+HIVE_API_KEY=... sudo ruby factorio-packettools.rb
 # (Capture is always on; retention defaults bound disk. No key = no AI.
 # Hivemind behavior is configured in config-hivemind.yaml.)
 
 # Pcap from a 2.0 server (action tables differ from 2.1):
-ruby factorio-sniffer.rb -r capture.pcap --protocol-version 2.0
+ruby factorio-packettools.rb -r capture.pcap --protocol-version 2.0
 
 # Validate input-action wire IDs against /toggle-action-logging (root):
 sudo ruby tools/validate_actions.rb --capture 60 --toggle --table 20 --suggest
@@ -211,8 +211,8 @@ ruby tools/measure_action_lens.rb --check captures/server-*.pcap    # does the t
 
 # Client mode / pcap analysis (client mode: `ip: <client ip>` in config.yaml,
 # with no `server:` key):
-sudo ruby factorio-sniffer.rb
-ruby factorio-sniffer.rb -r capture.pcap
+sudo ruby factorio-packettools.rb
+ruby factorio-packettools.rb -r capture.pcap
 
 # RCON admin:
 ruby tools/rcon.rb status          # version/players/admins/time/evolution

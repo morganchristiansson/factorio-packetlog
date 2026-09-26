@@ -92,6 +92,17 @@ content = <<~RUBY
   #
   # SEGMENT_TYPES_20 — input-action segment types for 2.0 (chat arrives via
   # a segment with type 104 = write_to_console; 2.1 uses 106).
+  #
+  # This tool owns NAMES only. The measured client→server payload lengths live
+  # in lib/input_actions_lens_20.rb (C2S_LENS_20), written by
+  # tools/measure_action_lens.rb --type — the by-name lengths above are the 2.1 guesses
+  # that measurement replaced, kept only for actions with no measured length yet.
+  #
+  # This tool owns NAMES only. The measured client→server payload lengths live
+  # in lib/input_actions_lens_20.rb (C2S_LENS_20) and are written by
+  # tools/measure_action_lens.rb --type — the by-name lengths above are the 2.1
+  # guesses that measurement replaced, kept only for actions with no measured
+  # length yet.
   module FactorioProtocol
     ACTIONS_20 = {
   #{actions.join("\n")}

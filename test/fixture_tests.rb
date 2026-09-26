@@ -12,9 +12,11 @@ FIXTURE_DIR = File.join(__dir__, 'fixtures')
 
 class FixtureTests < Minitest::Test
   def teardown
-    # Never leak the version-dependent tables into other tests.
-    FactorioProtocol.actions = FactorioProtocol::ACTIONS
-    FactorioProtocol.segment_types = FactorioProtocol::ACTIONS
+    # Never leak the version-dependent tables into other tests. reset_version
+    # covers actions, segment_types AND c2s_lens — resetting only the first two
+    # left the measured 2.0 lengths in place, which made this file's own
+    # results depend on test order.
+    FactorioProtocol.reset_version
   end
 
   def parse_fixture(name)

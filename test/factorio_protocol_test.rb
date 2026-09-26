@@ -11,6 +11,11 @@ require 'factorio_types'
 class TestFactorioProtocol < Minitest::Test
   def setup
     @item_db = nil
+    # The protocol tables are module-level state (select_version mutates
+    # actions, segment_types AND the measured c2s_lens map), so a test that
+    # switches version must not leak into the next one. reset_version is the
+    # single place that clears all of them.
+    FactorioProtocol.reset_version
   end
 
   # ── TilePos / TileRect ─────────────────────────────────────────
@@ -575,6 +580,55 @@ class TestFactorioProtocol < Minitest::Test
     refute_nil sa
     assert_nil sa[:username], 'binary garbage must not decode as a username'
     assert sa[:hit_unknown], 'desync must stop further sync parsing'
+  end
+
+  # ── 0xFF: escape marker AND the literal value 255 ──────────────────
+  #
+  # The wire writes uint16 values 0..255 in a SINGLE byte, so 255 is written
+  # 0xFF and only 256+ pays the 3-byte escape. factorio_dissector's
+  # decode_uint16v (and this parser, originally) treat 0xFF as an escape
+  # unconditionally, so a closure ending in the two bytes FF FF decoded as a
+  # bogus type and the rest of the closure was garbage — 118 flagged packets
+  # before the fix. The real packet is 2.0's close_remote_view shape: the
+  # 0xFF action (type 255 = set_combinator_description, no payload) is the last
+  # one, followed by the closure's [tick][pad] trailer.
+  #
+  # Only the TYPE is disambiguated (by magnitude: no real input action exceeds
+  # 355 in either version's defines dump). The DELTA of that trailing action
+  # still decodes with its 3-byte escape form, so its player index is wrong —
+  # documented, not silently fixed, because "the escape would read past the
+  # closure" is no proof: open_gui legitimately swallows the trailer.
+  def test_ff_byte_in_a_closure_is_literal_type_255
+    FactorioProtocol.select_version('2.0')
+    # Real 2.0 packet (unknown.packets-20260925-193306, 38 B): render_mode_
+    # changed, then the FF FF action, then the closure trailer.
+    data = ['260693585f59dffa75060000000004ff2601010357007ab400007ee0ffffdbfa750600000000'].pack('H*')
+    acts = extract_actions(FactorioProtocol.parse_udp_payload(data))
+    assert_equal 2, acts.size
+    assert_equal 294, acts[0][:type]
+    assert_equal '0357007ab400007ee0', acts[0][:data].unpack1('H*')
+    # The point of the test: 0xFF here is the LITERAL type 255, not a
+    # truncated escape. Read as an escape it decodes to 0xDBFF and the whole
+    # rest of the closure is garbage.
+    assert_equal 255, acts[1][:type]
+    assert_equal 'set_combinator_description', acts[1][:name]
+    # acts[1]'s PLAYER INDEX is still decoded with a 3-byte escape delta and is
+    # therefore wrong (64220). Deliberately not asserted: the delta has no
+    # sound disambiguation, and pinning a known-wrong index would make the
+    # test celebrate a bug.
+    refute acts.any? { |a| a[:hit_unknown] }
+  end
+
+  def test_ff_byte_still_escapes_for_real_action_ids
+    FactorioProtocol.select_version('2.0')
+    # 300 > 255 is a real action ID and MUST keep its 3-byte escape form
+    data = [0x26, 0x06, 0, 0, 0, 0].pack('C*') +
+           [0].pack('Q<') + [0x02].pack('C') + [0xFF, 0x2C, 0x01, 0x00].pack('C*') +
+           [0, 0, 0, 0, 0, 0, 0, 0].pack('C*')
+    acts = extract_actions(FactorioProtocol.parse_udp_payload(data))
+    assert_equal 1, acts.size
+    assert_equal 300, acts[0][:type]
+    refute acts[0][:hit_unknown]
   end
 
   private

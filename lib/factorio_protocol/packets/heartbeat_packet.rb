@@ -11,6 +11,19 @@ module FactorioProtocol
   # parsers are private to this class because no other message type uses
   # them — "all heartbeat knowledge in one place".
   class HeartbeatPacket < FactorioPacket
+    # Largest defines.input_action in either version's dump (2.1: 355). An
+    # input-action type above this cannot be real, so a 0xFF that "escapes" to
+    # more than this is the literal type 255 instead.
+    MAX_INPUT_ACTION = 400
+
+    # build_terrain's layout (see parse_action): a 10-byte record per tile, the
+    # 5-byte separator 00 00 00 AB 00 between records, and a 3-byte zero tail
+    # after the last one (absent in the 25-byte form). NB 0xAB = 171, the
+    # action's own ID.
+    BT_RECORD = 10
+    BT_RECORD_MARK = "\x00\x00\x00\xAB\x00".b.freeze
+    BT_TAIL = "\x00\x00\x00".b.freeze
+
     attr_reader :heartbeat
 
     private
@@ -226,8 +239,26 @@ module FactorioProtocol
 
     def parse_action(data, offset, last_index, is_drag: false, is_server: false, is_last: false)
       type_offset = offset
+      # 0xFF is BOTH the uint16v escape marker and the literal value 255: the
+      # wire writes 0..255 in a single byte, so 255 (type
+      # set_combinator_description, and any player delta of 255) is one byte
+      # and only 256+ pays the 3-byte escape. factorio_dissector's
+      # decode_uint16v (and this one, originally) treat 0xFF as an escape
+      # unconditionally. Two ways out, both needed:
+      # Only the TYPE is disambiguated, by magnitude: no real input action
+      # exceeds 355 in either version's dump. The DELTA has no such bound — a
+      # delta of 0xFFFF is a legitimate escape, and "the escape would reach
+      # past the closure" is not proof either, because open_gui legitimately
+      # swallows the trailer (3 fixtures depend on it). A trailing `FF FF`
+      # therefore decodes with a 3-byte escape delta; the action count and the
+      # trailer still land correctly, only the player index of that one action
+      # is wrong. Not worth breaking three fixtures for.
       offset, type = decode_uint16v(data, offset)
       return [offset, nil] if type.nil?
+      if type > MAX_INPUT_ACTION
+        type = 0xFF
+        offset = type_offset + 1
+      end
       delta_offset = offset
       offset, delta = decode_uint16v(data, offset)
       return [offset, nil] if delta.nil?
@@ -319,6 +350,67 @@ module FactorioProtocol
 
       adata = nil
       hit_unknown = false
+
+      # MEASURED C→S length wins over the table's guess and over the
+      # name-based tweaks above: it was read off the wire (C2S_LENS_20), and
+      # a guess that is one byte off desyncs every action after it in the
+      # closure. Unmeasured types keep the table/hack value — hence key?,
+      # not a plain read: a miss here would blank the table's length and
+      # report every 0-byte action as unknown.
+      if (measured = FactorioProtocol.c2s_lens) && measured.key?(type)
+        alen = measured[type] unless is_server
+      end
+
+      # build_terrain (2.0: 171) — a LIST of 10-byte terrain records, each
+      # record after the first preceded by the 5-byte separator 00 00 00 AB 00
+      # (0xAB = 171, its own ID), then a 3-byte zero tail. The length tracks
+      # the record count — 25 (two records), 28 (two with tail), 43 (three) —
+      # so no table value fits it.
+      # The tail belongs to the CLOSURE, not to the action, so it may only be
+      # taken when 171 is the last action: otherwise those zero bytes are the
+      # header of the `nothing` that follows it, and eating them desyncs the
+      # rest of the closure (685 of the tail's flagged packets).
+      # Matched on the 2.0 wire ID, not the name: 2.1 also has a
+      # build_terrain (180) and this is not its layout.
+      if type == 171 && name == 'build_terrain'
+        o = offset
+        alen = 0
+        while o + BT_RECORD <= data.bytesize
+          alen += BT_RECORD
+          o += BT_RECORD
+          break unless data[o, 5] == BT_RECORD_MARK
+          alen += 5
+          o += 5
+        end
+        if is_last && data[o, 3] == BT_TAIL && (data.getbyte(o + 3) || 0) != 0x00
+          alen += 3
+        end
+      end
+
+      # translate_string (2.0: 240) — [u8 count] then `count` localised
+      # strings: [u8v key][01][00][u8v translation][9 bytes]. The 9 trailing
+      # bytes are the argument block; it is 9 in 60 of the 68 occurrences in
+      # captures/ and longer when an entry carries a nested localised string
+      # as an argument (those 8 desync and get flagged — the same bargain
+      # every majority length in the table makes). 2.0 wire ID, same
+      # reason as build_terrain above.
+      if type == 240 && name == 'translate_string'
+        o = offset
+        n = data.getbyte(o)
+        alen = 0
+        if n
+          o += 1
+          alen = 1
+          n.times do
+            kl = data.getbyte(o)
+            tl = data.getbyte(o + kl + 3)
+            break unless kl && tl
+            alen += 1 + kl + 2 + 1 + tl + 9
+            o += 1 + kl + 2 + 1 + tl + 9
+          end
+        end
+        alen = nil unless n && alen == o - offset
+      end
 
       if alen && alen > 0 && offset + alen <= data.bytesize
         adata = data[offset, alen]

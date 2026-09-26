@@ -51,6 +51,11 @@ pkt_actions = Hash.new { |h, k| h[k] = [] }  # tick => [[game_player, wire_type]
 
 # ── Capture mode: capture + tail the log for the same window ───────
 if options[:capture]
+  # Factorio never rotates factorio-current.log, and action logging spams one
+  # line per action. Remember the size so the spam can be trimmed away again
+  # after the run (the game keeps the fd, so truncating in place is safe —
+  # its next O_APPEND write lands at the restored end).
+  log_size0 = File.exist?(options[:log]) ? File.size(options[:log]) : 0
   if options[:toggle]
     rcon.command('/toggle-action-logging')
     puts 'action logging enabled'
@@ -107,6 +112,11 @@ if options[:capture]
   end
   puts "captured #{n_pkts} packets, #{log_actions.sum { |_, v| v.size }} log lines"
   rcon.command('/toggle-action-logging') if options[:toggle]
+  if File.exist?(options[:log]) && File.size(options[:log]) > log_size0
+    grew = File.size(options[:log]) - log_size0
+    File.truncate(options[:log], log_size0)
+    puts "trimmed #{'%.1f' % (grew / 1024.0 / 1024)} MB of action spam from #{options[:log]}"
+  end
 end
 
 # ── Pcap mode: filter the whole log to the capture's tick window ───
@@ -139,8 +149,8 @@ puts "log:  #{log_actions.size} ticks, #{log_actions.sum { |_, v| v.size }} acti
 
 # ── Join on (tick, player, position) ───────────────────────────────
 # The log's player index is 1-based, matching the decoded :game_player field.
-The closure tick may lead/lag the server's processing tick — scan small
-tick offsets and keep the alignment with the most (tick, player) joins.
+# The closure tick may lead/lag the server's processing tick — scan small
+# tick offsets and keep the alignment with the most (tick, player) joins.
 # Type-0 "nothing" padding is stripped from the pcap side (it is never
 # logged; keeping it would shift the last pairing by one).
 def self.normalize(name)

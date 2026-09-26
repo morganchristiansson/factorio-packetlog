@@ -7,6 +7,7 @@ module FactorioProtocol
   require_relative 'factorio_protocol/packets/connection_packets'
   require_relative 'factorio_protocol/position'
   require_relative 'input_actions_20'
+  require_relative 'input_actions_lens_20'
   require_relative 'factorio_types'
 
   # ── Message Types ──────────────────────────────────────────────────
@@ -416,7 +417,7 @@ ACTIONS = {
   # (ACTIONS). Survives hot reloads: the sniffer re-applies #select_version
   # after reloading (its @protocol_version ivar outlives the `load`).
   class << self
-    attr_accessor :actions, :segment_types
+    attr_accessor :actions, :segment_types, :c2s_lens
   end
   self.actions = ACTIONS
   self.segment_types = ACTIONS
@@ -451,19 +452,27 @@ ACTIONS = {
     if version.to_s.match?(/\A2\.0(\.|\z)/)
       self.actions = ACTIONS_20
       self.segment_types = SEGMENT_TYPES_20
+      self.c2s_lens = C2S_LENS_20
       '2.0'
     else
       self.actions = ACTIONS
       self.segment_types = ACTIONS
+      self.c2s_lens = nil
       '2.1+'
     end
   end
+
+  # MEASURED client→server payload lengths for the selected version, or nil
+  # when none were measured (2.1 — see C2S_LENS_20). Where present they win
+  # over the table's guessed length: they come from the wire, not from a
+  # same-name lookup in another version's table.
 
   # Restore the default (2.1+) mappings. Exposed for tests so version-
   # dependent fixtures don't leak their tables into later cases.
   def self.reset_version
     self.actions = ACTIONS
     self.segment_types = ACTIONS
+    self.c2s_lens = nil
   end
 
   # ── Network Header ─────────────────────────────────────────────────

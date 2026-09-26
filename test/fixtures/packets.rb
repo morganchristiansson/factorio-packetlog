@@ -289,17 +289,17 @@ REAL_PACKET_FIXTURES = [
     hex: '26060728137a2e26ad040000000002f7de002a26ad0400000000',
     actions: [
       { type: 247, name: 'close_remote_view', game_player: 222,
-        data: '002a26ad0400000000' },
+        data: '00' },
     ],
   },
   {
     name: 'client_clear_recipe_notification_20',
-    description: '2.0 clear_recipe_notification (2-byte payload) followed by the 8-byte C→S closure trailer; packet 160 in server-34197-20260917-153428.pcap',
+    description: '2.0 clear_recipe_notification (no payload) followed by the 8-byte C→S closure trailer; packet 160 in server-34197-20260917-153428.pcap',
     version: '2.0.77',
     hex: '0606e828137a0f27ad040000000002ff2b01de5d000b27ad0400000000',
     actions: [
       { type: 299, name: 'clear_recipe_notification', game_player: 222,
-        data: '5d00' },
+        data: '' },
     ],
   },
   # ── C→S closure [tick][pad] trailer regression fixtures (2026-08-12) ──
@@ -514,6 +514,103 @@ REAL_PACKET_FIXTURES = [
       { type: 104, name: 'write_to_console', game_player: 55,
         total_segs: 4, seg_no: 3,
         data: '61696c2e' },
+    ],
+  },
+  # ── Measured C→S payload lengths + content-defined actions (2026-09-26) ──
+  #
+  # Each description states the evidence the length came from, so a future
+  # disagreement is a disagreement about evidence, not about a magic number:
+  # a marker analysis over every occurrence, a per-closure candidate search,
+  # or the game's own semantics (pipette carries the picked-up entity).
+  {
+    name: 'client_entity_ref_copy_20',
+    description: '2.0 copy (128) = two 8-byte position records + the 7-byte entity reference (22 bytes), then a selected_entity_changed_very_close. Same shape as upgrade; the length came from the candidate search (113 closures, next candidate 11).',
+    version: '2.0',
+    hex: '2606eb3444122d5c750600000000048016a2edffff03130000b1eeffff94130000000001800000fb0088235c750600000000',
+    actions: [
+      { type: 128, name: 'copy', game_player: 22, data: 'a2edffff03130000b1eeffff94130000000001800000' },
+      { type: 251, name: 'selected_entity_changed_very_close', game_player: 22, data: '88' },
+    ],
+  },
+  {
+    name: 'client_pipette_ghost_item_20',
+    description: '2.0 pipette (88) = the cursor picking up a ghost item, so its payload is the ENTITY REFERENCE: 10 bytes ending in the 7-byte unit-number reference 00 00 | 01 80 00 00 | XX 00 (0x8001 = the first player unit). The by-name-inherited length was 9 and a first measurement said 1; the per-closure candidate search gives 10 on 69 closures against 4 for the next candidate.',
+    version: '2.0',
+    hex: '06069ed6a03ca3937506000000000458ff1f0104940000000000000000fc0084919e93750600000000',
+    actions: [
+      { type: 88, name: 'pipette', game_player: 287, data: '04940000000000000000' },
+      { type: 252, name: 'selected_entity_changed_very_close_precise', game_player: 287, data: '8491' },
+    ],
+  },
+  {
+    name: 'client_selected_entity_unit_number_20',
+    description: '2.0 selected_entity_changed_based_on_unit_number (254) has NO payload: the whole action is the two header bytes FE FF before the closure trailer. The by-name-inherited length was 8, which pushed the parse into the trailer and flagged the packet.',
+    version: '2.0',
+    hex: '06069ce16359c4827a060000000004fe01c9942c0100000000ff0b010001be827a0600000000',
+    actions: [
+      { type: 254, name: 'selected_entity_changed_based_on_unit_number', game_player: 1, data: '' },
+      { type: 201, name: 'swap_infinity_container_filter_items', game_player: 149, data: '2c0100000000ff0b' },
+    ],
+  },
+  {
+    name: 'client_build_terrain_then_nothing_20',
+    description: '2.0 build_terrain with TWO 10-byte terrain records (25 bytes: record, the 5-byte separator 00 00 00 AB 00, record) followed by a `nothing`. Regression for the closure tail: taking build_terrain\'s old 3-byte "tail" here ate the following `nothing` header and desynced the rest of the closure (685 of the tail\'s flagged packets). The payload is exactly 10 + 5*markers — verified against all 3 901 build_terrain payloads in captures/, every gap 10 bytes.',
+    version: '2.0',
+    hex: '0606e6e763590b897a060000000004ab0179cffeff476002000004000000ab006fcffeff47600200000400000008897a0600000000',
+    actions: [
+      { type: 171, name: 'build_terrain', game_player: 1, data: '79cffeff476002000004000000ab006fcffeff476002000004' },
+      { type: 0, name: 'nothing', game_player: 1, data: '' },
+    ],
+  },
+  {
+    name: 'client_entity_ref_upgrade_20',
+    description: '2.0 upgrade (127) = two 8-byte position records + the same 7-byte entity reference (23 bytes). upgrade/copy/cancel_deconstruct share this shape, which is what identifies the trailing 01 80 00 00 as a unit number rather than coordinates.',
+    version: '2.0',
+    hex: '260688cbde0b78b17e0600000000047f164208ffffa65c02004208ffffa65c020000000180000000fb00886fb17e0600000000',
+    actions: [
+      { type: 127, name: 'upgrade', game_player: 22, data: '4208ffffa65c02004208ffffa65c020000000180000000' },
+      { type: 251, name: 'selected_entity_changed_very_close', game_player: 22, data: '88' },
+    ],
+  },
+  # Frequent actions whose measured C→S length is now pinned (2026-09-26).
+  # Each is the whole closure, so the length claim is the only thing that can
+  # satisfy the byte budget.
+  {
+    name: 'client_gui_click_20',
+    description: '2.0 gui_click (102) = 17 bytes. The by-name-inherited length was nil (unmeasured), so every GUI click desynced its closure; the candidate search gives 17 on 114 closures against 1 for the next candidate.',
+    version: '2.0',
+    hex: '06060e60a92f025a75060000000002663be30300000200ff070000cc000000000000ed59750600000000',
+    actions: [
+      { type: 102, name: 'gui_click', game_player: 59, data: 'e30300000200ff070000cc000000000000' },
+    ],
+  },
+  {
+    name: 'client_selected_entity_changed_20',
+    description: '2.0 selected_entity_changed (87) = 8 bytes (the hover/selection family, whose 2.1 lengths are wrong for 2.0). 964 closures agree.',
+    version: '2.0',
+    hex: '06061e590841aef97506000000000257a141f6ffffd3f6ffff9af9750600000000',
+    actions: [
+      { type: 87, name: 'selected_entity_changed', game_player: 161, data: '41f6ffffd3f6ffff' },
+    ],
+  },
+  {
+    name: 'client_build_x2_20',
+    description: '2.0 build (66) = 12 bytes, twice in one closure (12+12 = the whole budget). The by-name-inherited length was 9; 145 closures give 12, and the rare drag-painting forms (30/35) stay unhandled by design rather than guessed.',
+    version: '2.0',
+    hex: '2606b47e0841101b7606000000000442a149e4ffff40600000000000004200fde3ffff406000000001000000001b760600000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 161, data: '49e4ffff4060000000000000' },
+      { type: 66, name: 'build', game_player: 161, data: 'fde3ffff4060000000010000' },
+    ],
+  },
+  {
+    name: 'client_build_then_start_walking_20',
+    description: '2.0 build (12) then start_walking (67) = 16 bytes. start_walking carries two doubles (the walk direction) — 16, not the by-name-inherited 17. 3 279 closures agree.',
+    version: '2.0',
+    hex: '2606fa8008415d1d7606000000000442a100fbffff00510000000000104300000000000000f0bf0000000000000080461d760600000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 161, data: '00fbffff0051000000000010' },
+      { type: 67, name: 'start_walking', game_player: 161, data: '000000000000f0bf0000000000000080' },
     ],
   },
 ].freeze

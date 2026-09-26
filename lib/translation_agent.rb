@@ -96,15 +96,17 @@ class TranslationAgent
     # Announce translation (console only — non-English speakers).
     announce_translation(player, msg_lang) unless @announced_players.include?(player)
 
-    # Print to console (visible to operator).
-    ts = Time.now.strftime('%H:%M:%S')
-    puts "#{ts}  [translate] #{player} (#{msg_lang}): #{message}"
-
     # Relay IN GAME to everyone who can't read the original: decided per
     # player in Ruby (locale + overrides), one Lua pass over
     # game.connected_players (the live roster) printing each computed
     # index's text. Each reader gets their language via direct translation.
-    relay_to_others(player, msg_lang, message)
+    # Only the translations actually sent are echoed to the console — the
+    # original chat is already printed by the sniffer.
+    relayed = relay_to_others(player, msg_lang, message)
+    unless relayed.empty?
+      ts = Time.now.strftime('%H:%M:%S')
+      puts "#{ts}  [translate] #{relayed.join('  |  ')}"
+    end
 
     [true, message]  # Continue processing, return original text
   end
@@ -194,10 +196,11 @@ class TranslationAgent
   #   t = {[2]="[pt>ru] ivan: hi",[5]="[en>pt] bob: ola"}
   #   for _, p in pairs(game.connected_players) do
   #     local x = t[p.index]; if x then p.print(x, ps) end end
+  # Returns: the per-target "[en>pt] bob: ola" lines actually relayed.
   def relay_to_others(speaker_name, msg_lang, message)
-    return unless @rcon
+    return [] unless @rcon
     roster = @roster&.call || []
-    return if roster.empty?
+    return [] if roster.empty?
 
     entries = []
     texts = {}  # target -> localized text (one backend call per target lang)
@@ -221,12 +224,14 @@ class TranslationAgent
       tag = "#{msg_lang}>#{target}"
       entries << %([#{index}]="[#{tag}] #{@rcon.lua_quote(speaker_name)}: #{@rcon.lua_quote(text)}")
     end
-    return if entries.empty?
+    return [] if entries.empty?
 
     lua = %(do local t = {#{entries.join(',')}}; local n = "#{@rcon.lua_quote(speaker_name)}"; local s = game.players[n]; local ps = s and {color = (s.chat_color or s.color)}; for _, p in pairs(game.connected_players) do local x = t[p.index]; if x then p.print(x, ps) end end end)
     @rcon.command("/sc #{lua}")
+    texts.map { |target, text| "[#{msg_lang}>#{target}] #{speaker_name}: #{text}" }
   rescue StandardError => e
     warn "[translation] in-game relay failed: #{e.class}: #{e.message}"
+    []
   end
 
   # Direct translation from source language to target.

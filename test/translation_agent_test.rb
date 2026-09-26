@@ -12,7 +12,7 @@
 
 require 'minitest/autorun'
 require 'tmpdir'
-require_relative '../factorio-sniffer'
+require_relative '../factorio-packettools'
 require_relative '../lib/translation_argos'
 require_relative '../lib/translation_mock'
 
@@ -38,7 +38,7 @@ class TestTranslationAgent < Minitest::Test
   end
 
   def make_sniffer
-    FactorioSniffer.new({ server: false, pcap: nil, interface: nil })
+    FactorioPacketTools.new({ server: false, pcap: nil, interface: nil })
   end
 
   def command_recorder
@@ -172,13 +172,18 @@ class TestTranslationAgent < Minitest::Test
     player_db[3] = {name: 'pedro', locale: 'pt'}
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
 
-    _output, = capture_io do
+    output, = capture_io do
       result = agent.on_chat({ game_player: 1 }, 'привет')
       assert_equal [true, 'привет'], result
       agent.on_chat({ game_player: 3 }, 'hola que tal')
       assert_equal '[en] привет', agent.simulate_translation('ivan', 'ru', 'привет')
       agent.simulate_translation('pedro', 'pt-BR', 'olá')
     end
+
+    # Console echoes the TRANSLATIONS sent, not the original text
+    # (the sniffer already printed the chat itself).
+    assert_includes output, '[translate] [ru>en] ivan: [en] привет  |  [ru>pt] ivan: [pt] привет'
+    refute_includes output, "[translate] ivan (ru): привет\n"
 
     assert_equal 4, commands.size
     first = commands.first

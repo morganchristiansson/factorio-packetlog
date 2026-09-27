@@ -2,17 +2,36 @@
 
 require 'set'
 
-# ArgosTranslateService — uses the argos-translate CLI binary (installed on
-# the server under /opt/argos — NOT on PATH). Requires language packs
-# installed (en-ru, ru-en, pt-en, en-pt). The path: keyword exists for tests.
+# ArgosTranslateService — uses the argos-translate CLI binary. Installed on
+# the server under /opt/argos and often NOT on PATH, so the binary is
+# auto-detected: PATH first, then that documented install location. The path
+# keyword exists for tests.
 class ArgosTranslateService
-  ARGOS_BIN = '/opt/argos/bin/argos-translate'
+  # PATH lookup without shelling out (no dependency on `which` being a real
+  # binary rather than a shell builtin).
+  def self.on_path?(cmd)
+    ENV.fetch('PATH', '').split(File::PATH_SEPARATOR).any? do |dir|
+      file = File.join(dir, cmd)
+      File.file?(file) && File.executable?(file)
+    end
+  end
 
+  ARGOS_BIN = on_path?('argos-translate') ? 'argos-translate' : '/opt/argos/bin/argos-translate'
+
+  # Auto-detection has to SUCCEED: a missing binary or an empty pack set
+  # raises here (the sniffer reports the translation plugin as disabled),
+  # because the alternative is an agent that looks healthy and never
+  # translates a word.
   def initialize(path: ARGOS_BIN)
     @path = path
     @cache = {}
     @mutex = Mutex.new
+    raise "argos-translate not found at #{@path} (auto-detected: PATH first, then /opt/argos/bin) — install it or pick another backend" unless File.executable?(@path)
+
     @supported_langs = load_installed_langs
+    return unless @supported_langs.empty?
+
+    raise "no argos language packs found (argospm list next to #{@path} is empty) — install packs, e.g. argos-translate --install-from-pypi en-ru"
   end
 
   def translate(text, source_lang:, target_lang:)

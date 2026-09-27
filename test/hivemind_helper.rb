@@ -7,12 +7,24 @@
 #   hivemind_compaction_test.rb  long-term memory + /compact
 #   hivemind_followups_test.rb   scheduled follow-ups + scheduler
 
+require 'fileutils'
 require 'minitest/autorun'
-require 'hivemind'
-require 'player_attrs'
-require 'player_db'
+require 'tmpdir'
+require 'plugins'
 
 HIVE_TEST_CONFIG = File.expand_path('../config-hivemind.yaml.example', __dir__)
+
+# The sniffer's feature list (config.yaml).
+Plugins.load(%w[hivemind])
+# Hivemind reads its OWN `plugins:` list in its class body, so the require
+# happens in a temp cwd holding the test config: the mixins under test must
+# not depend on whatever config-hivemind.yaml this checkout happens to have.
+Dir.mktmpdir('hivemind-test') do |dir|
+  FileUtils.cp(HIVE_TEST_CONFIG, File.join(dir, 'config-hivemind.yaml'))
+  Dir.chdir(dir) { require 'hivemind' }
+end
+require 'player_attrs'
+require 'player_db'
 ENV['HIVE_API_KEY'] ||= 'sk-test'
 
 class FakeRcon

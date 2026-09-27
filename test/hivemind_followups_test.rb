@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for scheduled follow-ups (hivemind_followups.rb): registry, scheduler thread, restart persistence.
+# Tests for scheduled follow-ups (followups.rb): registry, scheduler thread, restart persistence.
 # Run: ruby -Ilib test/hivemind_followups_test.rb
 
 require_relative 'hivemind_helper'
@@ -47,7 +47,7 @@ class TestHivemindFollowUps < Minitest::Test
 
 
   def test_schedule_followup_caps_pending
-    max = HiveMindAgent::MAX_PENDING_FOLLOWUPS
+    max = @agent.max_pending_followups
     max.times { |i| @agent.schedule_followup(delay_seconds: 60, task: "t#{i}", name: "timer-#{i}") }
     result = @agent.schedule_followup(delay_seconds: 60, task: 'overflow', name: 'overflow')
     assert_match(/max #{max}/, result)

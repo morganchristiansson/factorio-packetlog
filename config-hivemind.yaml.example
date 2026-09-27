@@ -8,10 +8,26 @@
 # The API key comes from the env (HIVE_API_KEY by default) or the
 # provider group's `api_key:` here; env wins. The file is gitignored,
 # so a key in it stays local.
-# The sniffer exposes no Hivemind CLI args.
+# The sniffer exposes no Hivemind CLI args. The sniffer's own features
+# (hivemind, translation) are listed in config.yaml, not here.
 
 # Current startup model; must appear under some provider below.
 model: deepseek-v4-flash
+
+# Hivemind's own plugins — REQUIRED, like every other key in this file.
+# A name is the file lib/<name>.rb, whose module is mixed into the agent:
+# a plugin that is not listed is never loaded, so remove one to run without
+# it (`plugins: []` for a bare agent). The file is lib/hivemind_<name>.rb
+# and the module is the CamelCase of that name (HiveMindCompaction).
+#   persistence  session file: resume the conversation after a restart
+#   compaction   /compact + long-term memory (SOUL/KNOWLEDGE/players)
+#   followups    schedule_followup / cancel_followup timers
+#   logwatcher   tail factorio-current.log: scenario events feed the agent
+plugins:
+  - persistence
+  - compaction
+  - followups
+  - logwatcher
 
 # One entry per endpoint/credential set. Every model listed under a
 # provider uses that provider's provider/api_base/api_key_env; a model
@@ -58,13 +74,27 @@ triggers:
   - hm
   - hive
 
-# Game-log events that fire a dedicated turn.
-log_turn_events:
-  - map-reset
-
 # Per-player chat/greeting rate limits, in seconds.
 min_interval: 5
 greet_interval: 10
+
+# ── followups plugin ─────────────────────────────────────────────
+# (required while `followups` is in the list above; drop the plugin and
+# these two stop being required)
+
+# Minimum seconds before a scheduled follow-up may fire (anti ping-pong).
+min_followup_delay: 15
+
+# Cap on pending follow-ups — the model cancels stale ones.
+max_pending_followups: 5
+
+# ── logwatcher plugin ────────────────────────────────────────────
+# (required while `logwatcher` is in the list above)
+
+# Scenario log events that fire a dedicated turn (and, for a map reset, an
+# auto-compaction). Any other event= line is queued for the next prompt.
+log_turn_events:
+  - map-reset
 
 # Minimum seconds between dedicated log-event turns.
 log_event_interval: 300

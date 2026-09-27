@@ -1,15 +1,21 @@
 # ─────────────────────────────────────────────────────────────
-# Translation agent — config example
+# Translation agent — required configuration
 # ─────────────────────────────────────────────────────────────
-# Copy to config-translation.yaml and edit. OPTIONAL in full — the file
-# may be absent; settings document the defaults. The Google key goes
-# here as `google_api_key:` or in the env (which wins).
+# Copy to config-translation.yaml. The translation plugin refuses to start
+# without this file and every key marked below (they are required — there
+# are no code defaults; a missing key is a startup error, reported as
+# "[translate] Translation agent disabled: ...").
+# The Google key is the one optional key: it is a secret (env first, then
+# `google_api_key:` here) and is required only by the google/hybrid backends,
+# which refuse to start without it.
 # ─────────────────────────────────────────────────────────────
 
-# Translation backend: argos, google, hybrid, mock. Default: argos.
+# Translation backend: argos, google, hybrid, mock.
 # ONE backend is active at a time — hybrid is argos primary with Google
 # Cloud as fallback for pairs argos lacks (pt<->ru), not a list you
-# configure. No key needed for argos/mock.
+# configure. No key needed for argos/mock. argos needs the CLI (auto-detected
+# on PATH, then /opt/argos/bin) plus at least one language pack — a missing
+# binary or packs is a startup error, not a silent no-op.
 backend: argos
 
 # Google Cloud Translation key — used by the google and hybrid backends
@@ -28,3 +34,6 @@ whitelist:
   - en
   - pt
   - ru
+
+# Minimum seconds between translations of the same player (anti-spam).
+min_interval: 2

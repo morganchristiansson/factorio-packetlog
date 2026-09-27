@@ -5,16 +5,24 @@ require 'yaml'
 require_relative 'rcon_client'
 require_relative 'agent_events'
 
+# The `translation` plugin (config.yaml `plugins:`) — the file is named after
+# the plugin, the class after what it does.
 class TranslationAgent
   include AgentEvents
-  # Minimum interval between translations for the same player (anti-spam)
-  TRANSLATE_COOLDOWN = 2.0
+  # Non-secret translation settings live in this file. There is no key list
+  # and no code default: the file must exist (checked once, so "no config at
+  # all" names the example to copy) and every key is read with Hash#fetch
+  # where it is used — a missing one raises `KeyError: key not found:
+  # "<key>"` at that point. The Google key is the one optional key: a secret
+  # (env first, `google_api_key:` here) that only the google/hybrid backends
+  # need, and they refuse to start without it.
+  CONFIG_FILE = 'config-translation.yaml'
 
-  # Locales to translate between. English is included as a
-  # whitelisted language — English speakers get relayed to
-  # other whitelisted readers. Translation occurs between all
-  # whitelisted locales via direct service support (no pivot).
-  WHITELIST = Set.new(%w[en pt ru])
+  def self.load_config(path = CONFIG_FILE)
+    raise Errno::ENOENT, "missing #{path}; copy config-translation.yaml.example" unless File.file?(path)
+
+    YAML.safe_load_file(path) || {}
+  end
 
   # Backend types
   # Available backends: :mock, :argos, :google, :hybrid
@@ -26,10 +34,13 @@ class TranslationAgent
   # decide per-player who needs a translated line and address them by game
   # index — Lua can't see the language overrides, so the decision is made
   # here and Lua just prints to the computed indexes.
-  def initialize(rcon:, player_db:, backend: nil, google_api_key: nil, roster: nil)
-    # Load config-translation.yaml for defaults (param > config > hardcoded).
-    trans_config = File.exist?('config-translation.yaml') ? (YAML.load_file('config-translation.yaml') || {}) : {}
-    backend ||= (trans_config['backend'] || 'argos').to_sym
+  # google_api_key/argos_path/backend/config_file are injection points for
+  # tests (and the key for ops); everything else comes from the config file.
+  def initialize(rcon:, player_db:, backend: nil, google_api_key: nil, roster: nil,
+                 config_file: CONFIG_FILE, argos_path: nil)
+    # config-translation.yaml is the source; the kwargs exist for tests.
+    trans_config = self.class.load_config(config_file)
+    backend = (backend || trans_config.fetch('backend')).to_sym
     # Google key for the hybrid/google backend. Env wins (ops/CI
     # override without editing the file); the YAML `google_api_key:` is
     # the fallback. config-translation.yaml is gitignored, so a key there
@@ -42,11 +53,23 @@ class TranslationAgent
     @backend = backend
     @google_api_key = google_api_key
     @enabled = !@rcon.nil? && !@player_db.nil?
-    @whitelist = (trans_config['whitelist'] || WHITELIST.to_a).map(&:downcase).to_set
+    # Locales to translate between. English belongs in the list as a
+    # whitelisted language — English speakers get relayed to other whitelisted
+    # readers. Translation occurs between all whitelisted locales via direct
+    # service support (no pivot).
+    @whitelist = trans_config.fetch('whitelist').map { |l| l.to_s.downcase }.to_set
+    # Minimum interval between translations for the same player (anti-spam)
+    @min_interval = trans_config.fetch('min_interval').to_f
     @roster = roster
 
-    # Initialize translation backend
-    @translation_service = create_translation_service(backend, google_api_key)
+    # A backend we cannot actually run is a startup error, not a silent
+    # no-translation agent: a Google backend with no key, an argos install
+    # that isn't there (its service raises), packs that aren't installed.
+    if %i[google hybrid].include?(backend) && google_api_key.to_s.empty?
+      raise ArgumentError, "backend #{backend} needs a Google key: set GOOGLE_TRANSLATE_API_KEY or google_api_key: in #{config_file}"
+    end
+
+    @translation_service = create_translation_service(backend, google_api_key, argos_path)
 
     # player_name -> last translation time (for cooldown)
     @last_translate = {}
@@ -90,7 +113,7 @@ class TranslationAgent
     # Rate limit per player (anti-spam: each message costs one argos run per
     # target locale).
     # Arrival time preserves spam limits even when translations take seconds.
-    return [true, nil] if @last_translate[player] && (now - @last_translate[player]) < TRANSLATE_COOLDOWN
+    return [true, nil] if @last_translate[player] && (now - @last_translate[player]) < @min_interval
     @last_translate[player] = now
 
     # Announce translation (console only — non-English speakers).
@@ -144,20 +167,20 @@ class TranslationAgent
   # Create translation service based on backend
   # Only ONE backend is ever active per agent — load just that file (the
   # others stay out of memory and off the reload path).
-  def create_translation_service(backend, google_api_key)
+  def create_translation_service(backend, google_api_key, argos_path = nil)
     case backend
     when :mock
       require_relative 'translation_mock'
       MockTranslationService.new
     when :argos
       require_relative 'translation_argos'
-      ArgosTranslateService.new
+      ArgosTranslateService.new(path: argos_path || ArgosTranslateService::ARGOS_BIN)
     when :google
       require_relative 'translation_google'
       GoogleCloudTranslateService.new(google_api_key)
     when :hybrid
       require_relative 'translation_hybrid'
-      HybridTranslationService.new(google_api_key)
+      HybridTranslationService.new(google_api_key, argos_path: argos_path || ArgosTranslateService::ARGOS_BIN)
     else
       warn "Unknown translation backend #{backend.inspect}; using argos"
       require_relative 'translation_argos'

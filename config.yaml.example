@@ -1,16 +1,28 @@
 # ─────────────────────────────────────────────────────────────
 # Factorio Packet Sniffer — config example
 # ─────────────────────────────────────────────────────────────
-# Copy to config.yaml and edit. THE WHOLE FILE IS OPTIONAL: with no
-# config.yaml the sniffer runs on its defaults, and anything commented
-# out below keeps that default. Values document the defaults, so
-# copying this file unchanged changes nothing.
+# Copy to config.yaml and edit. Only `plugins:` is MANDATORY (it says which
+# features run — there is no hardcoded default); every other setting is
+# optional and commented out below already carries its default, so copying
+# this file unchanged changes nothing.
 #
 # Secrets (RCON password, API keys, credentials: RCON_PASSWORD,
 # HIVE_API_KEY, FACTORIO_USERNAME, FACTORIO_TOKEN) are env-only — never
 # here. Exception: the Google Translate key may live in
 # config-translation.yaml as `google_api_key:` (env still overrides it).
 # ─────────────────────────────────────────────────────────────
+
+# REQUIRED — the features to load. The sniffer refuses to start without
+# this key, so the feature set is always an explicit choice. Remove an entry
+# to switch that feature off entirely (nothing of it is even loaded); list
+# `plugins: []` to run on no features at all. Hivemind's own plugins
+# (persistence, compaction, followups) are NOT listed here — they live in
+# config-hivemind.yaml.
+#   hivemind     the AI agent answering players who say "hivemind"
+#   translation  relays chat to players who can't read the original
+plugins:
+  - hivemind
+  - translation
 
 # Capture source (one: port, interface, or server mode)
 

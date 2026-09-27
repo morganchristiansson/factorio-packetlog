@@ -24,7 +24,8 @@ end
 #   Filter by local IP: ... --local-ip 192.168.1.100
 #
 # Config files (edit these instead of CLI flags):
-#   config.yaml               general sniffer config (port, interface, capture, etc.)
+#   config.yaml               general sniffer config (port, interface, capture,
+#                             `plugins:` — which features load)
 #   config-hivemind.yaml       Hivemind AI agent config (api_base, model, etc.)
 #   config-translation.yaml    Translation agent config (backend, locales, etc.)
 # Secrets (RCON password, API keys, credentials) are env-only:
@@ -38,7 +39,7 @@ require_relative 'lib/player_db'
 require_relative 'lib/pcap'
 require_relative 'lib/live_capture'
 require_relative 'lib/rcon_client'
-require_relative 'lib/hivemind'
+require_relative 'lib/plugins'
 require_relative 'lib/factorio_packet_tools'
 require 'yaml'
 
@@ -186,12 +187,19 @@ if __FILE__ == $PROGRAM_NAME
     end
   end
 
-  # Implicit Hivemind agent (see above): in server mode with a key for the
-  # startup model (env or the provider group's api_key:), the agent
-  # auto-enables — there is no --ai-agent flag. No key = no AI.
-  # Client/pcap mode never auto-enables (the agent needs RCON/game.print,
-  # which only server mode has).
-  options[:ai_agent] = true if options[:server] && !options[:pcap] && HiveMindAgent.key_configured?
+  # Plugins: the sniffer's features to load. MANDATORY and explicit — there
+  # is no hardcoded default, so config.yaml must say which ones (lib/plugins.rb
+  # has the catalog; anything not listed is never even required). Hivemind's
+  # own plugins (persistence / compaction / followups) are NOT here — they
+  # are listed in config-hivemind.yaml and loaded by hivemind itself.
+  Plugins.load(options[:plugins])
+  puts "Plugins loaded: #{Plugins.loaded.join(', ')}" unless Plugins.loaded.empty?
+
+  # The AI agent still needs a key for its startup model (and server mode
+  # for RCON/game.print), so listing the plugin isn't enough: client/pcap
+  # mode never starts it, and a config without a key stays silent.
+  options[:ai_agent] = true if options[:server] && !options[:pcap] &&
+                               Plugins.enabled?('hivemind') && HiveMindAgent.key_configured?
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring
@@ -256,7 +264,7 @@ if __FILE__ == $PROGRAM_NAME
 
   # Console history from here on (auto-detect chatter, joins, chat —
   # everything below prints through the tee).
-  setup_output_log(config[:log_keep_days])
+  setup_output_log(config[:log_keep_days] || LOG_KEEP_DAYS)
 
   unless options[:interface] || options[:pcap]
     puts op

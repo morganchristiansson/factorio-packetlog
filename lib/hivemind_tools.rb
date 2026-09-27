@@ -168,3 +168,51 @@ class CancelFollowUp < RubyLLM::Tool
     @agent.cancel_followup(name: name)
   end
 end
+
+# RubyLLM tool: set a player's per-player language overrides (the
+# players-locale.json data the translation agent relays chat for, same file
+# the /locales console command writes). A player's Factorio interface locale
+# is often not the language they read chat in (pt-BR interface, English
+# chat), and the override is what makes translation relay to the right
+# readers — so the model can set it instead of waiting for an operator.
+#
+# Only registered while the TRANSLATION plugin is loaded (see
+# HiveMindAgent#register_tools): without translation there is nothing to
+# steer, so the tool would be a no-op with a confusing name.
+class SetPlayerLanguages < RubyLLM::Tool
+  def name
+    'set_player_languages'
+  end
+  desc 'Set the languages a player reads, overriding their Factorio interface ' \
+       'locale ("pt-BR" or "en" adds those languages to their Factorio ' \
+       'locale). Translation relays chat into the first of these languages the ' \
+       'player understands, so set this when a player says they read another ' \
+       'language than their interface shows. An empty value clears the ' \
+       'override (back to the game locale).'
+
+  param :player, type: 'string',
+                  desc: 'Exact player name (verify with rcon_query /players).'
+  param :languages, type: 'string',
+                    desc: 'Comma-separated base language codes, e.g. "en,pt". Empty clears the override.'
+
+  def initialize(player_db:)
+    @player_db = player_db
+  end
+
+  def execute(player:, languages:)
+    name = player.to_s.strip
+    return 'Error: player name is empty — verify the name with rcon_query /players.' if name.empty?
+
+    id = @player_db.id_for(name)
+    return "Error: unknown player '#{name}' — verify the name with rcon_query /players." unless id && @player_db.lookup(id) == name
+
+    langs = languages.to_s.split(',').filter_map do |l|
+      b = l.split('-').first&.downcase&.strip
+      b unless b.empty?
+    end.uniq
+    @player_db.set_locale_overrides(name, langs)
+    langs.empty? ? "Languages cleared for #{name} (game locale used)." : "Languages for #{name}: #{langs.join(', ')}"
+  rescue StandardError => e
+    "Error: #{e.class}: #{e.message}"
+  end
+end

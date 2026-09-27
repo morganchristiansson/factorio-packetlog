@@ -13,8 +13,13 @@
 require 'minitest/autorun'
 require 'tmpdir'
 require_relative '../factorio-packettools'
+require_relative '../lib/translation'
 require_relative '../lib/translation_argos'
 require_relative '../lib/translation_mock'
+
+# The plugin's config is required (no code defaults), so the tests point at
+# the checked-in example, the way the hivemind tests do.
+TRANSLATION_TEST_CONFIG = File.expand_path('../config-translation.yaml.example', __dir__)
 
 class TestTranslationAgent < Minitest::Test
   def setup
@@ -31,6 +36,7 @@ class TestTranslationAgent < Minitest::Test
       player_db: player_db,
       backend: backend,
       roster: roster,
+      config_file: TRANSLATION_TEST_CONFIG,
       **kwargs
     )
     @agents << agent
@@ -79,22 +85,50 @@ class TestTranslationAgent < Minitest::Test
 
   def test_google_api_key_from_yaml_with_env_override
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        File.write('config-translation.yaml', YAML.dump('backend' => 'google', 'google_api_key' => 'yaml-key'))
-        with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
-          agent = make_agent(backend: nil)
-          assert agent.google_api_key?, 'key picked up from config-translation.yaml'
-        end
-        with_env('GOOGLE_TRANSLATE_API_KEY' => 'env-key') do
-          agent = make_agent(backend: nil)
-          assert agent.google_api_key?
-        end
-        File.write('config-translation.yaml', YAML.dump('backend' => 'google'))
-        with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
-          refute make_agent(backend: nil).google_api_key?, 'no key anywhere'
-        end
+      base = YAML.safe_load_file(TRANSLATION_TEST_CONFIG).merge('backend' => 'google')
+      with_key = File.join(dir, 'with-key.yaml')
+      without_key = File.join(dir, 'without-key.yaml')
+      File.write(with_key, YAML.dump(base.merge('google_api_key' => 'yaml-key')))
+      File.write(without_key, YAML.dump(base))
+
+      with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
+        assert make_agent(backend: nil, config_file: with_key).google_api_key?,
+               'key picked up from the config file'
+      end
+      with_env('GOOGLE_TRANSLATE_API_KEY' => 'env-key') do
+        assert make_agent(backend: nil, config_file: with_key).google_api_key?
+      end
+      with_env('GOOGLE_TRANSLATE_API_KEY' => nil) do
+        # No key anywhere is a startup error, not a silently broken agent.
+        error = assert_raises(ArgumentError) { make_agent(backend: nil, config_file: without_key) }
+        assert_match(/needs a Google key/, error.message)
       end
     end
+  end
+
+  # Config is required: no file, or a file missing a key, is an error the
+  # sniffer reports as "[translate] Translation agent disabled: ...".
+  def test_config_is_required
+    error = assert_raises(Errno::ENOENT) { make_agent(config_file: '/nonexistent/config-translation.yaml') }
+    assert_match(/config-translation\.yaml\.example/, error.message)
+
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'partial.yaml')
+      File.write(path, YAML.dump('backend' => 'mock'))
+      # Not validated up front: the key raises where it is read, naming itself.
+      error = assert_raises(KeyError) { make_agent(config_file: path) }
+      assert_includes error.message, 'whitelist'
+    end
+  end
+
+  # No hardcoded defaults left: the whitelist and the anti-spam interval come
+  # from the file.
+  def test_no_code_defaults_for_whitelist_or_interval
+    config = YAML.safe_load_file(TRANSLATION_TEST_CONFIG)
+    agent = make_agent(backend: :mock)
+
+    assert_equal config['whitelist'].map(&:downcase).to_set, agent.whitelist
+    assert_equal config['min_interval'], agent.instance_variable_get(:@min_interval)
   end
 
   def with_env(vars)
@@ -106,10 +140,10 @@ class TestTranslationAgent < Minitest::Test
   end
 
   def test_backend_wiring
-    argos = make_agent(backend: :argos)
+    fake = fake_argos_install
+    argos = make_agent(backend: :argos, argos_path: fake)
     assert_instance_of ArgosTranslateService, argos.translation_service
-    assert_equal ArgosTranslateService::ARGOS_BIN,
-                 argos.translation_service.instance_variable_get(:@path)
+    assert_equal fake, argos.translation_service.instance_variable_get(:@path)
 
     mock = make_agent
     assert_instance_of MockTranslationService, mock.translation_service
@@ -117,10 +151,23 @@ class TestTranslationAgent < Minitest::Test
     google = make_agent(backend: :google, google_api_key: 'fake-key')
     assert_instance_of GoogleCloudTranslateService, google.translation_service
 
-    hybrid = make_agent(backend: :hybrid, google_api_key: 'fake-key')
+    hybrid = make_agent(backend: :hybrid, google_api_key: 'fake-key', argos_path: fake)
     assert_instance_of HybridTranslationService, hybrid.translation_service
     assert_instance_of ArgosTranslateService, hybrid.translation_service.instance_variable_get(:@argos)
     assert_instance_of GoogleCloudTranslateService, hybrid.translation_service.instance_variable_get(:@google)
+  end
+
+  # A minimal fake argos install: the CLI plus an argospm that lists packs
+  # (the service refuses to start without both).
+  def fake_argos_install
+    @fake_argos_dir ||= Dir.mktmpdir('fake-argos')
+    script = File.join(@fake_argos_dir, 'argos-translate')
+    argospm = File.join(@fake_argos_dir, 'argospm')
+    File.write(script, "#!/bin/sh\nprintf 'PEREVOD\\n'\n")
+    File.chmod(0o755, script)
+    File.write(argospm, "#!/bin/sh\necho 'translate-ru_en'\necho 'translate-en_ru'\n")
+    File.chmod(0o755, argospm)
+    script
   end
 
   def test_argos_cli_arguments_safety_stderr_and_supported_languages
@@ -156,10 +203,18 @@ class TestTranslationAgent < Minitest::Test
     end
   end
 
-  def test_missing_argos_binary_returns_original_text
-    service = ArgosTranslateService.new(path: '/nonexistent/argos-translate')
-    capture_io do
-      assert_equal 'privet', service.translate('privet', source_lang: 'ru', target_lang: 'en')
+  # A backend that cannot run is a STARTUP error, not a healthy agent that
+  # silently never translates: no binary, and no language packs.
+  def test_missing_argos_install_is_an_error
+    error = assert_raises(RuntimeError) { ArgosTranslateService.new(path: '/nonexistent/argos-translate') }
+    assert_match(/argos-translate not found/, error.message)
+
+    Dir.mktmpdir do |dir|
+      script = File.join(dir, 'argos-translate')
+      File.write(script, "#!/bin/sh\nprintf 'PEREVOD\\n'\n")
+      File.chmod(0o755, script)
+      error = assert_raises(RuntimeError) { ArgosTranslateService.new(path: script) } # no argospm beside it
+      assert_match(/no argos language packs/, error.message)
     end
   end
 

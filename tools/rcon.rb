@@ -24,9 +24,13 @@ elsif !_detected[:dedicated]
 end
 HOST = ENV["RCON_HOST"] || _detected[:rcon_host] || "localhost"
 PORT = (ENV["RCON_PORT"] || _detected[:rcon_port] || 27015).to_i
-PASSWORD = ENV["RCON_PASSWORD"] || _detected[:rcon_password] || "bzsmD3pE7WcPGk"
+# Secrets are env-first and auto-detected second — NEVER a literal here: one
+# committed password leaks the server's RCON to everyone with the repo.
+PASSWORD = ENV["RCON_PASSWORD"] || _detected[:rcon_password]
 
 def client
+  raise "no RCON password: set RCON_PASSWORD, or run on the server host so it can be auto-detected" if PASSWORD.nil?
+
   c = Rcon::Client.new(host: HOST, port: PORT, password: PASSWORD)
   # Factorio sends only ONE packet in response to auth (not two like SRCDS),
   # so the default ignore_first_packet: true would time out.

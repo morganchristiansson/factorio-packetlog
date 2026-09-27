@@ -10,15 +10,13 @@ begin
 rescue LoadError
 end
 require_relative 'memory_store'
-# RubyLLM tool classes (HivemindReply, RconQuery,
-# ScheduleFollowUp, CancelFollowUp) live in hivemind_tools.rb.
+# RubyLLM tool classes (HivemindReply, RconQuery, SetPlayerTag,
+# ScheduleFollowUp, CancelFollowUp, SetPlayerLanguages) live in
+# hivemind_tools.rb.
 require_relative 'hivemind_tools'
 require_relative 'hivemind_prompts'
-require_relative 'hivemind_persistence'
-require_relative 'hivemind_compaction'
-require_relative 'hivemind_followups'
-require_relative 'log_tail'
 require_relative 'agent_events'
+require_relative 'plugins'
 
 # HiveMind agent — an LLM persona that lives inside the Factorio sniffer.
 #
@@ -40,30 +38,45 @@ require_relative 'agent_events'
 class HiveMindAgent
   include AgentEvents
   include HiveMindPrompts     # DEFAULT_SOUL / SYSTEM_PROMPT / COMPACTION_PROMPT
-  include HiveMindPersistence  # session file: load_session / persist!
-  include HiveMindCompaction   # long-term memory distillation (/compact)
-  include HiveMindFollowUps    # scheduled follow-ups + scheduler thread
   # Non-secret Hivemind settings live only in config-hivemind.yaml.
   # HIVE_API_KEY remains the sole environment secret; api_key: in this
   # (gitignored) file is the per-provider fallback for it.
   CONFIG_FILE = 'config-hivemind.yaml'
-  REQUIRED_CONFIG = %w[
-    model providers history_size history_line_len
-    max_reply_len trim_tail_chars auto_compaction_min_chars triggers
-    log_turn_events min_interval greet_interval log_event_interval
-  ].freeze
+  # Hivemind's OWN plugins — the same manager class, a prefixed file set: the
+  # `plugins:` list in config-hivemind.yaml names lib/hivemind_persistence.rb,
+  # lib/hivemind_compaction.rb, lib/hivemind_followups.rb,
+  # lib/hivemind_logwatcher.rb, whose modules are mixed into this class. A
+  # plugin that is not listed is never required and never lands on the agent,
+  # so a call site asks #plugin?('compaction') before touching one.
+  PLUGINS = Plugins::Manager.new(__dir__, prefix: 'hivemind_', namespace: 'HiveMind')
+  # The plugin list, read where it is USED: here, in the class body, because
+  # that is where the mixins are decided. A file without the key raises
+  # `KeyError: key not found: "plugins"` instead of quietly producing an
+  # agent with no plugins. A missing FILE is load_config's error to report
+  # (in initialize) — the class body must survive a hot reload either way.
+  def self.config_plugins(path = CONFIG_FILE)
+    return [] unless File.file?(path)
+
+    Array(YAML.safe_load_file(path).fetch('plugins')).map(&:to_s)
+  end
+  PLUGINS.load(config_plugins)
+  PLUGINS.apply_mixins(self) # an edited list applies on the next reload; a
+                             # module already mixed in can't be un-mixed, so
+                             # restarting is the clean switch
   # Identity headers for the OpenCode Go gateway (required, not optional):
   # a custom User-Agent (never a generic SDK/HTTP-library name) plus a
   # stable per-conversation session id (x-opencode-session) for routing
   # and prompt caching. Both are hardcoded/deterministic — no knobs.
   USER_AGENT = 'factorio-hivemind/1.0'
 
+  # No key list and no code defaults: the file must exist (checked once, so
+  # "no config at all" is a clear startup error naming the example to copy),
+  # and every key is read with Hash#fetch where it is used — a missing one
+  # raises `KeyError: key not found: "<key>"` at that point.
   def self.load_config(path = CONFIG_FILE)
     raise Errno::ENOENT, "missing #{path}; copy config-hivemind.yaml.example" unless File.file?(path)
-    config = YAML.safe_load_file(path) || {}
-    missing = REQUIRED_CONFIG.reject { |key| config.key?(key) }
-    raise ArgumentError, "missing #{path} keys: #{missing.join(', ')}" unless missing.empty?
-    config
+
+    YAML.safe_load_file(path) || {}
   end
 
   # Responses-API-only hack: the gem chains every request onto the last
@@ -89,63 +102,6 @@ class HiveMindAgent
   # and filtered from live prompts (they live in the conversation). Must
   # never become a compaction target: the agent is not a player.
   AGENT_NAME = 'hivemind'
-  # Game-log watcher (factorio-current.log tail): scenario `log()` events
-  # in the common `event=<name>, k=v, ...` format from freeplay.lua/reset.lua
-  # (player-died, map-reset, research-finished, evo-stage, apex-spitter,
-  # artillery-target, fluid-flushed) are QUEUED for the next prompt.
-  # Only TURN_EVENTS additionally fire a dedicated turn (so the model can
-  # react now) followed by an auto-compaction — a map reset closes a
-  # round; other events stay queue-only. Repeats inside
-  # the configured log-event interval stay queue-only. Matching is by parsed event name
-  # (see #log_event_name), so adding a turn event is one entry here.
-  LOG_EVENT_PREFIX = 'event='
-  # Post-compaction history trim (the /compact path — replaces the old
-  # full wipe): drop exactly the messages the pass included, MINUS the
-  # newest stretch that fits the configured trim budget, which stays so the session
-  # keeps recent conversational flow and context. Size-based, not count-
-  # based: message sizes vary wildly (a turn can be one short line or a
-  # multi-KB prompt dump). Console lines that arrived mid-pass are
-  # untouched (the pass drained everything older into its material; these
-  # were never seen). memories_sent is cleared so player memories
-  # re-inject into the trimmed thread, and the system prompt IS refreshed:
-  # the pass rewrote memory blobs on disk, and a trimmed thread is the one
-  # sanctioned "fresh start" case for a prompt change (one bounded cache
-  # rebuild).
-  def trim_session_after_compaction!
-    @mutex.synchronize do
-      return false unless @chat
-      msgs = @chat.messages
-      floor = msgs.first&.role == :system ? 1 : 0   # system refreshed below
-      included = [@compaction_included_count || 0, msgs.size].min
-      # Walk backwards from the included boundary keeping the newest
-      # messages that fit the char budget (always keep at least one).
-      cut = included
-      budget = @trim_tail_chars
-      while cut > floor && !(cut < included && budget.negative?)
-        budget -= msgs[cut - 1].content.to_s.length + 1
-        cut -= 1
-      end
-      # Never leave a kept :tool result dangling under a cut-away call —
-      # the provider rejects the whole request. Advance past orphans.
-      cut += 1 while cut < msgs.size && msgs[cut].role == :tool
-      return true if cut <= floor
-      msgs.slice!(floor...cut)
-      log "session trimmed after compaction: dropped #{cut - floor} compacted messages, #{msgs.size - floor} kept"
-      # The rewritten SOUL/KNOWLEDGE change the system prompt at token 0,
-      # so the whole cached prefix rebuilds regardless of the kept suffix —
-      # there is no cache continuity to preserve. Rotate the session id
-      # with it: post-compaction is a new conversation identity.
-      @opencode_session_id = SecureRandom.uuid
-      apply_request_headers(@chat)
-      @memories_sent.clear
-      @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
-      @chat.with_instructions(system_prompt_with_memories)
-      @persisted_messages = nil   # force re-serialization of the trimmed thread
-    end
-    persist! if @session_path
-    true
-  end
-
   # rcon: an RconClient (for game.print replies). Chat completions need
   # an API key from HIVE_API_KEY (or the configured model key env).
   attr_reader :model
@@ -156,6 +112,18 @@ class HiveMindAgent
 
   # Packet-derived player attributes, database, and current-tick provider.
   attr_accessor :attrs, :player_db, :current_tick
+
+  # The parsed config-hivemind.yaml (the agent and its plugins read their
+  # keys from it with fetch — a missing key raises where it is read).
+  # Reload-safe like the mutexes below: a hot-reloaded agent built by older
+  # code has no hash, so it re-reads the file on first use.
+  def hive_config = (@hive_config ||= self.class.load_config)
+
+  # Which of Hivemind's own plugins (config-hivemind.yaml `plugins:`) are
+  # mixed in — what a call site asks before touching a plugin's methods.
+  # #plugin_files is what the sniffer re-reads on a hot reload.
+  def plugin?(name) = PLUGINS.enabled?(name)
+  def plugin_files = PLUGINS.files
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
@@ -218,8 +186,11 @@ class HiveMindAgent
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
     @last_greet = 0.0
-    @last_log_event = 0.0       # last log-event turn time
-    @log_watcher = nil          # log-tail thread (survives hot reloads; revived if dead)
+    # Logwatcher plugin state (unused when that plugin is off): the rate-limit
+    # stamp of the last log-event turn, and the log-tail thread itself (it
+    # lives on the agent, so it survives hot reloads; revived if dead).
+    @last_log_event = 0.0
+    @log_watcher = nil
     @mutex = Mutex.new
     # Separate rate-limit state from completions and log-watcher callbacks.
     @rate_mutex = Mutex.new
@@ -254,7 +225,10 @@ class HiveMindAgent
     # disk so a full RESTART (not just Ctrl-C) can resume — packets while
     # stopped are lost, but the context carries over. Default file
     # hivemind-session.json; pass session_path: false to disable in tests.
+    # No path without the `persistence` plugin: every persist call site is
+    # already guarded by @session_path, so the file is simply never written.
     @session_path = session_path == false ? nil : (session_path || 'hivemind-session.json')
+    @session_path = nil unless plugin?('persistence')
 
     # Long-term memory (keyed blobs: soul / knowledge / <player>) — the
     # compaction layer that lets a NEW session carry over what Hivemind
@@ -281,6 +255,9 @@ class HiveMindAgent
     #    Missing config/key or bad provider config raises; FactorioPacketTools
     #    rescues and leaves @agent=nil.
     hive_config = self.class.load_config(config_file)
+    # Kept whole so a plugin reads its OWN keys (with fetch, at the point of
+    # use) instead of the agent copying them out here.
+    @hive_config = hive_config
     # Models live UNDER their provider group, and the endpoint lives with
     # the group: a model entry may override any group field (except
     # `provider` — the group names the RubyLLM provider for its models).
@@ -313,10 +290,8 @@ class HiveMindAgent
     @trim_tail_chars = hive_config.fetch('trim_tail_chars').to_i
     @auto_compaction_min_chars = hive_config.fetch('auto_compaction_min_chars').to_i
     @triggers = Array(hive_config.fetch('triggers')).map(&:to_s)
-    @log_turn_events = Array(hive_config.fetch('log_turn_events')).map(&:to_s)
     @min_interval = hive_config.fetch('min_interval').to_f
     @greet_interval = hive_config.fetch('greet_interval').to_f
-    @log_event_interval = hive_config.fetch('log_event_interval').to_f
 
     raise ArgumentError, "no API key configured for #{@model}" if llm_api_key.nil?
 
@@ -363,7 +338,7 @@ class HiveMindAgent
 
     hook_chat_observers if @chat
     load_session if @session_path
-    start_scheduler
+    start_scheduler if plugin?('followups')
     initialize_events
   end
 
@@ -538,93 +513,6 @@ class HiveMindAgent
     log_error('greeting error', e)
   end
 
-  # ── Game server log watcher ────────────────────────────────────
-
-  # Tail the server's factorio-current.log (path from ServerDetect.log_path)
-  # and feed interesting lines to the agent. The watcher thread lives on the
-  # agent object, so it survives hot reloads; a dead thread is revived by
-  # calling this again at the sniffer's reload seam. Idempotent.
-  def ensure_log_watcher(path)
-    return false if path.nil?
-    return true if @log_watcher&.alive?
-    unless File.file?(path)
-      log "log watcher: #{path} not found — not watching"
-      return false
-    end
-    @log_watcher = Thread.new do
-      LogTail.follow(path) { |line| handle_log_line(line) }
-    rescue StandardError => e
-      log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
-    end
-    log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{@log_turn_events.join(', ')})"
-    true
-  end
-
-  # One tailed log line. Any `event=<name>, ...` line is QUEUED
-  # (append_history) so it rides along with whatever prompt comes next;
-  # only TURN_EVENTS (a map reset closes a round: distill memories while
-  # the session is fresh) additionally fire a dedicated turn on the FIRST
-  # match within the configured log-event interval — react in chat if players would care —
-  # and then an auto-compaction. Rate limit runs on rate_mutex (packet-style
-  # thread — never touches @mutex). async:false runs the turn inline
-  # (tests / synchronous callers).
-  def handle_log_line(line, async: true)
-    text = clean_text(strip_log_prefix(line))
-    name = log_event_name(text)
-    return if name.nil?
-    append_history(nil, text)
-    return unless @log_turn_events.include?(name)
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    rate_mutex.synchronize do
-      return if now - @last_log_event < @log_event_interval
-      @last_log_event = now
-    end
-    return run_log_event_turn(text) unless async
-    enqueue(:run_log_event_turn, text)
-    nil
-  end
-
-  # The dedicated reaction turn for one log event: build the prompt, get a
-  # reply, then distill the round into long-term memory. Compaction is
-  # skipped when there is little to compact (configured auto-compaction gate) or
-  # a pass is already running (compact_memory! guards that itself). On
-  # success the session is TRIMMED (same as /compact) so a repeated map
-  # reset finds a thin session and skips — without the trim every reset
-  # would re-compact the same material.
-  def run_log_event_turn(text)
-    prompt = turn_prompt(
-      "Game server log event: #{text}\n\n" \
-      'React as fits: this event matters to the factory community — ' \
-      'announce/comment in chat IF players would want to know, otherwise stay silent.',
-      exclude: [nil, text]
-    )
-    begin
-      send_reply(complete(prompt))
-      # After reacting: distill the round into long-term memory. Skipped
-      # when there is little to compact (configured auto-compaction gate) or a
-      # pass is already running (compact_memory! guards that itself).
-      # Trim on success (session_players cleared, compacted history dropped)
-      # so repeated resets don't re-compact the same round.
-      trim_session_after_compaction! if auto_compaction_worthwhile? && compact_memory!('map reset')
-    rescue StandardError => e
-      log_error('log-event error', e)
-    end
-  end
-
-  # Strip Factorio's log-line decoration so only the content is enqueued:
-  # "4279.523 Script @__level__/freeplay.lua:113:
-  # event=player-died, actor=morganc, ..." → "event=player-died, ...".
-  def strip_log_prefix(line)
-    line.sub(/\A\s*[\d.]+\s+(?:Script\s+\S+:\s*)?/, '')
-  end
-
-  # Generic event-name match on the stripped line: "event=player-died, ..."
-  # → "player-died". Returns nil for non-event lines. Case-insensitive so
-  # a future `EVENT=...` emitter still matches.
-  def log_event_name(text)
-    text[/\A#{Regexp.escape(LOG_EVENT_PREFIX)}([a-z0-9-]+)/i, 1]&.downcase
-  end
-
   private
 
   # ── LLM plumbing ──────────────────────────────────────────────────
@@ -649,8 +537,12 @@ class HiveMindAgent
     chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
     chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
     chat.with_tool(SetPlayerTag.new(rcon: @rcon)) if defined?(SetPlayerTag)
-    chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp)
-    chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp)
+    chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp) && plugin?('followups')
+    chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp) && plugin?('followups')
+    # The language tool edits the per-player language overrides the
+    # TRANSLATION plugin relays chat for, so it is only useful (and only
+    # offered) while that plugin is loaded.
+    chat.with_tool(SetPlayerLanguages.new(player_db: @player_db)) if Plugins.enabled?('translation')
   end
 
   def ask_llm(player, message)

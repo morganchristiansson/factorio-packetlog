@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for the game-log watcher (hivemind.rb + log_tail.rb wiring):
+# Tests for the game-log watcher (lib/hivemind_logwatcher.rb + log_tail.rb wiring):
 # keyed lines reach the console queue, first match in the window fires a
 # turn (repeats stay queue-only), and auto-compaction is gated on history.
 # Run: ruby -Ilib test/hivemind_log_watcher_test.rb

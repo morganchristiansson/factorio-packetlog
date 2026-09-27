@@ -1,8 +1,73 @@
 # Hivemind AI Agent
 
 An LLM persona that lives inside the sniffer and answers players who address
-it in in-game chat. Auto-enables in server mode when `HIVE_API_KEY` is set
+it in in-game chat. Enabled by the `hivemind` plugin (`plugins:` in
+config.yaml) and started in server mode when `HIVE_API_KEY` is set
 (no `--ai-agent` flag; requires RCON/game.print).
+
+## Plugins
+
+The sniffer's features are plugins (`lib/plugins.rb`), switched by a
+MANDATORY list in config.yaml — nothing outside the list is even loaded, and
+the sniffer refuses to start without the key (there is no hardcoded default;
+`plugins: []` runs on no features):
+
+```yaml
+# config.yaml
+plugins:
+  - hivemind        # the agent answering players who say "hivemind"
+  - translation     # relays chat to players who can't read the original
+```
+
+That is the whole list. An unknown name is a startup error, and a feature
+that is not listed is never even `require`d.
+
+**Hivemind has its own plugins**, in its own config file, through the same
+manager class and the same convention (`HiveMindAgent::PLUGINS`, a second
+`Plugins::Manager`) — so a sniffer without the `hivemind` plugin never even
+looks at them:
+
+```yaml
+# config-hivemind.yaml (required key, like every other in that file)
+plugins:
+  - persistence     # session file: resume the conversation after a restart
+  - compaction      # /compact + long-term memory (SOUL/KNOWLEDGE/players)
+  - followups       # schedule_followup / cancel_followup timers
+  - logwatcher      # tail factorio-current.log: scenario events feed the agent
+```
+
+Same manager, over a prefixed file set (`prefix: 'hivemind_'`,
+`namespace: 'HiveMind'`), so the config names stay short while the files
+say who owns them: `persistence` is `lib/hivemind_persistence.rb` and its
+module `HiveMindPersistence`, mixed into `HiveMindAgent` in the class body
+— only if it is listed. A plugin that is off is never `require`d and its
+methods never reach the agent. Call sites ask first
+(`agent.plugin?('compaction')`) instead of calling a method that may not
+exist — e.g. `/compact` refuses, `run_log_event_turn` skips the post-event
+distillation, `register_tools` leaves the timer tools out, the sniffer skips
+`ensure_log_watcher`, and without `persistence` the session file is simply
+never written (`@session_path` stays nil, and every persist call site is
+already guarded by it).
+
+Each plugin also **owns its config keys**, read from the agent's stored
+config hash with `Hash#fetch` at the point of use — `min_followup_delay` /
+`max_pending_followups` for followups, `log_turn_events` /
+`log_event_interval` for the log watcher. There is no key list and no code
+default anywhere: a missing key raises `KeyError: key not found: "<key>"`
+right where it is read, so switching a plugin off simply means nobody reads
+its keys. (The one structural key is `plugins:` itself — also read where it is
+used, in the class body that mixes the plugins in.)
+
+A plugin earns its place when it can be genuinely *off* (a deployment that
+doesn't want scenario events driving LLM turns, or has no readable game log),
+owns state of its own (a thread, its own knobs), and is optional *input* to
+the agent rather than how the agent works — hence the log watcher, but not
+the model fallback chain, the console-history queue or the join greeting,
+which are the agent itself.
+
+The list is read when `hivemind.rb` loads — startup and every hot reload,
+so an edited list applies on the next Ctrl-C (a module already mixed in
+can't be un-mixed, so the clean way to swap the list is a restart).
 
 Personality: Hivemind is the **collective consciousness of the factory** —
 not a player, but the machines themselves. It speaks coldly, patiently,
@@ -222,8 +287,9 @@ player chat ──► write_to_console action (C→S packet)
 
 ## Auth and enabling (you set this up)
 
-The agent is **fully implicit** — there is no `--ai-agent` flag. It auto-
-enables in **server mode** whenever an API key is set; no key = no AI.
+The agent is **implicit** — there is no `--ai-agent` flag. With the
+`hivemind` plugin loaded it auto-enables in **server mode** whenever an API
+key is set; no key = no AI.
 
 Set the key (the agent's only config):
 
@@ -301,13 +367,20 @@ server mode — client/pcap runs never auto-enable (the agent needs RCON).
 The agent survives Ctrl-C code reloads as a plain ivar on the persistent
 sniffer instance (reloads are IN PLACE — same objects, new code), so LLM
 context, the rate limiter, and the RubyLLM connection carry over. Only a
-second Ctrl-C (quit) ends it. The only thread it owns is the follow-up
-scheduler — a plain sleep-on-condition-variable thread with no shared
-state beyond the pending list, which keeps running across reloads (methods
-resolve against the reloaded classes; `reload_code!` revives it if it died)
-and needs no cleanup.
+second Ctrl-C (quit) ends it. The threads it owns belong to plugins: the
+follow-up scheduler — a plain sleep-on-condition-variable thread with no
+shared state beyond the pending list — and the log-tail thread. Both keep
+running across reloads (methods resolve against the reloaded classes) and
+need no cleanup.
 
-On hot reload the sniffer re-points the agent's providers and calls `@agent.ensure_followup_scheduler`. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars. Changes that add/remove instance state need a full restart; method/tool/prompt changes hot-reload fine.
+On hot reload the sniffer re-points the agent's providers and calls
+`@agent.ensure_followup_scheduler` / `ensure_log_watcher` for the plugins
+that are on (`followups`, `logwatcher` — `reload_code!` revives a thread
+that died).
+Hot reload swaps CODE, not object shape — the agent keeps its boot-time
+ivars. Changes that add/remove instance state need a full restart;
+method/tool/prompt changes hot-reload fine. `hivemind.rb` is re-`load`ed
+like everything else, so its plugin list is re-read too (see "Plugins").
 
 ## Tools
 
@@ -339,10 +412,20 @@ rebind tool classes immediately — no restart needed for tool changes.
   on a plan, remind players, run RCON queries, or chain another follow-up.
   Minimum delay 15s, at most 5 pending (the tool errors beyond that; re-
   scheduling an EXISTING name replaces it — upsert — and never counts toward
-  the cap). See "Scheduled follow-ups (timers)" below.
+  the cap). See "Scheduled follow-ups (timers)" below. Registered only while
+  the `followups` plugin is on.
 - **`CancelFollowUp`** (`cancel_followup(name:)`) — cancels a pending
   follow-up by its NAME (like `clearTimeout`); a name that already fired or
-  was cancelled errors.
+  was cancelled errors. Same plugin as above.
+- **`SetPlayerLanguages`** (`set_player_languages(player:, languages:)`) —
+  sets a player's language overrides (`players-locale.json`, the same data
+  `/locales` writes and the translation agent relays chat for). A player's
+  Factorio interface locale is often not the language they read chat in, and
+  the model can now ask for the override itself instead of an operator
+  running `/locales`. Empty value clears it; unknown names error. It is a
+  Hivemind tool, but gated on the **translation** plugin (`config.yaml
+  `plugins:`): without translation there is nothing for the override to
+  steer, so the model is never offered it.
 
 Future candidates (same pattern):
 
@@ -352,7 +435,12 @@ Future candidates (same pattern):
 
 Not wired up yet, per requirements.
 
-## Game server log watcher
+## Game server log watcher (the `logwatcher` plugin)
+
+Off unless `logwatcher` is in config-hivemind.yaml `plugins:` — then the
+agent simply never hears the game log. Its two keys (`log_turn_events`,
+`log_event_interval`) are read by the plugin with `fetch` — required while it
+is on, ignored while it is off.
 
 In server mode the agent tails the running server's `factorio-current.log`
 (path auto-detected from `/proc/<pid>/cwd` of the factorio process,

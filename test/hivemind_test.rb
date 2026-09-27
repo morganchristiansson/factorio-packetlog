@@ -25,11 +25,22 @@ class TestHiveMindAgent < Minitest::Test
     assert_equal group['provider'].to_sym, @agent.instance_variable_get(:@provider)
     assert_equal config['history_size'], @agent.instance_variable_get(:@history_size)
     assert_equal config['triggers'], @agent.triggers
-    assert_equal config['log_turn_events'], @agent.instance_variable_get(:@log_turn_events)
     assert_equal config['max_reply_len'], @agent.max_reply_len
     assert_equal config['auto_compaction_min_chars'], @agent.auto_compaction_min_chars
     assert_match(/Model switched to #{@agent.models.last}/, @agent.switch_model!(@agent.models.last))
     assert_equal @agent.models.last, @agent.model
+  end
+
+  # A plugin reads its own keys with fetch, at the point of use: no key list,
+  # no code default. A missing key raises naming itself.
+  def test_plugin_owned_config_keys
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    assert_equal config['log_turn_events'], @agent.log_turn_events
+    assert_equal config['log_event_interval'], @agent.log_event_interval
+    assert_equal config['min_followup_delay'], @agent.min_followup_delay
+    assert_equal config['max_pending_followups'], @agent.max_pending_followups
+
+    assert_raises(KeyError) { @agent.instance_variable_get(:@hive_config).fetch('no_such_key') }
   end
 
   def test_provider_groups_share_and_override_credentials
@@ -98,14 +109,54 @@ class TestHiveMindAgent < Minitest::Test
     old.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 
+  # The file must exist (named once, with the example to copy); the keys are
+  # not validated up front — they raise where they are read.
   def test_config_is_required
-    assert_raises(Errno::ENOENT) { HiveMindAgent.load_config('/nonexistent/config-hivemind.yaml') }
+    error = assert_raises(Errno::ENOENT) { HiveMindAgent.load_config('/nonexistent/config-hivemind.yaml') }
+    assert_includes error.message, 'config-hivemind.yaml.example'
+
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, "model: test\n")
-      error = assert_raises(ArgumentError) { HiveMindAgent.load_config(path) }
-      assert_includes error.message, 'providers'
+      assert_raises(KeyError) { HiveMindAgent.load_config(path).fetch('providers') }
     end
+  end
+
+  # ── Hivemind's own plugins (config-hivemind.yaml `plugins:`) ──
+
+  def test_own_plugin_list_comes_from_the_config
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, "plugins:\n  - compaction\n  - followups\n")
+
+      assert_equal %w[compaction followups], HiveMindAgent.config_plugins(path)
+    end
+    # the shipped example enables all four
+    assert_equal %w[persistence compaction followups logwatcher], HiveMindAgent.config_plugins(HIVE_TEST_CONFIG)
+    assert_equal HiveMindAgent.config_plugins(HIVE_TEST_CONFIG), HiveMindAgent::PLUGINS.loaded
+    assert @agent.plugin?('compaction')
+    assert @agent.plugin?('logwatcher')
+    refute @agent.plugin?('nope')
+    # every listed plugin's module is actually mixed in
+    assert_equal HiveMindCompaction, HiveMindAgent.instance_method(:compact_memory!).owner
+    assert_equal HiveMindLogwatcher, HiveMindAgent.instance_method(:ensure_log_watcher).owner
+  end
+
+  # `plugins:` is read where it is used — the class body that mixes the
+  # plugins in — so a file without it raises there, naming the key.
+  def test_own_plugin_list_is_required
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.safe_load_file(HIVE_TEST_CONFIG).tap { |c| c.delete('plugins') }.to_yaml)
+      error = assert_raises(KeyError) { HiveMindAgent.config_plugins(path) }
+      assert_includes error.message, 'plugins'
+    end
+  end
+
+  # A missing config file is initialize's error to report — the class must
+  # still load (it is `load`ed on every hot reload, in a running sniffer).
+  def test_own_plugin_list_tolerates_a_missing_config
+    assert_empty HiveMindAgent.config_plugins('/nonexistent/config-hivemind.yaml')
   end
 
   def test_try_rejects_unconfigured_model

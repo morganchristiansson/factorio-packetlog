@@ -3,6 +3,7 @@ require 'bundler/setup'
 require 'minitest/autorun'
 require 'timeout'
 require 'tmpdir'
+require 'agent_events'
 require_relative '../factorio-packettools'
 
 class TestAgentEvents < Minitest::Test

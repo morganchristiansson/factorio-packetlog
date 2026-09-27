@@ -2,9 +2,12 @@
 
 require 'json'
 
-# Long-term memory compaction for the Hivemind agent: the SINGLE pass
-# behind /compact that reviews the session and overwrites the keyed memory
-# blobs (soul / knowledge / <player>) in one request. Mixin on HiveMindAgent.
+# Hivemind plugin `compaction` — the file is lib/hivemind_compaction.rb (the
+# manager's `hivemind_` prefix), the module takes its CamelCase name. Listed
+# in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
+# Plugins.apply_mixins. Long-term memory compaction: the SINGLE pass behind
+# /compact that reviews the session and overwrites the keyed memory blobs
+# (soul / knowledge / <player>) in one request.
 module HiveMindCompaction
   # Long-term memory compaction: ONE pass that reviews the session
   # (bounded thread tail + current memories + console) and overwrites every
@@ -112,6 +115,54 @@ module HiveMindCompaction
     log_error('memory compaction failed', e)
     false
   end
+
+  # Post-compaction history trim (the /compact path — replaces the old
+  # full wipe): drop exactly the messages the pass included, MINUS the
+  # newest stretch that fits the configured trim budget, which stays so the session
+  # keeps recent conversational flow and context. Size-based, not count-
+  # based: message sizes vary wildly (a turn can be one short line or a
+  # multi-KB prompt dump). Console lines that arrived mid-pass are
+  # untouched (the pass drained everything older into its material; these
+  # were never seen). memories_sent is cleared so player memories
+  # re-inject into the trimmed thread, and the system prompt IS refreshed:
+  # the pass rewrote memory blobs on disk, and a trimmed thread is the one
+  # sanctioned "fresh start" case for a prompt change (one bounded cache
+  # rebuild).
+  def trim_session_after_compaction!
+    @mutex.synchronize do
+      return false unless @chat
+      msgs = @chat.messages
+      floor = msgs.first&.role == :system ? 1 : 0   # system refreshed below
+      included = [@compaction_included_count || 0, msgs.size].min
+      # Walk backwards from the included boundary keeping the newest
+      # messages that fit the char budget (always keep at least one).
+      cut = included
+      budget = @trim_tail_chars
+      while cut > floor && !(cut < included && budget.negative?)
+        budget -= msgs[cut - 1].content.to_s.length + 1
+        cut -= 1
+      end
+      # Never leave a kept :tool result dangling under a cut-away call —
+      # the provider rejects the whole request. Advance past orphans.
+      cut += 1 while cut < msgs.size && msgs[cut].role == :tool
+      return true if cut <= floor
+      msgs.slice!(floor...cut)
+      log "session trimmed after compaction: dropped #{cut - floor} compacted messages, #{msgs.size - floor} kept"
+      # The rewritten SOUL/KNOWLEDGE change the system prompt at token 0,
+      # so the whole cached prefix rebuilds regardless of the kept suffix —
+      # there is no cache continuity to preserve. Rotate the session id
+      # with it: post-compaction is a new conversation identity.
+      @opencode_session_id = SecureRandom.uuid
+      apply_request_headers(@chat)
+      @memories_sent.clear
+      @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
+      @chat.with_instructions(system_prompt_with_memories)
+      @persisted_messages = nil   # force re-serialization of the trimmed thread
+    end
+    persist! if @session_path
+    true
+  end
+
   # ── Long-term memory (compaction) ─────────────────────────────
 
   private

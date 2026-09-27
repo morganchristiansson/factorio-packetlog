@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for long-term memory (hivemind_compaction.rb + MemoryStore seeding): SOUL/knowledge prompts, compaction pass.
+# Tests for long-term memory (compaction.rb + MemoryStore seeding): SOUL/knowledge prompts, compaction pass.
 # Run: ruby -Ilib test/hivemind_compaction_test.rb
 
 require_relative 'hivemind_helper'

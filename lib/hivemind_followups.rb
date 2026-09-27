@@ -1,18 +1,25 @@
 # frozen_string_literal: true
 
-# Scheduled follow-ups (the schedule_followup / cancel_followup tools'
-# backing logic, JS setTimeout/clearTimeout analog). A MIXIN on
-# HiveMindAgent — deliberately NOT part of the tool classes: the pending
-# entries are shared state (persisted by persist!/load_session, listed by
-# compaction) and must survive hot reloads and restarts, while tools are
-# rebuilt fresh per ask.
-module HiveMindFollowUps
-  # Scheduled follow-ups (the schedule_followup tool, JS-setTimeout-like).
-  MIN_FOLLOWUP_DELAY = 15.0     # min seconds before a follow-up can fire (anti ping-pong/abuse)
-  MAX_PENDING_FOLLOWUPS = 5     # cap on pending follow-ups (the model cancels stale ones)
-  MAX_FOLLOWUP_NAME_LEN = 40    # clamp for user-chosen timer keys ('prowl', 'mall-check')
-  FOLLOWUP_YIELD_DELAY = 15.0   # re-check delay when a conversation turn holds @mutex
-                                # (player triggers get priority over self-churn)
+# Hivemind plugin `followups` — the file is lib/hivemind_followups.rb (the
+# manager's `hivemind_` prefix), the module takes its CamelCase name. Listed
+# in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
+# Plugins.apply_mixins. Scheduled follow-ups: the schedule_followup /
+# cancel_followup tools' backing logic, a JS setTimeout/clearTimeout analog.
+# Deliberately NOT part of the tool classes: the pending entries are shared
+# state (persisted by persist!/load_session, listed by compaction) and must
+# survive hot reloads and restarts, while tools are rebuilt fresh per ask.
+module HiveMindFollowups
+  # This plugin's own config keys, read where they are used (no list, no
+  # code default): switch the plugin off and nobody reads them.
+  def min_followup_delay = @min_followup_delay ||= hive_config.fetch('min_followup_delay').to_f
+  def max_pending_followups = @max_pending_followups ||= hive_config.fetch('max_pending_followups').to_i
+
+  # Clamp for user-chosen timer keys ('prowl', 'mall-check') — a bound on
+  # model input, not a setting: kept hardcoded (like MAX_TAG_LEN).
+  MAX_FOLLOWUP_NAME_LEN = 40
+  # Re-check delay when a conversation turn holds @mutex (player triggers get
+  # priority over self-churn) — internal pacing, not a setting.
+  FOLLOWUP_YIELD_DELAY = 15.0
 
   # Schedule a follow-up turn (like JavaScript setTimeout with a named
   # handle). delay_seconds: seconds from now; task: what your future self
@@ -26,7 +33,7 @@ module HiveMindFollowUps
   def schedule_followup(delay_seconds:, task:, name:)
     delay = delay_seconds.to_f
     return 'Error: delay_seconds must be a positive number of seconds.' if delay <= 0
-    return "Error: minimum delay is #{MIN_FOLLOWUP_DELAY.to_i} seconds." if delay < MIN_FOLLOWUP_DELAY
+    return "Error: minimum delay is #{min_followup_delay.to_i} seconds." if delay < min_followup_delay
     task_text = clean_text(task)
     return 'Error: task is empty.' if task_text.empty?
     name_text = clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
@@ -41,7 +48,7 @@ module HiveMindFollowUps
     @followup_mutex.synchronize do
       # Cap counts only OTHER names: replacing your own timer is always ok.
       matches = @followups.count { |f| f[:name] == name_text }
-      full = (@followups.size - matches) >= MAX_PENDING_FOLLOWUPS
+      full = (@followups.size - matches) >= max_pending_followups
       unless full
         @followups.reject! { |f| f[:name] == name_text }
         replaced = matches.positive?
@@ -50,7 +57,7 @@ module HiveMindFollowUps
       end
     end
     if full
-      return "Error: #{MAX_PENDING_FOLLOWUPS} follow-ups already pending (max #{MAX_PENDING_FOLLOWUPS}) — cancel one first."
+      return "Error: #{max_pending_followups} follow-ups already pending (max #{max_pending_followups}) — cancel one first."
     end
     # Task text is NOT echoed here — the tool-call line already logged the
     # full arguments; repeating it just duplicates long lines.

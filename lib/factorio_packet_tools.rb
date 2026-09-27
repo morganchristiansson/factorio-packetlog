@@ -7,9 +7,8 @@ require_relative 'player_db'
 require_relative 'pcap'
 require_relative 'live_capture'
 require_relative 'rcon_client'
-require_relative 'hivemind'
-require_relative 'translation_agent'
 require_relative 'log_tail'
+require_relative 'plugins'
 require_relative 'server_detect'
 require_relative 'player_attrs'
 
@@ -40,8 +39,11 @@ class FactorioPacketTools
   # Lib files reloaded on Ctrl-C/SIGHUP (relative to lib/). `load` re-reads
   # each file (redefining classes); `require` would only load once.
   # Constant-redefinition warnings are expected and silenced during load.
+  # Optional features (hivemind, translation) are NOT listed: their files
+  # come from Plugins.files (plus the agent's own plugin files), so a
+  # feature that is switched off is never read back in.
   RELOADABLE_LIBS = %w[
-    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail agent_events memory_store hivemind_prompts hivemind_tools hivemind_persistence hivemind_compaction hivemind_followups hivemind translation_agent player_attrs input_actions_20 factorio_packet_tools
+    factorio_protocol item_db player_db pcap live_capture rcon_client log_tail agent_events memory_store player_attrs input_actions_20 factorio_packet_tools
     factorio_protocol/packets/factorio_packet
     factorio_protocol/packets/heartbeat_packet
     factorio_protocol/packets/connection_packets
@@ -205,23 +207,27 @@ class FactorioPacketTools
       # survives hot reloads with the instance). Main action types are
       # version-stable and need no switch — only segments follow
       # defines.input_action.
+      # Optional features: both objects are plain ivars — hot reload swaps
+      # the CODE under this object, not the object itself, so there is
+      # nothing to carry over or re-point.
+      @agent = nil
+      @translation_agent = nil
       # HiveMind AI agent: reads packet-decoded chat and answers players who
-      # say "hivemind". Auto-enabled by the entry point (server mode +
-      # HIVE_API_KEY). Lives as a plain ivar: hot reload swaps the CODE under
-      # this object, not the object itself, so there is nothing to carry
-      # over or re-point. Context comes from the packet-derived
+      # say "hivemind". Needs the `hivemind` plugin (config.yaml `plugins:`)
+      # AND a key for its startup model, which the entry point checks into
+      # options[:ai_agent]. Context comes from the packet-derived
       # @attrs cache (seeded from RCON at startup, maintained by
       # packets); online players and stats are cached. Player admin is
       # stored in PlayerDatabase (players-cache.json); targeted RCON
       # attrs lookups happen once for newly joined players only.
-      if options[:ai_agent]
+      if Plugins.enabled?('hivemind') && options[:ai_agent]
         if @rcon
           begin
             @agent = HiveMindAgent.new(rcon: @rcon, attrs: @attrs,
                                         current_tick: -> { @game_tick },
                                         player_db: @player_db)
-            @agent.ensure_followup_scheduler
-            @agent.ensure_log_watcher(ServerDetect.log_path)
+            @agent.ensure_followup_scheduler if @agent.plugin?('followups')
+            @agent.ensure_log_watcher(ServerDetect.log_path) if @agent.plugin?('logwatcher')
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
           rescue => e
             warn "[hivemind] AI agent disabled: #{e.message}"
@@ -232,11 +238,11 @@ class FactorioPacketTools
         end
       end
 
-      # Translation agent: auto-translates chat for foreign players.
-      # Enabled in server mode when RCON is available (no API key needed).
+      # Translation agent: auto-translates chat for foreign players. Needs
+      # the `translation` plugin; no API key required.
       # Backend and Google API key come from config-translation.yaml
       # (`google_api_key:`) with the env overriding it.
-      if @rcon
+      if Plugins.enabled?('translation') && @rcon
         begin
           @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
           backend = @translation_agent.backend
@@ -348,13 +354,13 @@ class FactorioPacketTools
     $VERBOSE = nil
     begin
       root = File.expand_path('..', __dir__)
-      RELOADABLE_LIBS.each { |lib| load File.expand_path("lib/#{lib}.rb", root) }
+      reload_files.each { |lib| load lib.start_with?('/') ? lib : File.expand_path("lib/#{lib}.rb", root) }
     ensure
       $VERBOSE = old_verbose
     end
     select_protocol_version
-    @agent&.ensure_followup_scheduler
-    @agent&.ensure_log_watcher(ServerDetect.log_path)
+    @agent&.ensure_followup_scheduler if @agent&.plugin?('followups')
+    @agent&.ensure_log_watcher(ServerDetect.log_path) if @agent&.plugin?('logwatcher')
     # Hot reload swaps code under the same agent object; re-point
     # the cached attrs/tick provider in case this is the first
     # reload after the agent was constructed (or libs changed
@@ -366,6 +372,13 @@ class FactorioPacketTools
   end
 
   private
+
+  # Every lib file a reload re-reads: the core list, the loaded features'
+  # files, and the loaded hivemind plugins' files. Absolute paths come from
+  # Plugins (a feature may live outside lib/), bare names are lib/ files.
+  def reload_files
+    (RELOADABLE_LIBS + Plugins.files + [@agent].compact.flat_map(&:plugin_files)).uniq
+  end
 
   # Whether to persist this packet to the capture file. `capture: full`
   # keeps everything, `capture: save` only the TransferBlocks; the
@@ -1120,10 +1133,12 @@ class FactorioPacketTools
         end
       end
     when '/compact'
-      # Single guard lives in compact_memory! (dummy MemoryStore → enabled?=false
-      # → return false, no LLM call). No outer check needed.
-      unless @agent
-        puts 'memory compaction unavailable (AI agent not running) — session NOT cleared'
+      # Compaction is one of Hivemind's own plugins (config-hivemind.yaml
+      # `plugins:`); the only other way in is no running agent. Past that
+      # compact_memory! itself returns false for a disabled memory store, so
+      # the session is kept and nothing is cleared.
+      unless @agent&.plugin?('compaction')
+        puts 'memory compaction unavailable (no agent, or the compaction plugin is off in config-hivemind.yaml) — session NOT cleared'
         return
       end
       # Runs in a background thread so the console stays responsive (the

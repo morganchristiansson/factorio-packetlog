@@ -21,8 +21,10 @@ either on a client or on the game server host (server mode, with RCON).
 - `lib/rcon_client.rb` — RCON queries via `rcon.print` + `helpers.table_to_json` (JSON), `#say` (Lua-quoted `game.print`), `#command` (raw console cmd), `#server_version` (`helpers.game_version`)
 - `lib/player_db.rb` — Player ID→name mapping (`players-cache.json`) + per-player language overrides (`players-locale.json`, set via `/locales`)
 - `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
+- `lib/plugins.rb` — the plugin manager (`Plugins::Manager`), convention, no catalog: a feature named `foo` IS the file `lib/foo.rb` (its family `lib/foo_*.rb` rides along for the hot reload), and a name with a `/` is a path, so a feature can ship outside lib/. `prefix:`/`namespace:` let one owner claim a prefixed set of files and module names. `Plugins` is the sniffer's own instance (config.yaml `plugins:` — MANDATORY, no default: absent = startup error, `plugins: []` = none). Hivemind runs a second instance (config-hivemind.yaml `plugins:` with `prefix: 'hivemind_'`, `namespace: 'HiveMind'` → `lib/hivemind_*.rb`, modules `HiveMind*`) whose plugins are mixed into the agent class. `Plugins.enabled?('translation')` is also the gate a feature checks before exposing itself to another one (the agent's `set_player_languages` tool).
+- `lib/hivemind_persistence.rb` / `lib/hivemind_compaction.rb` / `lib/hivemind_followups.rb` / `lib/hivemind_logwatcher.rb` — Hivemind's OWN plugins (modules `HiveMindPersistence` / `HiveMindCompaction` / `HiveMindFollowups` / `HiveMindLogwatcher`, mixed in by `HiveMindAgent::PLUGINS.apply_mixins`): session file, long-term memory + `/compact`, scheduled follow-ups, the factorio-current.log watcher. Named in config-hivemind.yaml `plugins:` (short names; the manager's `hivemind_` prefix + `HiveMind` namespace map them to the files/modules); not listed = the file is never even required. **A plugin owns its config keys**: it reads them with `Hash#fetch` from the agent's stored `@hive_config` at the point of use — no key list, no code default — so switching a plugin off simply means nobody reads its keys.
 - `lib/memory_store.rb` — Hivemind long-term memory: keyed blobs → `memories/SOUL.md` (soul), `memories/KNOWLEDGE.md` (knowledge), `memories/players/<name>.md` (per-player). Atomic whole-blob writes; keys are never file paths to the model.
-- `lib/hivemind.rb` — Hivemind AI agent (`HiveMindAgent`; prompts in `lib/hivemind_prompts.rb`, tools in `lib/hivemind_tools.rb`, persistence/compaction/follow-up mixins in `lib/hivemind_persistence.rb` / `lib/hivemind_compaction.rb` / `lib/hivemind_followups.rb`): `HivemindReply` [model-facing name "reply"], `RconQuery`, `SetPlayerTag`, `ScheduleFollowUp`/`CancelFollowUp`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (reply tool, Lua-quoted); read-only RCON queries via `rcon_query` tool; player tags via `set_player_tag` (the only state-changing tool). **Scheduled follow-ups**: `schedule_followup` / `cancel_followup` tools (JS `setTimeout`/`clearTimeout` analog) — the model sets a timer for a later turn (e.g. "check whether spawn is held in 10 minutes"); a single scheduler thread (condition-variable sleep, serialized with asks via the same mutex) fires a fresh turn with the current context + the task; entries persist with absolute deadlines, are re-armed on restart, and survive compaction. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars; changes that add/remove instance state need a full restart (method/tool/prompt changes hot-reload fine). Reloads happen IN PLACE now: the sniffer's `reload_code!` re-`load`s the libs and calls `ensure_followup_scheduler` to revive a dead scheduler thread. Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`greet_interval` in config; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one single-pass LLM turn in a throwaway chat replaying the live thread (input-token cache reused) that rewrites every keyed memory as delimited plain-text sections (no tools — the gateway drops tool-call args); then trims the compacted range keeping a recent tail (distill-then-trim — `/compact` is now the only session clear; `/forget`/`/clear` were removed, and memories are kept). See `docs/ai-agent.md`.
+- `lib/hivemind.rb` — Hivemind AI agent (`HiveMindAgent`; prompts in `lib/hivemind_prompts.rb`, tools in `lib/hivemind_tools.rb`, and its OWN plugins — `persistence`/`compaction`/`followups`/`logwatcher` (the `lib/hivemind_*.rb` files), listed in config-hivemind.yaml `plugins:` and mixed into the class body there, so a plugin that is off is never required and never lands on the agent; call sites ask `agent.plugin?('compaction')` first): `HivemindReply` [model-facing name "reply"], `RconQuery`, `SetPlayerTag`, `ScheduleFollowUp`/`CancelFollowUp` (only while the `followups` plugin is on), `SetPlayerLanguages` (a Hivemind tool gated on `Plugins.enabled?('translation')`): answers in-game chat containing "hivemind" (case-insensitive) via ruby_llm. Replies via RCON `game.print` (reply tool, Lua-quoted); read-only RCON queries via `rcon_query` tool; player tags via `set_player_tag` (the only state-changing tool). **Scheduled follow-ups**: `schedule_followup` / `cancel_followup` tools (JS `setTimeout`/`clearTimeout` analog) — the model sets a timer for a later turn (e.g. "check whether spawn is held in 10 minutes"); a single scheduler thread (condition-variable sleep, serialized with asks via the same mutex) fires a fresh turn with the current context + the task; entries persist with absolute deadlines, are re-armed on restart, and survive compaction. Tools re-registered before every ask → Ctrl-C hot reloads pick up agent/tool code changes without restart. Hot reload swaps CODE, not object shape — the agent keeps its boot-time ivars; changes that add/remove instance state need a full restart (method/tool/prompt changes hot-reload fine). Hivemind's own plugin list is re-read on every reload (the file is `load`ed), though a module already mixed in can't be un-mixed — restart to swap the list cleanly. Reloads happen IN PLACE now: the sniffer's `reload_code!` re-`load`s the libs and calls `ensure_followup_scheduler` to revive a dead scheduler thread. Personality: omniscient factory-consciousness with a touch of HAL (lives in `memories/SOUL.md`, seeded from `DEFAULT_SOUL`, evolved by compaction). Context per trigger: online players, play-time/admin stats (system prompt + per-turn snapshot) + INCREMENTAL console lines (chat/join/leave since the last prompt — never duplicated). LLM-generated personal join greetings (`greet_interval` in config; greeting prompt carries total play time + admin status + the player's memory). **Memory compaction** (`compact_memory!`): one single-pass LLM turn in a throwaway chat replaying the live thread (input-token cache reused) that rewrites every keyed memory as delimited plain-text sections (no tools — the gateway drops tool-call args); then trims the compacted range keeping a recent tail (distill-then-trim — `/compact` is now the only session clear; `/forget`/`/clear` were removed, and memories are kept). See `docs/ai-agent.md`.
 - `lib/pcap.rb` — PcapWriter / PcapReader
 - `lib/live_capture.rb` — pcaprub live capture (msg-13 fast path)
 - `tools/rcon.rb` — RCON CLI (status/players/exec/raw)
@@ -167,24 +169,45 @@ var (applies to new AND existing knobs):
    run that sets it to a non-default value. (`memories/` remains hardcoded.)
 2. **One source per setting.** Hivemind behavior comes from
    `config-hivemind.yaml`; no Hivemind CLI args or non-secret env vars.
-3. **Secrets are env-first**: env var, else a key in the gitignored
-   `config*.yaml` (`google_api_key:` in config-translation.yaml, `api_key:`
-   on a Hivemind provider group) — never a CLI flag (shell history / `ps` /
-   committed scripts leak it). `HIVE_API_KEY` is the only Hivemind env var.
-4. **One feature = one toggle.** No flag AND env for the same on/off
+   Sniffer features are plugins, switched by the ONE `plugins:` list in
+   `config.yaml` (see `lib/plugins.rb`) — never by a per-feature flag. It is
+   mandatory: the sniffer refuses to start without it, so the feature set is
+   always an explicit choice, never a hardcoded default.
+   Hivemind's own plugins are a `plugins:` list in ITS config file.
+3. **Missing or auto-detect-failed is an ERROR**, never a silent fallback —
+   and it fails WHERE IT IS USED, not from a validation list: every config
+   key is read with `Hash#fetch` (a missing one raises `KeyError` naming
+   itself), an argos install that isn't there raises, a Google backend with no
+   key raises. A plugin whose prerequisites fail is reported disabled, never
+   half-alive (a translation agent that starts and never translates a word is
+   the failure mode this rule exists to prevent).
+4. **Secrets are env-first**: env var, else auto-detection, else a key in the
+   gitignored `config*.yaml` (`google_api_key:` in config-translation.yaml,
+   `api_key:` on a Hivemind provider group) — never a CLI flag (shell
+   history / `ps` / committed scripts leak it) and NEVER a literal in code
+   (tools/rcon.rb once shipped the server's RCON password as its last
+   fallback — a committed secret is leaked the moment it's pushed).
+   `HIVE_API_KEY` is the only Hivemind env var.
+5. **One feature = one toggle.** No flag AND env for the same on/off
    switch (there's no `--ai-agent`/`HIVE_AGENT` pair — the agent is
-   implicit: on in server mode iff the startup model has a key, env or
-   the group's `api_key:`).
-5. **Deterministic defaults don't get knobs.** If a value can only ever
+   implicit: the `hivemind` plugin plus server mode and a key for the
+   startup model, env or the group's `api_key:`).
+6. **Deterministic defaults don't get knobs.** If a value can only ever
    be one thing, hardcode it.
 
 Current AI config surface:
 
 | Knob | Source | Type |
 |------|--------|------|
-| agent on/off | implicit (server mode + a key for the startup model) | — |
+| features on/off (hivemind, translation) | `plugins:` in `config.yaml` — MANDATORY, no default | YAML list |
+| hivemind's own plugins on/off (persistence, compaction, followups, logwatcher) | `plugins:` in `config-hivemind.yaml` — required like every other key there | YAML list |
+| agent actually started | implicit (server mode + a key for the startup model) | — |
 | api key | `api_key_env` (default `HIVE_API_KEY`) / `api_key:` | env (secret), YAML fallback |
 | required models, per-provider provider/api_base, prompts, limits | `config-hivemind.yaml` | YAML |
+| followups keys (`min_followup_delay`, `max_pending_followups`) | `config-hivemind.yaml`, read by the plugin (missing → KeyError there) | YAML |
+| logwatcher keys (`log_turn_events`, `log_event_interval`) | `config-hivemind.yaml`, read by the plugin (missing → KeyError there) | YAML |
+| translation `backend`, `whitelist`, `min_interval` (no code defaults) | `config-translation.yaml`, read with fetch | YAML |
+| google key | `GOOGLE_TRANSLATE_API_KEY` / `google_api_key:` | env (secret), YAML fallback |
 
 ## Usage
 
@@ -192,8 +215,9 @@ Current AI config surface:
 # Server host, everything auto-detected (interface, port, IP, RCON):
 sudo ruby factorio-packettools.rb
 
-# With the Hivemind AI agent — fully implicit: set HIVE_API_KEY and the
-# agent auto-enables in server mode (no flag, no extra args):
+# With the Hivemind AI agent — set HIVE_API_KEY and the agent starts in
+# server mode (no flag, no extra args); features themselves are the
+# `plugins:` list in config.yaml:
 HIVE_API_KEY=... sudo ruby factorio-packettools.rb
 # (Capture is always on; retention defaults bound disk. No key = no AI.
 # Hivemind behavior is configured in config-hivemind.yaml.)
@@ -218,17 +242,18 @@ ruby factorio-packettools.rb -r capture.pcap
 ruby tools/rcon.rb status          # version/players/admins/time/evolution
 ruby tools/rcon.rb exec "/shout hi"  # or /sc for silent Lua
 
-# Tests (bundle exec: server_mode/translation_agent need the rcon gem, and it
-# makes the whole suite runnable in one process — 301 runs, no version-table
+# Tests (bundle exec: server_mode/translation need the rcon gem, and it
+# makes the whole suite runnable in one process — 314 runs, no version-table
 # leakage between files):
 #   bundle exec ruby -Ilib -e 'Dir["test/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
 #
 # Individually:
 bundle exec ruby -Ilib test/hivemind_test.rb             # hivemind agent core (triggers, context, greetings)
 bundle exec ruby -Ilib test/hivemind_tools_test.rb       # RubyLLM tool classes
-bundle exec ruby -Ilib test/hivemind_persistence_test.rb # session file round-trips
-bundle exec ruby -Ilib test/hivemind_compaction_test.rb  # long-term memory + /compact
-bundle exec ruby -Ilib test/hivemind_followups_test.rb   # scheduled follow-ups
+bundle exec ruby -Ilib test/hivemind_persistence_test.rb # persistence plugin: session file round-trips
+bundle exec ruby -Ilib test/hivemind_compaction_test.rb  # compaction plugin: long-term memory + /compact
+bundle exec ruby -Ilib test/hivemind_followups_test.rb   # followups plugin: scheduled follow-ups
+bundle exec ruby -Ilib test/plugins_test.rb              # the config.yaml `plugins:` list (hivemind sub-plugins: hivemind_test)
 bundle exec ruby -Ilib test/server_mode_test.rb       # server mode + ops
 bundle exec ruby -Ilib test/packet_fixtures_test.rb   # real captured packets
 bundle exec ruby -Ilib test/factorio_protocol_test.rb # protocol unit tests

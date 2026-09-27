@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for session persistence (hivemind_persistence.rb): save/restore, corrupt files, tool-call round-trips.
+# Tests for session persistence (persistence.rb): save/restore, corrupt files, tool-call round-trips.
 # Run: ruby -Ilib test/hivemind_persistence_test.rb
 
 require_relative 'hivemind_helper'

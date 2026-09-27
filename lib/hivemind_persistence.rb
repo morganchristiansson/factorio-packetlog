@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
-# Restart-safe session persistence for the Hivemind agent: console queue +
+# Hivemind plugin `persistence` — the file is lib/hivemind_persistence.rb
+# (the manager's `hivemind_` prefix), the module takes its CamelCase name.
+# Listed in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
+# Plugins.apply_mixins. Restart-safe session persistence: console queue +
 # LLM conversation + pending follow-ups serialized to a JSON session file
-# (atomic tmp+rename). Mixin on HiveMindAgent.
+# (atomic tmp+rename).
 module HiveMindPersistence
   # ── Session persistence (restart-safe) ──────────────────────────
 
@@ -50,7 +53,7 @@ module HiveMindPersistence
         next unless e.is_a?(Hash) && e['due_at'].is_a?(Numeric)
         task_text = clean_text(e['task'])
         next if task_text.empty?
-        name = clean_text(name).to_s[0, HiveMindFollowUps::MAX_FOLLOWUP_NAME_LEN]
+        name = clean_text(name).to_s[0, HiveMindFollowups::MAX_FOLLOWUP_NAME_LEN]
         next if name.empty?
         now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         @followups.reject! { |f| f[:name] == name }

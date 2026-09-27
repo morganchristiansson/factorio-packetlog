@@ -166,6 +166,14 @@ Ctrl-C needed) to filter the console output:
   agent: a player's effective languages = Factorio locale + overrides, so
   an `en` override stops their messages being translated and stops them
   receiving relay lines for English/pt/ru messages they already read.
+  The translation agent itself is the `translation` plugin (config.yaml
+  `plugins:`; see docs/ai-agent.md). Its config (config-translation.yaml) is
+  required while it is on — `backend`, `whitelist`, `min_interval` all have
+  no code defaults, and a backend that can't run (no argos binary or packs, a
+  Google key missing) is a startup error reported as
+  `[translate] Translation agent disabled: …`, never a silent no-op. The
+  Hivemind agent can set the same overrides itself with `set_player_languages`
+  — a Hivemind tool only offered while the translation plugin is loaded.
 
 - Chat (`write_to_console`) is **always printed and exempt from all
   filters** — including the agent's decoded chat feed.
@@ -196,12 +204,18 @@ anchoring the packet-maintained roster to RCON's authoritative view.
 
 Implementation: `factorio-packettools.rb` is a thin entry point (CLI, traps,
 one construction); the reloadable classes live in `lib/` and are listed in
-`FactorioPacketTools::RELOADABLE_LIBS`. Caveat: reload swaps CODE, not object
-shape — new ivars need lazy init (`@x ||=`) or a full restart.
+`FactorioPacketTools::RELOADABLE_LIBS` plus the files of the features that
+are loaded (`Plugins.files` and the agent's own plugin files — anything not
+in `plugins:` is never re-read in). Caveat: reload swaps CODE, not object shape — new ivars need
+lazy init (`@x ||=`) or a full restart. config.yaml is read once, at
+startup; Hivemind's own plugin list (config-hivemind.yaml) is re-read on
+every reload, since its file is re-`load`ed.
 
 ## Tests
 
 - `ruby -Ilib test/server_mode_test.rb` — server mode, auto-detect,
   dedicated detection, hot-reload state, RCON roster parsing.
+- `ruby -Ilib test/plugins_test.rb` — the `plugins:` feature list and the
+  hot-reload file list.
 - `ruby -Ilib test/packet_fixtures_test.rb` — real captured packet fixtures.
 - `ruby -Ilib test/factorio_protocol_test.rb` — protocol unit tests.

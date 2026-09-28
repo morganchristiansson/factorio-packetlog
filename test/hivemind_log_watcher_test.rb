@@ -11,6 +11,14 @@ require_relative 'hivemind_helper'
 class TestHivemindLogWatcher < Minitest::Test
   include HivemindSpecHelpers
 
+  # Real log lines (factorio-current.log, reset.lua), reduced to the fields
+  # this feature reads: a 0-minute /reset, a 9-minute round, and real ones.
+  RESET_0 = '1.0 Script @__level__/reset.lua:28: event=map-reset, actor=morganc, victory=false, science=0, minutes=0'
+  RESET_9 = '1.0 Script @__level__/reset.lua:28: event=map-reset, actor=morganc, victory=false, science=0, minutes=9'
+  RESET_10 = '1.0 Script @__level__/reset.lua:28: event=map-reset, actor=morganc, victory=false, science=0, minutes=10'
+  RESET_45 = '2.0 Script @__level__/reset.lua:30: event=map-reset, actor=morganc, victory=false, science=0, minutes=45'
+  RESET_44 = '2541.706 Script @__level__/reset.lua:291: event=map-reset, actor=morganc, victory=false, science=0, minutes=44'
+
   def setup
     @agent = make_agent
     @logwatcher = @agent.plugins[:logwatcher] # the FEATURE (a class), not the agent
@@ -22,7 +30,7 @@ class TestHivemindLogWatcher < Minitest::Test
   # ── Line handling ──────────────────────────────────────────────
 
   def test_map_reset_line_is_queued_and_fires_turn
-    @logwatcher.handle_log_line('2541.706 Script @__level__/reset.lua:291: event=map-reset, actor=morganc, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line(RESET_44, async: false)
     assert_equal 1, captured_prompts.size, 'first match in the window fires a dedicated turn'
     prompt = captured_prompts.first
     assert_includes prompt, 'Game server log event'
@@ -39,11 +47,13 @@ class TestHivemindLogWatcher < Minitest::Test
   end
 
   def test_repeats_within_interval_stay_queue_only
-    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=1', async: false) # fires + drains queue
+    # real rounds (>= MIN_ROUND_MINUTES) so this is the INTERVAL under test,
+    # not the short-round filter
+    @logwatcher.handle_log_line(RESET_44, async: false) # fires + drains queue
     assert_empty queued_lines
-    @logwatcher.handle_log_line('2.0 Script x.lua:2: event=map-reset, actor=a, victory=false, science=0, minutes=2', async: false) # repeat: queue only
+    @logwatcher.handle_log_line(RESET_45, async: false) # repeat: queue only
     assert_equal 1, captured_prompts.size, 'repeat must not trigger a turn'
-    assert_includes queued_lines.join("\n"), 'event=map-reset, actor=a, victory=false, science=0, minutes=2'
+    assert_includes queued_lines.join("\n"), 'minutes=45'
   end
 
 
@@ -51,7 +61,7 @@ class TestHivemindLogWatcher < Minitest::Test
 
   def test_auto_compaction_skipped_on_thin_session
     compacted = collect_compactions
-    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=0', async: false)
+    @logwatcher.handle_log_line(RESET_44, async: false)
     wait_for_turn_thread
     assert_empty compacted, 'thin session must not waste a compaction pass'
   end
@@ -60,9 +70,33 @@ class TestHivemindLogWatcher < Minitest::Test
     compacted = collect_compactions
     pad = 'x' * @agent.auto_compaction_min_chars
     @agent.instance_variable_get(:@chat).add_message(role: :user, content: pad)
-    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line(RESET_44, async: false)
     wait_for_turn_thread
     assert_includes compacted, 'map reset'
+  end
+
+  # A reset that is not a round ending: still context for the next prompt,
+  # but no turn and no compaction (both are paid LLM calls).
+  def test_short_rounds_are_queued_but_fire_nothing
+    compacted = collect_compactions
+    3.times { @logwatcher.handle_log_line(RESET_0, async: false) }
+    @logwatcher.handle_log_line(RESET_9, async: false)
+    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=player-died, actor=a', async: false)
+
+    assert_empty captured_prompts, 'a /reset fires no turn'
+    assert_empty compacted, 'and no compaction'
+    assert_equal 5, queued_lines.size, 'but every event line is still context for the next prompt'
+    assert_includes queued_lines.first, 'minutes=0'
+  end
+
+  def test_a_round_of_ten_minutes_still_reacts
+    compacted = collect_compactions
+    pad = 'x' * @agent.auto_compaction_min_chars
+    @agent.instance_variable_get(:@chat).add_message(role: :user, content: pad)
+    @logwatcher.handle_log_line(RESET_10, async: false)
+    wait_for_turn_thread
+
+    assert_includes compacted, 'map reset', 'ten minutes is a real round'
   end
 
   def test_successful_auto_compaction_trims_so_repeated_reset_skips
@@ -81,7 +115,7 @@ class TestHivemindLogWatcher < Minitest::Test
       @compaction_included_count = @chat.messages.size
       true
     end
-    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line(RESET_44, async: false)
     refute @agent.send(:auto_compaction_worthwhile?), 'trimmed session must fall below the auto-compaction gate so a repeated reset skips'
   end
 

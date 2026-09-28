@@ -48,6 +48,16 @@ class HiveMindLogwatcher
   # (see #log_event_name), so adding a turn event is one entry here.
   LOG_EVENT_PREFIX = 'event='
 
+  # A round shorter than this is not a round ENDING: the line is still
+  # queued (it is a fact about the game, and belongs in the next prompt's
+  # context) but it fires no turn and no compaction. The log on a
+  # reset-stress server is mostly these — 437 map-reset lines in 466 seconds
+  # there, 348 of them 0..7 minutes long — and a turn plus a compaction are
+  # paid LLM calls. Hardcoded, not a knob: ten minutes is a real round and
+  # nothing here needs it to be anything else. The `minutes=` field is the
+  # signal (it appears on round-scoped lines and on nothing else).
+  MIN_ROUND_MINUTES = 10
+
   # Tail the server's factorio-current.log (path from ServerDetect.log_path)
   # and feed interesting lines to the agent. The watcher thread lives on the
   # agent object, so it survives hot reloads; a dead thread is revived by
@@ -80,8 +90,9 @@ class HiveMindLogwatcher
     text = host.clean_text(strip_log_prefix(line))
     name = log_event_name(text)
     return if name.nil?
-    host.append_history(nil, text)
+    host.append_history(nil, text)      # every event line is context
     return unless log_turn_events.include?(name)
+    return if stub_round?(text)         # …but a /reset is not a round ending
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     host.rate_mutex.synchronize do
       return if now - @last_log_event < log_event_interval
@@ -120,6 +131,14 @@ class HiveMindLogwatcher
       host.log_error('log-event error', e)
     end
   end
+
+  # A round-scoped line (map-reset) whose own `minutes=` says the round was
+  # shorter than MIN_ROUND_MINUTES. false for every other event, which
+  # carries no round length.
+  def stub_round?(text)
+    minutes = text[/\bminutes=(\d+)/, 1]
+    !minutes.nil? && minutes.to_i < MIN_ROUND_MINUTES
+  end # rubocop:disable Naming/PredicateName
 
   # Strip Factorio's log-line decoration so only the content is enqueued:
   # "4279.523 Script @__level__/freeplay.lua:113:

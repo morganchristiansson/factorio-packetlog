@@ -35,8 +35,8 @@ class TestHiveMindAgent < Minitest::Test
   # no code default. A missing key raises naming itself.
   def test_plugin_owned_config_keys
     config = YAML.safe_load_file(HIVE_TEST_CONFIG)
-    assert_equal config['log_turn_events'], @agent.log_turn_events
-    assert_equal config['log_event_interval'], @agent.log_event_interval
+    assert_equal config['log_turn_events'], @agent.plugins[:logwatcher].log_turn_events
+    assert_equal config['log_event_interval'], @agent.plugins[:logwatcher].log_event_interval
     assert_equal config['min_followup_delay'], @agent.min_followup_delay
     assert_equal config['max_pending_followups'], @agent.max_pending_followups
 
@@ -139,7 +139,8 @@ class TestHiveMindAgent < Minitest::Test
     refute @agent.plugin?('nope')
     # every listed plugin's module is actually mixed in
     assert_equal HiveMindCompaction, HiveMindAgent.instance_method(:compact_memory!).owner
-    assert_equal HiveMindLogwatcher, HiveMindAgent.instance_method(:ensure_log_watcher).owner
+    assert_kind_of HiveMindLogwatcher, @agent.plugins[:logwatcher],
+                 'the listed plugin is a feature object, not a mixin'
   end
 
   # `plugins:` is read where it is used — the class body that mixes the

@@ -871,9 +871,9 @@ class TestServerMode < Minitest::Test
   def test_quickbar_backup_needs_rcon_and_survives_a_corrupt_file
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
-        File.write(QuickbarBackup::FILENAME, '{broken')
         rcon, = fake_backup_rcon
-        backup = build_backup(rcon: rcon)
+        backup = build_backup(rcon: rcon)  # the build requires the feature file
+        File.write(QuickbarBackup::FILENAME, '{broken')
         backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30))
         assert_equal 30, JSON.parse(File.read(QuickbarBackup::FILENAME))['alice'][0][0],
                      'a corrupt file reads as empty and the next join rewrites it'

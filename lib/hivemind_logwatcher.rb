@@ -2,10 +2,11 @@
 
 require_relative 'log_tail'
 
-# Hivemind plugin `logwatcher` — the file is lib/hivemind_logwatcher.rb (the
-# manager's `hivemind_` prefix), the module takes its CamelCase name. Listed
-# in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
-# Plugins.apply_mixins. The game server log watcher: tails the running
+# Hivemind feature `logwatcher` — the file is lib/hivemind_logwatcher.rb (the
+# plugin set's `hivemind_` prefix), the class takes its CamelCase name.
+# Listed in config-hivemind.yaml `plugins:` and built by the agent's
+# Plugins::PluginSet with the agent as its owner. The game server log
+# watcher: tails the running
 # server's factorio-current.log
 # (scenario `log()` events in the common `event=<name>, k=v, ...` format from
 # freeplay.lua/reset.lua: player-died, map-reset, research-finished,
@@ -17,14 +18,24 @@ require_relative 'log_tail'
 # queue-only.
 #
 # Optional input to the agent (not cross-cutting state like persistence /
-# compaction / followups): switch it off and the agent simply never hears the
-# game log. Its two knobs — `log_turn_events` and `log_event_interval` — stay
-# required keys of config-hivemind.yaml, read by the agent.
-module HiveMindLogwatcher
-  # This plugin's own config keys, read where they are used (no list, no
-  # code default): switch the plugin off and nobody reads them.
-  def log_turn_events = (@log_turn_events ||= hive_config.fetch('log_turn_events').map(&:to_s))
-  def log_event_interval = @log_event_interval ||= hive_config.fetch('log_event_interval').to_f
+# compaction / followups): switch it off and `agent.plugins[:logwatcher]` is
+# nil and the agent simply never hears the game log. Its two knobs —
+# `log_turn_events` and `log_event_interval` — stay required keys of
+# config-hivemind.yaml, read here where they are used (no list, no code
+# default): switch the feature off and nobody reads them.
+class HiveMindLogwatcher
+  # The agent, as its owner: this feature reads the agent's published
+  # interface (hive_config, the LLM entry points, the log helpers) and keeps
+  # its own thread and rate-limit stamp to itself.
+  def initialize(host)
+    @host = host
+    @last_log_event = 0.0
+  end
+
+  attr_reader :host
+
+  def log_turn_events = (@log_turn_events ||= host.hive_config.fetch('log_turn_events').map(&:to_s))
+  def log_event_interval = @log_event_interval ||= host.hive_config.fetch('log_event_interval').to_f
 
   # Game-log watcher (factorio-current.log tail): scenario `log()` events
   # in the common `event=<name>, k=v, ...` format from freeplay.lua/reset.lua
@@ -43,17 +54,17 @@ module HiveMindLogwatcher
   # calling this again at the sniffer's reload seam. Idempotent.
   def ensure_log_watcher(path)
     return false if path.nil?
-    return true if @log_watcher&.alive?
+    return true if @thread&.alive?
     unless File.file?(path)
-      log "log watcher: #{path} not found — not watching"
+      host.log "log watcher: #{path} not found — not watching"
       return false
     end
-    @log_watcher = Thread.new do
+    @thread = Thread.new do
       LogTail.follow(path) { |line| handle_log_line(line) }
     rescue StandardError => e
-      log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
+      host.log_error('log watcher died (restart the sniffer or hot-reload to revive)', e)
     end
-    log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{log_turn_events.join(', ')})"
+    host.log "watching #{path} for #{LOG_EVENT_PREFIX}... (turn on #{log_turn_events.join(', ')})"
     true
   end
 
@@ -66,18 +77,18 @@ module HiveMindLogwatcher
   # thread — never touches @mutex). async:false runs the turn inline
   # (tests / synchronous callers).
   def handle_log_line(line, async: true)
-    text = clean_text(strip_log_prefix(line))
+    text = host.clean_text(strip_log_prefix(line))
     name = log_event_name(text)
     return if name.nil?
-    append_history(nil, text)
+    host.append_history(nil, text)
     return unless log_turn_events.include?(name)
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    rate_mutex.synchronize do
+    host.rate_mutex.synchronize do
       return if now - @last_log_event < log_event_interval
       @last_log_event = now
     end
     return run_log_event_turn(text) unless async
-    enqueue(:run_log_event_turn, text)
+    host.enqueue(:run_log_event_turn, text)
     nil
   end
 
@@ -89,22 +100,24 @@ module HiveMindLogwatcher
   # reset finds a thin session and skips — without the trim every reset
   # would re-compact the same material.
   def run_log_event_turn(text)
-    prompt = turn_prompt(
+    prompt = host.turn_prompt(
       "Game server log event: #{text}\n\n" \
       'React as fits: this event matters to the factory community — ' \
       'announce/comment in chat IF players would want to know, otherwise stay silent.',
       exclude: [nil, text]
     )
     begin
-      send_reply(complete(prompt))
+      host.send_reply(host.complete(prompt))
       # After reacting: distill the round into long-term memory. Skipped
       # when there is little to compact (configured auto-compaction gate) or a
       # pass is already running (compact_memory! guards that itself).
       # Trim on success (session_players cleared, compacted history dropped)
       # so repeated resets don't re-compact the same round.
-      trim_session_after_compaction! if plugin?('compaction') && auto_compaction_worthwhile? && compact_memory!('map reset')
+      # One intent, asked of the owner: distil the round just closed (gated,
+      # trimmed on success). Compaction owns that, not this feature.
+      host.auto_compact_round!('map reset')
     rescue StandardError => e
-      log_error('log-event error', e)
+      host.log_error('log-event error', e)
     end
   end
 

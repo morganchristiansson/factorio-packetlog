@@ -13,6 +13,7 @@ class TestHivemindLogWatcher < Minitest::Test
 
   def setup
     @agent = make_agent
+    @logwatcher = @agent.plugins[:logwatcher] # the FEATURE (a class), not the agent
     reset_window!
     collect_completions
   end
@@ -21,7 +22,7 @@ class TestHivemindLogWatcher < Minitest::Test
   # ── Line handling ──────────────────────────────────────────────
 
   def test_map_reset_line_is_queued_and_fires_turn
-    @agent.handle_log_line('2541.706 Script @__level__/reset.lua:291: event=map-reset, actor=morganc, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line('2541.706 Script @__level__/reset.lua:291: event=map-reset, actor=morganc, victory=false, science=0, minutes=44', async: false)
     assert_equal 1, captured_prompts.size, 'first match in the window fires a dedicated turn'
     prompt = captured_prompts.first
     assert_includes prompt, 'Game server log event'
@@ -32,15 +33,15 @@ class TestHivemindLogWatcher < Minitest::Test
   end
 
   def test_uninteresting_lines_are_ignored
-    @agent.handle_log_line('   3.200 Connection Accept from 1.2.3.4', async: false)
+    @logwatcher.handle_log_line('   3.200 Connection Accept from 1.2.3.4', async: false)
     assert_empty captured_prompts
     assert_empty queued_lines
   end
 
   def test_repeats_within_interval_stay_queue_only
-    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=1', async: false) # fires + drains queue
+    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=1', async: false) # fires + drains queue
     assert_empty queued_lines
-    @agent.handle_log_line('2.0 Script x.lua:2: event=map-reset, actor=a, victory=false, science=0, minutes=2', async: false) # repeat: queue only
+    @logwatcher.handle_log_line('2.0 Script x.lua:2: event=map-reset, actor=a, victory=false, science=0, minutes=2', async: false) # repeat: queue only
     assert_equal 1, captured_prompts.size, 'repeat must not trigger a turn'
     assert_includes queued_lines.join("\n"), 'event=map-reset, actor=a, victory=false, science=0, minutes=2'
   end
@@ -50,7 +51,7 @@ class TestHivemindLogWatcher < Minitest::Test
 
   def test_auto_compaction_skipped_on_thin_session
     compacted = collect_compactions
-    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=0', async: false)
+    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=0', async: false)
     wait_for_turn_thread
     assert_empty compacted, 'thin session must not waste a compaction pass'
   end
@@ -59,7 +60,7 @@ class TestHivemindLogWatcher < Minitest::Test
     compacted = collect_compactions
     pad = 'x' * @agent.auto_compaction_min_chars
     @agent.instance_variable_get(:@chat).add_message(role: :user, content: pad)
-    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
     wait_for_turn_thread
     assert_includes compacted, 'map reset'
   end
@@ -80,7 +81,7 @@ class TestHivemindLogWatcher < Minitest::Test
       @compaction_included_count = @chat.messages.size
       true
     end
-    @agent.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
+    @logwatcher.handle_log_line('1.0 Script x.lua:1: event=map-reset, actor=a, victory=false, science=0, minutes=44', async: false)
     refute @agent.send(:auto_compaction_worthwhile?), 'trimmed session must fall below the auto-compaction gate so a repeated reset skips'
   end
 
@@ -88,7 +89,7 @@ class TestHivemindLogWatcher < Minitest::Test
   # ── Watcher thread lifecycle ───────────────────────────────────
 
   def test_ensure_log_watcher_requires_existing_file
-    refute @agent.ensure_log_watcher('/nonexistent/factorio-current.log')
+    refute @logwatcher.ensure_log_watcher('/nonexistent/factorio-current.log')
   end
 
 

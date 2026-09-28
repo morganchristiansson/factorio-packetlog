@@ -129,14 +129,20 @@ class HiveMindAgent
   # Which of Hivemind's own plugins (config-hivemind.yaml `plugins:`) are
   # mixed in — what a call site asks before touching a plugin's methods.
   # #plugin_files is what the sniffer re-reads on a hot reload.
+  # The features this agent was built with (config-hivemind.yaml `plugins:`),
+  # keyed by their list name. A feature that is not listed is nil here.
+  attr_reader :plugins
+
   def plugin?(name) = Plugins.enabled?(self.class.own_plugins, name)
   def plugin_files = self.class.plugin_set.files
+
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
   # fills them in on first use (benign race: worst case the very first
   # calls briefly hold different Mutex instances).
   def rate_mutex = (@rate_mutex ||= Mutex.new)
+
   def persist_mutex = (@persist_mutex ||= Mutex.new)
   def max_reply_len = @max_reply_len
   def auto_compaction_min_chars = @auto_compaction_min_chars
@@ -184,24 +190,25 @@ class HiveMindAgent
   # its id lazily on first use instead of sending a blank header.
   def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
-  # plugins: the SNIFFER's list (config.yaml `plugins:`) — the agent consults
-  # it for the features it hooks (translation gates the set_player_languages
-  # tool). Its OWN list is config-hivemind.yaml, read in the class body.
-  def initialize(rcon:, attrs:, current_tick:, player_db:, plugins: [],
+  # sniffer_plugins: the SNIFFER's list (config.yaml `plugins:`) — the agent
+  # consults it for the features it hooks (translation gates the
+  # set_player_languages tool). Its OWN list is config-hivemind.yaml.
+  def initialize(rcon:, attrs:, current_tick:, player_db:, sniffer_plugins: [],
                  session_path: nil, memory_dir: nil, config_file: CONFIG_FILE)
-    @sniffer_plugins = plugins.map(&:to_s) # the SNIFFER's list — see plugins: above
+    @sniffer_plugins = sniffer_plugins.map(&:to_s) # the SNIFFER's list — see above
     @attrs = attrs
     @current_tick = current_tick
     @player_db = player_db
     @rcon = rcon
+    # THIS OWNER'S FEATURES: the classes config-hivemind.yaml `plugins:`
+    # names, each built with this agent. The agent drives them by name
+    # (plugins[:followups].schedule(…)), so a feature that is not listed is
+    # simply nil — no plugin? guard at any call site.
+    @plugins = Plugins::PluginSet.new(self.class.own_plugins, self, dir: __dir__,
+                                      prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
     @last_greet = 0.0
-    # Logwatcher plugin state (unused when that plugin is off): the rate-limit
-    # stamp of the last log-event turn, and the log-tail thread itself (it
-    # lives on the agent, so it survives hot reloads; revived if dead).
-    @last_log_event = 0.0
-    @log_watcher = nil
     @mutex = Mutex.new
     # Separate rate-limit state from completions and log-watcher callbacks.
     @rate_mutex = Mutex.new
@@ -1067,4 +1074,14 @@ class HiveMindAgent
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{text}"
     @rcon.say("#{HivemindReply::REPLY_PREFIX}#{text}")
   end
+  # ── What a FEATURE may call on the agent ──────────────────────────
+  # A feature is a class built with this agent as its owner, so these are
+  # the published interface: the LLM entry points (complete, turn_prompt,
+  # send_reply, append_history, enqueue), the text helper, the log helpers
+  # and the rate mutex. Public because a feature is not a mixin any more —
+  # it reaches the agent through these, not through its ivars.
+  public :complete, :turn_prompt, :send_reply, :append_history, :enqueue,
+         :clean_text, :log, :log_error, :rate_mutex, :hive_config,
+         :current_tick_value, :player_attrs_for, :auto_compact_round!
+
 end

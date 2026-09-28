@@ -61,6 +61,13 @@ module Plugins
       }.uniq
     end
 
+    # One feature by its list name, or nil when it is not loaded. What an
+    # owner reaches for when it DRIVES a feature rather than emits to it (a
+    # command with a return value, a scheduler to keep alive).
+    def [](name)
+      features.find { |f| f.class.name == constant_name(name) }
+    end
+
     # Send an event to every feature that implements it. A feature implements
     # the events it wants and nothing else.
     def emit(event, *args)
@@ -85,11 +92,14 @@ module Plugins
     # The class a name contributes, or nil (the constant is missing, or is not
     # a class — a feature is a class, not a module).
     def class_for(name)
-      klass = Object.const_get("#{@namespace}#{camel(name)}")
+      klass = Object.const_get(constant_name(name))
       klass.is_a?(Class) ? klass : nil
     rescue NameError
       nil
     end
+
+    # The class a name contributes is called this (namespace + CamelCase).
+    def constant_name(name) = "#{@namespace}#{camel(name)}"
 
     def camel(name)
       File.basename(name.to_s, '.rb').split('_').map { |w| w[0].upcase + w[1..] }.join
@@ -108,7 +118,7 @@ module Plugins
       require file
       klass = class_for(name)
       unless klass
-        warn "[plugin] #{name}: no feature class (expected #{File.basename(file)} to define #{camel(name)})"
+        warn "[plugin] #{name}: no feature class (expected #{File.basename(file)} to define #{constant_name(name)})"
         return nil
       end
       klass.new(@host)

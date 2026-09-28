@@ -35,6 +35,17 @@ module HiveMindCompaction
   # history (trim_session_after_compaction!, keeping mid-pass console
   # lines); on failure — a missing/empty section after one retry — the
   # session is kept.
+  # A round closed (a map reset): distil it if there is enough to distil,
+  # and TRIM the session on success so the next round starts thin. One
+  # intent, so a caller (the log-event turn) does not have to know the gate
+  # or reach for the trim: `auto_compact_round!('map reset')`.
+  def auto_compact_round!(reason = nil)
+    return false unless auto_compaction_worthwhile?
+    return false unless compact_memory!(reason)
+    trim_session_after_compaction!
+    true
+  end
+
   def compact_memory!(reason = nil)
     return false unless @memory_store.enabled?
     return false unless compactable?

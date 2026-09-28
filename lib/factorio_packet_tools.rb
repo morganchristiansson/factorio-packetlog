@@ -231,9 +231,9 @@ class FactorioPacketTools
             @agent = HiveMindAgent.new(rcon: @rcon, attrs: @attrs,
                                         current_tick: -> { @game_tick },
                                         player_db: @player_db,
-                                        plugins: options[:plugins])
-            @agent.ensure_followup_scheduler if @agent.plugin?('followups')
-            @agent.ensure_log_watcher(ServerDetect.log_path) if @agent.plugin?('logwatcher')
+                                        sniffer_plugins: options[:plugins])
+            @agent.ensure_followup_scheduler if @agent.plugin?('followups') # not converted yet
+            @agent.plugins[:logwatcher]&.ensure_log_watcher(ServerDetect.log_path)
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
           rescue => e
             warn "[hivemind] AI agent disabled: #{e.message}"
@@ -385,8 +385,8 @@ class FactorioPacketTools
       $VERBOSE = old_verbose
     end
     select_protocol_version
-    @agent&.ensure_followup_scheduler if @agent&.plugin?('followups')
-    @agent&.ensure_log_watcher(ServerDetect.log_path) if @agent&.plugin?('logwatcher')
+    @agent&.ensure_followup_scheduler if @agent&.plugin?('followups') # not converted yet
+    @agent&.plugins&.[](:logwatcher)&.ensure_log_watcher(ServerDetect.log_path)
     # Hot reload swaps code under the same agent object; re-point
     # the cached attrs/tick provider in case this is the first
     # reload after the agent was constructed (or libs changed

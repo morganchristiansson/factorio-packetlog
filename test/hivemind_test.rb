@@ -37,8 +37,8 @@ class TestHiveMindAgent < Minitest::Test
     config = YAML.safe_load_file(HIVE_TEST_CONFIG)
     assert_equal config['log_turn_events'], @agent.plugins[:logwatcher].log_turn_events
     assert_equal config['log_event_interval'], @agent.plugins[:logwatcher].log_event_interval
-    assert_equal config['min_followup_delay'], @agent.min_followup_delay
-    assert_equal config['max_pending_followups'], @agent.max_pending_followups
+    assert_equal config['min_followup_delay'], @agent.plugins[:followups].min_followup_delay
+    assert_equal config['max_pending_followups'], @agent.plugins[:followups].max_pending_followups
 
     assert_raises(KeyError) { @agent.instance_variable_get(:@hive_config).fetch('no_such_key') }
   end

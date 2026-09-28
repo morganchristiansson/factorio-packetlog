@@ -47,24 +47,7 @@ module HiveMindPersistence
     # and the scheduler fires it on its first tick (correct: the task was
     # already due). Anything else (older formats, bad data, empty task) is
     # simply DISCARDED — no legacy fallbacks.
-    n_rearmed = 0
-    if data['followups'].is_a?(Hash)
-      data['followups'].each do |name, e|
-        next unless e.is_a?(Hash) && e['due_at'].is_a?(Numeric)
-        task_text = clean_text(e['task'])
-        next if task_text.empty?
-        name = clean_text(name).to_s[0, HiveMindFollowups::MAX_FOLLOWUP_NAME_LEN]
-        next if name.empty?
-        now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @followups.reject! { |f| f[:name] == name }
-        @followups << { name: name,
-                        due: now_mono + (e['due_at'].to_f - Time.now.to_f),
-                        due_at: e['due_at'].to_f,
-                        task: task_text }
-        n_rearmed += 1
-      end
-    end
-    @followup_cond.signal if n_rearmed.positive?
+    n_rearmed = plugins[:followups]&.restore(data['followups']) || 0
     messages = data['messages'] || []
     # Keep tool results linked to the current session's assistant calls.
     call_ids = messages.select { |m| m['role'] == 'assistant' && m['tool_calls'].is_a?(Array) }
@@ -123,10 +106,10 @@ module HiveMindPersistence
       'opencode_session' => opencode_session_id,
       'console_queue' => @console_queue,
       'session_players' => @session_players.to_a,
-      # JSON object keyed by timer name — entries are name-keyed in memory.
-      'followups' => @followup_mutex.synchronize do
-        @followups.to_h { |f| [f[:name], { 'due_at' => f[:due_at], 'task' => f[:task] }] }
-      end,
+      # JSON object keyed by timer name — the followups feature owns the
+      # entries and hands them over in this shape (the file is ours).
+      'followups' => (plugins[:followups]&.pending || [])
+        .to_h { |f| [f[:name], { 'due_at' => f[:due_at], 'task' => f[:task] }] },
       'messages' => (@persisted_messages ||= serialize_messages),
     }
   end

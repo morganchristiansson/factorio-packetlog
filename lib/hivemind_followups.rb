@@ -1,18 +1,74 @@
 # frozen_string_literal: true
 
-# Hivemind plugin `followups` — the file is lib/hivemind_followups.rb (the
-# manager's `hivemind_` prefix), the module takes its CamelCase name. Listed
-# in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
-# Plugins.apply_mixins. Scheduled follow-ups: the schedule_followup /
-# cancel_followup tools' backing logic, a JS setTimeout/clearTimeout analog.
+# Hivemind feature `followups` — the file is lib/hivemind_followups.rb (the
+# plugin set's `hivemind_` prefix), the class takes its CamelCase name.
+# Listed in config-hivemind.yaml `plugins:` and built by the agent's
+# Plugins::PluginSet with the agent as its owner. Scheduled follow-ups: the
+# schedule_followup / cancel_followup tools' backing logic, a JS
+# setTimeout/clearTimeout analog.
 # Deliberately NOT part of the tool classes: the pending entries are shared
-# state (persisted by persist!/load_session, listed by compaction) and must
-# survive hot reloads and restarts, while tools are rebuilt fresh per ask.
-module HiveMindFollowups
-  # This plugin's own config keys, read where they are used (no list, no
-  # code default): switch the plugin off and nobody reads them.
-  def min_followup_delay = @min_followup_delay ||= hive_config.fetch('min_followup_delay').to_f
-  def max_pending_followups = @max_pending_followups ||= hive_config.fetch('max_pending_followups').to_i
+# state (persisted by the session, listed by compaction) and must survive hot
+# reloads and restarts, while tools are rebuilt fresh per ask.
+class HiveMindFollowups
+  # The agent, as its owner, plus THIS feature's own state: the pending
+  # entries, their lock and condition variable, and the scheduler thread. The
+  # agent asks for a feature by name (plugins[:followups]) and the session
+  # file reaches in for the entries — see #session_data / #restore_followups.
+  def initialize(host)
+    @host = host
+    @followups = []
+    @followup_mutex = Mutex.new
+    @followup_cond = ConditionVariable.new
+    @scheduler = nil
+  end
+
+  attr_reader :host
+
+  # The pending entries, for the session file (persistence serializes them
+  # and hands them back through #restore).
+  def pending
+    @followup_mutex.synchronize { @followups.map(&:dup) }
+  end
+
+  # Re-arm the entries a session file carried, in ITS shape (the file is the
+  # persistence feature's business): {name => {due_at, task}}. An absolute
+  # deadline becomes a monotonic one, so a follow-up that came due during
+  # downtime fires on the scheduler's first tick. Anything that is not
+  # {name, due_at, non-empty task} is DISCARDED, not migrated — no legacy
+  # formats, exactly as the file format promises.
+  def restore(entries)
+    return 0 unless entries.is_a?(Hash)
+    rearmed = 0
+    @followup_mutex.synchronize do
+      entries.each do |name, e|
+        next unless e.is_a?(Hash) && e['due_at'].is_a?(Numeric)
+        task_text = host.clean_text(e['task'].to_s)
+        name_text = host.clean_text(name.to_s)[0, MAX_FOLLOWUP_NAME_LEN]
+        next if task_text.empty? || name_text.empty?
+        due_at = e['due_at'].to_f
+        @followups.reject! { |f| f[:name] == name_text }
+        @followups << { name: name_text, task: task_text, due_at: due_at,
+                        due: Process.clock_gettime(Process::CLOCK_MONOTONIC) + (due_at - Time.now.to_f) }
+        rearmed += 1
+      end
+    end
+    @followup_cond.broadcast if rearmed.positive?
+    rearmed
+  end
+
+  # Pending entries, one readable line each — what the compaction pass
+  # prompt lists so a distillation can see what is still scheduled.
+  def described_pending
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @followup_mutex.synchronize do
+      @followups.map { |f| "'#{f[:name]}' (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
+    end
+  end
+
+  # This feature's own config keys, read where they are used (no list, no
+  # code default): switch the feature off and nobody reads them.
+  def min_followup_delay = @min_followup_delay ||= host.hive_config.fetch('min_followup_delay').to_f
+  def max_pending_followups = @max_pending_followups ||= host.hive_config.fetch('max_pending_followups').to_i
 
   # Clamp for user-chosen timer keys ('prowl', 'mall-check') — a bound on
   # model input, not a setting: kept hardcoded (like MAX_TAG_LEN).
@@ -34,9 +90,9 @@ module HiveMindFollowups
     delay = delay_seconds.to_f
     return 'Error: delay_seconds must be a positive number of seconds.' if delay <= 0
     return "Error: minimum delay is #{min_followup_delay.to_i} seconds." if delay < min_followup_delay
-    task_text = clean_text(task)
+    task_text = host.clean_text(task)
     return 'Error: task is empty.' if task_text.empty?
-    name_text = clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
+    name_text = host.clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
     return "Error: name is empty — give this timer a short stable key (e.g. 'prowl')." if name_text.empty?
 
     now_mono = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -62,8 +118,8 @@ module HiveMindFollowups
     # Task text is NOT echoed here — the tool-call line already logged the
     # full arguments; repeating it just duplicates long lines.
     verb = replaced ? 'rescheduled' : 'scheduled'
-    log "follow-up '#{name_text}' #{verb} (in #{delay.round}s)"
-    persist! if @session_path
+    host.log "follow-up '#{name_text}' #{verb} (in #{delay.round}s)"
+    persist!
     "Follow-up '#{name_text}' #{verb} for +#{delay.round}s."
   end
 
@@ -71,7 +127,7 @@ module HiveMindFollowups
   # A follow-up the scheduler has already popped for firing can't be
   # cancelled. Returns the tool-result string for the model.
   def cancel_followup(name:)
-    name_text = clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
+    name_text = host.clean_text(name).to_s[0, MAX_FOLLOWUP_NAME_LEN]
     removed = @followup_mutex.synchronize do
       before = @followups.size
       @followups.reject! { |f| f[:name] == name_text }
@@ -79,8 +135,8 @@ module HiveMindFollowups
       before - @followups.size
     end
     return "Error: no follow-up named '#{name_text}' (already fired, cancelled, or never scheduled)." if removed.zero?
-    log "follow-up '#{name_text}' cancelled"
-    persist! if @session_path
+    host.log "follow-up '#{name_text}' cancelled"
+    persist!
     "Follow-up '#{name_text}' cancelled."
   end
 
@@ -98,13 +154,13 @@ module HiveMindFollowups
   # the last prompt, player memories). The model may reply, query, schedule
   # again, or stay silent.
   def followup_prompt(task)
-    turn_prompt(
+    host.turn_prompt(
       "SCHEDULED FOLLOW-UP — you set this for yourself earlier, and the time has come.\n" \
       "Task: #{task}\n\n" \
       'The context above is fresh (online players, console lines since your last turn). ' \
       'Check on the situation and act as you see fit: send a chat message (reply tool), ' \
       'run read-only queries (rcon_query), schedule another follow-up, or stay silent ' \
-      "if nothing needs doing. Keep any message under #{max_reply_len} characters.",
+      "if nothing needs doing. Keep any message under #{host.max_reply_len} characters.",
       player: nil
     )
   end
@@ -117,12 +173,17 @@ module HiveMindFollowups
     # Persist the pop BEFORE running the turn: the scheduler already deleted
     # the entry from @followups, so this drops it from the session file —
     # a crash mid-turn can't resurrect an already-fired follow-up on restart.
-    persist! if @session_path
-    log "follow-up '#{entry[:name]}' firing"
-    reply = complete(followup_prompt(entry[:task]))
-    send_reply(reply)
+    persist!
+    host.log "follow-up '#{entry[:name]}' firing"
+    host.send_reply(host.complete(followup_prompt(entry[:task])))
   rescue StandardError => e
-    log_error("follow-up '#{entry[:name]}' failed", e)
+    host.log_error("follow-up '#{entry[:name]}' failed", e)
+  end
+
+  # Persist the session if the owner has one (a run without a session file
+  # has nothing to write, and the follow-up is already in memory).
+  def persist!
+    host.persist_followups!
   end
 
   # PLAYER PRIORITY: a follow-up that comes due while a conversation turn
@@ -135,7 +196,7 @@ module HiveMindFollowups
   # original deadline — after a restart it simply fires then). Returns
   # true when the entry should fire NOW.
   def yield_to_conversation(entry)
-    return true unless @mutex.locked?
+    return true unless host.mutex.locked?
     @followup_mutex.synchronize do
       entry[:due] = Process.clock_gettime(Process::CLOCK_MONOTONIC) + FOLLOWUP_YIELD_DELAY
       @followups << entry
@@ -151,6 +212,12 @@ module HiveMindFollowups
   # hot reloads (the agent object persists — the block still resolves
   # methods against the reloaded classes) and is recreated on a full
   # restart when pending follow-ups are re-armed from the session file.
+  def format_remaining(secs)
+    s = [secs.to_i, 0].max
+    return "#{s}s" if s < 60
+    "#{s / 60}m#{s % 60}s"
+  end
+
   def start_scheduler
     @scheduler = Thread.new do
       loop do
@@ -169,7 +236,7 @@ module HiveMindFollowups
           end
           fire_followup(entry) if entry && yield_to_conversation(entry)
         rescue StandardError => e
-          log_error('follow-up scheduler error', e)
+          host.log_error('follow-up scheduler error', e)
         end
       end
     end

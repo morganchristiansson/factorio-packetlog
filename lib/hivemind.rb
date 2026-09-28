@@ -65,6 +65,9 @@ class HiveMindAgent
   # and re-mixes, so an edited list applies then. A module already mixed in
   # can't be un-mixed, so restarting is the clean switch.
   def self.own_plugins = (@own_plugins ||= config_plugins)
+  # Features still mixed in rather than built (see the constructor).
+  def self.still_modules = %w[persistence compaction].freeze
+
   def self.plugin_set
     @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__,
                                            prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
@@ -129,6 +132,27 @@ class HiveMindAgent
   # Which of Hivemind's own plugins (config-hivemind.yaml `plugins:`) are
   # mixed in — what a call site asks before touching a plugin's methods.
   # #plugin_files is what the sniffer re-reads on a hot reload.
+  # The follow-ups the model schedules (the schedule_followup /
+  # cancel_followup tools) — nil-safe, so a config without the feature turns
+  # them into a clear refusal instead of a crash.
+  def schedule_followup(delay_seconds:, task:, name: nil)
+    plugins[:followups]&.schedule_followup(delay_seconds: delay_seconds, task: task, name: name)
+  end
+
+  def cancel_followup(name: nil)
+    plugins[:followups]&.cancel_followup(name: name)
+  end
+
+  # Persist pending follow-ups. The session FILE is persistence's business —
+  # the followups feature owns the entries, not the file, so it asks here.
+  # INTERIM: persistence is still a mixin, so its persist! is right here; its
+  # conversion makes this `plugins[:persistence]&.persist!`.
+  def persist_followups!
+    return false unless @session_path
+
+    persist!
+  end
+
   # The features this agent was built with (config-hivemind.yaml `plugins:`),
   # keyed by their list name. A feature that is not listed is nil here.
   attr_reader :plugins
@@ -142,6 +166,10 @@ class HiveMindAgent
   # fills them in on first use (benign race: worst case the very first
   # calls briefly hold different Mutex instances).
   def rate_mutex = (@rate_mutex ||= Mutex.new)
+
+  # The ask mutex: a follow-up that comes due while a conversation turn holds
+  # it is put back instead of piling on (PLAYER PRIORITY, see the feature).
+  attr_reader :mutex
 
   def persist_mutex = (@persist_mutex ||= Mutex.new)
   def max_reply_len = @max_reply_len
@@ -204,7 +232,12 @@ class HiveMindAgent
     # names, each built with this agent. The agent drives them by name
     # (plugins[:followups].schedule(…)), so a feature that is not listed is
     # simply nil — no plugin? guard at any call site.
-    @plugins = Plugins::PluginSet.new(self.class.own_plugins, self, dir: __dir__,
+    # INTERIM: persistence and compaction are still modules mixed in by
+    # mix_modules_into, so they are not features yet and must not be built
+    # (building them would report them missing). This line goes away with
+    # those two conversions.
+    not_yet = self.class.own_plugins - self.class.still_modules
+    @plugins = Plugins::PluginSet.new(not_yet, self, dir: __dir__,
                                       prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
@@ -216,18 +249,13 @@ class HiveMindAgent
     # (event worker, scheduler and log watcher share one .tmp path).
     @persist_mutex = Mutex.new
     @chat = nil
-    # Pending scheduled follow-ups (schedule_followup tool) + their mutex
-    # and condition variable, so a single scheduler thread sleeps until the
-    # next due time instead of polling. Entries are NAME-keyed (the model
-    # picks a short stable key, e.g. 'prowl') and carry a MONOTONIC due (used
-    # to fire) and an absolute unix due_at (persisted, so a restart re-arms
-    # with the correct remaining delay). Scheduling an existing name again
-    # REPLACES the entry (upsert — no cancel-first dance). Survive hot
-    # reloads (agent persists in state); follow-ups survive compaction —
-    # belong to the session.
-    @followups = []
-    @followup_mutex = Mutex.new
-    @followup_cond = ConditionVariable.new
+    # Pending scheduled follow-ups (schedule_followup tool) belong to the
+    # followups FEATURE now: its entries are NAME-keyed (the model picks a
+    # short stable key, e.g. 'prowl') and carry a MONOTONIC due (used to fire)
+    # plus an absolute unix due_at (persisted, so a restart re-arms with the
+    # correct remaining delay); its own mutex + condition variable let a
+    # single scheduler thread sleep until the next due time instead of
+    # polling, and it survives hot reloads with the agent that owns it.
     # Console lines are a QUEUE drained on each prompt: append_history
     # enqueues (chat lines, join/leave events, the agent's own replies via
     # HivemindReply's on_sent / the fallback send_reply); unread_console drains
@@ -356,7 +384,7 @@ class HiveMindAgent
 
     hook_chat_observers if @chat
     load_session if @session_path
-    start_scheduler if plugin?('followups')
+    plugins[:followups]&.ensure_followup_scheduler
     initialize_events
   end
 
@@ -1082,6 +1110,6 @@ class HiveMindAgent
   # it reaches the agent through these, not through its ivars.
   public :complete, :turn_prompt, :send_reply, :append_history, :enqueue,
          :clean_text, :log, :log_error, :rate_mutex, :hive_config,
-         :current_tick_value, :player_attrs_for, :auto_compact_round!
+         :current_tick_value, :player_attrs_for
 
 end

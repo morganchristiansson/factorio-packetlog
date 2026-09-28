@@ -41,7 +41,7 @@ class TestHivemindTools < Minitest::Test
     tool = ScheduleFollowUp.new(agent: @agent)
     result = tool.call('delay_seconds' => 60, 'task' => 'remind players', 'name' => 'remind')
     assert_match(/Follow-up 'remind' scheduled/, result)
-    assert_equal 'remind players', @agent.instance_variable_get(:@followups).first[:task]
+    assert_equal 'remind players', @agent.plugins[:followups].pending.first[:task]
     # invalid args never reach the agent
     err = ScheduleFollowUp.new(agent: @agent).call('delay_seconds' => -5, 'task' => 'x', 'name' => 'bad')
     assert err.is_a?(Hash) || err.to_s.include?('Error') || err.to_s.include?('Invalid')

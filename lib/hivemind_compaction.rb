@@ -330,10 +330,7 @@ module HiveMindCompaction
     end
     snap = context_snapshot
     parts << "Current server context:\n#{snap}" unless snap.empty?
-    followups = @followup_mutex.synchronize do
-      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      @followups.map { |f| "'#{f[:name]}' (in #{format_remaining(f[:due] - now)}): #{f[:task]}" }
-    end
+    followups = plugins[:followups]&.described_pending || []
     parts << "Pending scheduled follow-ups:\n#{followups.join("\n")}" unless followups.empty?
     # Read-ONLY on purpose: the console queue belongs to the LIVE bot's
     # delivery cycle (unread_console drains it into the next live turn).
@@ -365,9 +362,4 @@ module HiveMindCompaction
   end
 
   # Seconds remaining as a compact human duration ("9m", "1h5m", "90s").
-  def format_remaining(secs)
-    s = [secs.to_i, 0].max
-    return "#{s}s" if s < 60
-    "#{s / 60}m#{s % 60}s"
-  end
 end

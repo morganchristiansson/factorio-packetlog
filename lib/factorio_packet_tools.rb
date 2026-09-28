@@ -232,7 +232,7 @@ class FactorioPacketTools
                                         current_tick: -> { @game_tick },
                                         player_db: @player_db,
                                         sniffer_plugins: options[:plugins])
-            @agent.ensure_followup_scheduler if @agent.plugin?('followups') # not converted yet
+            @agent.plugins[:followups]&.ensure_followup_scheduler
             @agent.plugins[:logwatcher]&.ensure_log_watcher(ServerDetect.log_path)
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
           rescue => e
@@ -385,7 +385,7 @@ class FactorioPacketTools
       $VERBOSE = old_verbose
     end
     select_protocol_version
-    @agent&.ensure_followup_scheduler if @agent&.plugin?('followups') # not converted yet
+    @agent&.plugins&.[](:followups)&.ensure_followup_scheduler
     @agent&.plugins&.[](:logwatcher)&.ensure_log_watcher(ServerDetect.log_path)
     # Hot reload swaps code under the same agent object; re-point
     # the cached attrs/tick provider in case this is the first

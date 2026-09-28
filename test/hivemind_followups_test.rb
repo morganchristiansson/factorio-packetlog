@@ -9,6 +9,10 @@ require_relative 'hivemind_helper'
 class TestHivemindFollowUps < Minitest::Test
   include HivemindSpecHelpers
 
+  # The FEATURE, and the entries it owns (they moved off the agent).
+  def followups = @agent.plugins[:followups]
+  def pending = followups.pending
+
   def setup
     @agent = make_agent
   end
@@ -19,7 +23,7 @@ class TestHivemindFollowUps < Minitest::Test
   def test_schedule_followup_stores_entry_and_returns_name
     result = @agent.schedule_followup(delay_seconds: 60, task: 'check spawn defense', name: 'spawn-check')
     assert_match(/Follow-up 'spawn-check' scheduled for \+60s/, result)
-    entries = @agent.instance_variable_get(:@followups)
+    entries = pending
     assert_equal 1, entries.size
     assert_equal 'check spawn defense', entries.first[:task]
     assert_operator entries.first[:due_at], :>, Time.now.to_f, 'absolute unix deadline (for restart re-arm)'
@@ -32,7 +36,7 @@ class TestHivemindFollowUps < Minitest::Test
     assert_match(/positive number/, @agent.schedule_followup(delay_seconds: 0, task: 'zero', name: 'x'))
     assert_match(/empty/, @agent.schedule_followup(delay_seconds: 60, task: '   ', name: 'x'))
     assert_match(/name is empty/, @agent.schedule_followup(delay_seconds: 60, task: 'check', name: '   '))
-    assert_empty @agent.instance_variable_get(:@followups)
+    assert_empty pending
   end
 
 
@@ -40,29 +44,29 @@ class TestHivemindFollowUps < Minitest::Test
     @agent.schedule_followup(delay_seconds: 60, task: 'old task', name: 'prowl')
     result = @agent.schedule_followup(delay_seconds: 25, task: 'new task', name: 'prowl')
     assert_match(/rescheduled/, result)
-    entries = @agent.instance_variable_get(:@followups)
+    entries = pending
     assert_equal 1, entries.size, 'same name replaces the pending entry'
     assert_equal 'new task', entries.first[:task]
   end
 
 
   def test_schedule_followup_caps_pending
-    max = @agent.max_pending_followups
+    max = followups.max_pending_followups
     max.times { |i| @agent.schedule_followup(delay_seconds: 60, task: "t#{i}", name: "timer-#{i}") }
     result = @agent.schedule_followup(delay_seconds: 60, task: 'overflow', name: 'overflow')
     assert_match(/max #{max}/, result)
-    assert_equal max, @agent.instance_variable_get(:@followups).size
+    assert_equal max, pending.size
     # Re-scheduling an EXISTING name never counts toward the cap.
     ok = @agent.schedule_followup(delay_seconds: 30, task: 'refresh', name: 'timer-0')
     assert_match(/rescheduled/, ok)
-    assert_equal max, @agent.instance_variable_get(:@followups).size
+    assert_equal max, pending.size
   end
 
 
   def test_cancel_followup_removes_entry
     @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'prowl')
     assert_match(/cancelled/, @agent.cancel_followup(name: 'prowl'))
-    assert_empty @agent.instance_variable_get(:@followups)
+    assert_empty pending
     assert_match(/no follow-up named/, @agent.cancel_followup(name: 'prowl'))
   end
 
@@ -70,10 +74,10 @@ class TestHivemindFollowUps < Minitest::Test
   def test_fire_followup_runs_turn_with_task_and_fresh_context
     @agent.schedule_followup(delay_seconds: 60, task: 'remind spawn defense', name: 'spawn')
     @agent.send(:append_history, 'bob', 'biters at the wall!')  # queued since last prompt
-    entry = @agent.instance_variable_get(:@followups).first
+    entry = pending.first
     prompts = []
     @agent.define_singleton_method(:complete) { |p| prompts << p; 'hold the line' }
-    @agent.send(:fire_followup, entry)
+    followups.send(:fire_followup, entry)
     assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
     assert_includes prompts.first, 'remind spawn defense'
     assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
@@ -83,9 +87,9 @@ class TestHivemindFollowUps < Minitest::Test
 
   def test_fire_followup_stays_silent_when_model_returns_nothing
     @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'check')
-    entry = @agent.instance_variable_get(:@followups).first
+    entry = pending.first
     @agent.define_singleton_method(:complete) { |_p| '' }  # model decides nothing needs doing
-    @agent.send(:fire_followup, entry)
+    followups.send(:fire_followup, entry)
     assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
   end
 
@@ -101,7 +105,7 @@ class TestHivemindFollowUps < Minitest::Test
 
       a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a2.define_singleton_method(:complete) { |_p| '' }
-      fups = a2.instance_variable_get(:@followups)
+      fups = a2.plugins[:followups].pending
       assert_equal 1, fups.size
       assert_equal 'remind spawn defense', fups.first[:task]
       assert_equal 'spawn', fups.first[:name], 'name preserved across restart'
@@ -124,8 +128,9 @@ class TestHivemindFollowUps < Minitest::Test
       a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
       a2.define_singleton_method(:complete) { |_p| '' }
       deadline = Time.now + 3
-      sleep 0.05 until a2.instance_variable_get(:@followups).empty? || Time.now > deadline
-      assert_empty a2.instance_variable_get(:@followups), 're-armed follow-up fired by the scheduler'
+      fups = a2.plugins[:followups]
+      sleep 0.05 until fups.pending.empty? || Time.now > deadline
+      assert_empty fups.pending, 're-armed follow-up fired by the scheduler'
     end
   end
 
@@ -140,7 +145,7 @@ class TestHivemindFollowUps < Minitest::Test
         ]
       ))
       agent = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
-      assert_empty agent.instance_variable_get(:@followups), 'non-hash formats are discarded, not migrated'
+      assert_empty agent.plugins[:followups].pending, 'non-hash formats are discarded, not migrated'
     end
   end
 
@@ -151,18 +156,19 @@ class TestHivemindFollowUps < Minitest::Test
   # ensure_followup_scheduler.
   def test_hot_reloaded_agent_gets_scheduler_revived_at_seam
     agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
-    agent.instance_variable_get(:@scheduler)&.kill
-    agent.instance_variable_get(:@scheduler)&.join(0.1)
+    fups = agent.plugins[:followups]
+    fups.instance_variable_get(:@scheduler)&.kill
+    fups.instance_variable_get(:@scheduler)&.join(0.1)
 
-    agent.ensure_followup_scheduler
-    assert agent.instance_variable_get(:@scheduler)&.alive?, 'scheduler started at the seam'
+    fups.ensure_followup_scheduler
+    assert fups.instance_variable_get(:@scheduler)&.alive?, 'scheduler started at the seam'
 
     class << agent
       def complete(_p) = '' # never hit the network
     end
     result = agent.schedule_followup(delay_seconds: 30, task: 'post-reload check', name: 'reload-check')
     assert_match(/scheduled/, result)
-    assert_equal 'post-reload check', agent.instance_variable_get(:@followups).first[:task]
+    assert_equal 'post-reload check', agent.plugins[:followups].pending.first[:task]
     agent.send(:persist!)  # the exact crash from the live run
     assert agent.send(:compaction_material).include?('Pending scheduled follow-ups:')
   end

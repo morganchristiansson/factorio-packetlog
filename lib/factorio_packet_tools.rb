@@ -258,10 +258,31 @@ class FactorioPacketTools
       end
     end
 
+    # Features (config.yaml `plugins:`) hook the seams in Defaults; this file
+    # names none of them. Defaults goes in first, so a feature module
+    # (lib/quickbar_backup.rb → QuickbarBackup) overrides the seam it uses
+    # and leaves the rest no-op. Features that are classes rather than modules
+    # (hivemind, translation) are skipped by apply_mixins and instantiated
+    # above.
+    self.class.include(FactorioPacketTools::Defaults)
+    Plugins.apply_mixins(self.class)
+
     # Version → segment-type mapping (server mode may also query RCON here;
     # the RCON client is only created in server mode). Runs on every
     # construction, including hot reloads.
     select_protocol_version
+  end
+
+  # The seams features override. One no-op hook per thing the sniffer knows
+  # and a feature might want; adding a feature must not mean editing this
+  # class, and a hook with no feature behind it must cost nothing.
+  module Defaults
+    # A player joined and the ONE targeted RCON query for them came back:
+    # their attrs (index, name, connected, admin, online_time, afk_time,
+    # locale) and, on the join query, their whole quickbar (nil = an empty
+    # bar, :failed = the Lua read raised). Runs on the join thread, so a
+    # feature may talk to the server here.
+    def on_join_enriched(name, index, attrs); end
   end
 
   # Run the capture/analysis loop. Blocks until the source is exhausted
@@ -916,14 +937,20 @@ class FactorioPacketTools
         next
       end
       @player_db.set_locale_by_id(idx, attrs[:locale]) if attrs[:locale]
-      case attrs[:quickbar]
-      when :failed
+      bar = attrs[:quickbar]
+      if bar == :failed
         warn "[join] #{name} ##{idx}: quickbar read failed in Lua (API shape vs " \
              "#{@rcon.server_version || 'unknown version'}?) — attrs kept"
-      when Array
-        @player_db.replace_quickbar(idx, attrs[:quickbar])
+      else
+        # The read is authoritative, empty bar included (nil clears the cache).
+        @player_db.replace_quickbar(idx, bar)
+      end
+      # Features see every join, after the store: quickbar_backup restores an
+      # empty bar here and re-stores it, so its value is the one that sticks.
+      on_join_enriched(name, idx, attrs)
+      unless bar == :failed
         puts "[join] #{name} ##{idx}: locale=#{attrs[:locale] || '?'} " \
-             "quickbar=#{attrs[:quickbar].flatten.compact.size} slot(s)"
+             "quickbar=#{Array(bar).flatten.compact.size} slot(s)"
       end
     rescue StandardError => e
       warn "[join] #{name} ##{idx}: RCON enrichment failed (#{e.class}: #{e.message})"

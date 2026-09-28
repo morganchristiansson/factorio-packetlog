@@ -25,6 +25,13 @@
 #
 # A name with a '/' is a path and is loaded as given, so a feature that
 # ships outside lib/ joins the same list.
+#
+# A feature registers itself, so the host never names it. Either way:
+#   * the file defines the host's CamelCase module (a mixin, see
+#     Manager#apply_mixins) and hooks what it needs by overriding one of the
+#     host's seams; or
+#   * the file is a class the host instantiates (hivemind, translation).
+# Both kinds live in one list; the module is optional.
 module Plugins
   class Manager
     # Loaded plugin names, in the order they were enabled.
@@ -69,17 +76,30 @@ module Plugins
     def files = @required.uniq
 
     # Mix every loaded plugin's module into klass — the convention's second
-    # half: lib/hivemind_compaction.rb contributes `HiveMindCompaction`. Only
-    # Hivemind's plugins are mixins; the sniffer's own features are
-    # instantiated by the sniffer and contribute no module.
+    # half: lib/quickbar_backup.rb contributes `QuickbarBackup`, and
+    # lib/hivemind_compaction.rb contributes `HiveMindCompaction` under the
+    # Hivemind manager. A feature that contributes NO module (lib/hivemind.rb
+    # and lib/translation.rb are classes the host instantiates itself) is
+    # skipped, so one host can run both kinds from one list.
+    #
+    # Include the host's seam module (the no-op hooks) BEFORE calling this:
+    # Ruby keeps the most recent include closest to the class, so a feature
+    # module overrides the seam it cares about and the others stay no-ops.
     def apply_mixins(klass)
-      @loaded.each { |name| klass.include(mixin_for(name)) }
+      @loaded.each do |name|
+        mixin = mixin_for(name)
+        klass.include(mixin) if mixin
+      end
     end
 
-    # The module a plugin contributes: the CamelCase of its name under the
-    # manager's namespace ('compaction' + 'HiveMind' → HiveMindCompaction).
+    # The module a plugin contributes, or nil when it contributes none (a
+    # feature that is a class the host instantiates — a Class is not a Module
+    # as far as `include` is concerned).
     def mixin_for(name)
-      Object.const_get("#{@namespace}#{camel(name)}")
+      mod = Object.const_get("#{@namespace}#{camel(name)}")
+      mod.is_a?(Module) && !mod.is_a?(Class) ? mod : nil
+    rescue NameError
+      nil
     end
 
     private

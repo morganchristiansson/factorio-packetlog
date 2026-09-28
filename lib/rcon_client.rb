@@ -164,6 +164,32 @@ class RconClient
       'o=p.online_time,k=p.afk_time,l=p.locale,q=okq and q or false}) or "nil") end'
   end
 
+  # Set a player's quickbar cells: `cells` is {flat slot index => item id}
+  # (the same shape #player_attrs_for_lua reads back). Ids become names in
+  # Lua, from the same `prototypes.item` iteration order the wire uses.
+  #
+  # THE SETTER MATCHES THE GETTER, and it changed with it: 2.0 takes
+  # (index, item), 2.1 takes (page, slot, filter). Each call is pcall'd and
+  # the count of successes comes back, so a rejected write (a wrong 2.1
+  # filter shape, say) is a number we report rather than a silent no-op.
+  # One line, server-side, no response cap to worry about (a short count).
+  def restore_quickbar(player, cells)
+    return 0 if cells.nil? || cells.empty?
+    version = server_version.to_s
+    cells = cells.map { |i, id| "[#{i.to_i}]=#{id.to_i}" }.join(',')
+    set = if !version.empty? && !version.match?(/\A2\.0(\.|\z)/)
+            "local k=(i-1)//#{PlayerDatabase::QUICKBAR_SLOTS} local l=(i-1)%#{PlayerDatabase::QUICKBAR_SLOTS} " \
+            'if pcall(p.set_quick_bar_slot,k,l,r[v]) then ok=ok+1 end'
+          else
+            'if pcall(p.set_quick_bar_slot,i,r[v]) then ok=ok+1 end'
+          end
+    lua = 'do local p=game.players["' + lua_quote(player) + '"] local ok=0 ' \
+      'local r={} for x in pairs(prototypes.item) do r[#r+1]=x end ' \
+      "if p then local s={#{cells}} for i,v in pairs(s) do #{set} end end " \
+      'rcon.print(ok) end'
+    execute(lua).to_s.strip.to_i
+  end
+
   # Write item + entity prototype name dumps to the server's script-output
   # dir (files factorio-packettools-items.txt / factorio-packettools-entities.txt)
   # via helpers.write_file. Returns true when the command ran; the caller

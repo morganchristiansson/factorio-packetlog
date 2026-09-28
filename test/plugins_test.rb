@@ -93,6 +93,34 @@ class TestPlugins < Minitest::Test
     assert_includes klass.ancestors, ::Alpha
   end
 
+  # A feature may be a class the host instantiates (hivemind, translation)
+  # rather than a module: one list, both kinds, and no constant to explode on.
+  def test_apply_mixins_skips_a_feature_with_no_module
+    @m.load(%w[classy])
+    klass = Class.new
+    @m.apply_mixins(klass)
+
+    assert @m.enabled?('classy')
+    assert_nil @m.mixin_for('classy')
+    refute_includes klass.ancestors, ::Classy
+  end
+
+  # A host offers no-op seams in one module and includes it BEFORE the
+  # features, so a feature overrides the seam it uses (Ruby keeps the last
+  # include closest to the class) and leaves the rest no-ops.
+  def test_a_feature_overrides_the_host_seam
+    seam = Module.new { def on_join_enriched(*_args); end }
+    @m.load(%w[seamy])
+
+    plain = Class.new { include seam }
+    assert_nil plain.new.on_join_enriched('bob', 1, {}), 'the seam alone is a no-op'
+
+    with_feature = Class.new { include seam }
+    @m.apply_mixins(with_feature)
+    assert_equal 'saw bob', with_feature.new.on_join_enriched('bob', 1, {}),
+                 'the feature module wins over the seam'
+  end
+
   # The convention is the whole catalog: the documented features must still
   # be plain lib files.
   def test_documented_features_are_lib_files

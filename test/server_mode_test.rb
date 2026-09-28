@@ -796,6 +796,137 @@ class TestServerMode < Minitest::Test
     FactorioProtocol.reset_version
   end
 
+  # ── Quickbar backup: name-keyed copy, restored into an empty bar ──────
+  #
+  # The feature is a MODULE the plugin manager mixes in (nothing in the
+  # sniffer names it), so the test loads it through a throwaway Manager and
+  # drives it from a host that has what it reaches for: @rcon, @player_db.
+
+  Plugins::Manager.new(File.expand_path('../lib', __dir__)).load(%w[quickbar_backup])
+
+  # Loading through a Manager is what defines the module — that is the whole
+  # registration. A local Manager, not the default one, so the rest of the
+  # suite is unaffected.
+  # Stands in for the sniffer: the module reaches for @rcon and @player_db,
+  # and @player_db is the only thing that records what the module wrote.
+  class QuickbarHost
+    include QuickbarBackup
+    def initialize(rcon)
+      @rcon = rcon
+      @restored = nil
+      host = self
+      @player_db = Object.new
+      @player_db.define_singleton_method(:replace_quickbar) { |i, b| host.instance_variable_set(:@restored, [i, b]) }
+    end
+    def on_join_enriched(name, index, attrs) = super
+    def restored = @restored
+  end
+
+  Plugins::Manager.new(File.expand_path('../lib', __dir__)).load(%w[quickbar_backup])
+
+  def fake_backup_rcon(version: '2.0.77', written: :all)
+    calls = []
+    rcon = Object.new
+    rcon.define_singleton_method(:restore_quickbar) do |name, cells|
+      calls << [name, cells]
+      written == :all ? cells.size : 1
+    end
+    rcon.define_singleton_method(:server_version) { version }
+    [rcon, calls]
+  end
+
+  def test_quickbar_backup_snapshots_and_restores
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        rcon, calls = fake_backup_rcon
+        host = QuickbarHost.new(rcon)
+        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
+
+        # a bar in game is the truth: snapshot it, write nothing to the server
+        host.on_join_enriched('alice', 1, {quickbar: bar})
+        assert_empty calls, 'nothing is written when the bar is already there'
+        saved = JSON.parse(File.read(QuickbarBackup::FILENAME))
+        assert_equal 30, saved['alice'][0][0], 'persisted by NAME, indexed by page/slot'
+
+        # a new save: a fresh host (restart) reads the same file, and she
+        # joins with an empty bar → put the saved one back
+        fresh = QuickbarHost.new(rcon)
+        fresh.on_join_enriched('alice', 7, {quickbar: nil})
+        assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }]], calls,
+                     'restored by name, with the flat cell indices the setter takes'
+        assert_equal [7, PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)], fresh.restored,
+                     'the in-memory cache follows the game'
+
+        # someone we have never seen, joining empty, is left alone
+        before = fresh.restored
+        fresh.on_join_enriched('bob', 8, {quickbar: nil})
+        assert_equal 1, calls.size, 'no restore without a saved bar'
+        assert_equal before, fresh.restored, 'and the cache untouched'
+
+        # a failed Lua read is not an empty bar: leave it alone
+        fresh.on_join_enriched('alice', 7, {quickbar: :failed})
+        assert_equal 1, calls.size, ':failed is not "empty", so no restore'
+      end
+    end
+  end
+
+  def test_quickbar_backup_needs_rcon_and_survives_a_corrupt_file
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        File.write(QuickbarBackup::FILENAME, '{broken')
+        rcon, = fake_backup_rcon
+        host = QuickbarHost.new(rcon)
+        host.on_join_enriched('alice', 1, {quickbar: PlayerDatabase.parse_quickbar('1' => 30)})
+        assert_equal 30, JSON.parse(File.read(QuickbarBackup::FILENAME))['alice'][0][0],
+                     'a corrupt file reads as empty and the next join rewrites it'
+
+        # no RCON (client mode, or RCON down): the seam does nothing at all
+        offline = QuickbarHost.new(nil)
+        offline.on_join_enriched('alice', 1, {quickbar: nil})
+        assert_nil offline.restored, 'no restore without a client to ask'
+      end
+    end
+  end
+
+  def test_quickbar_backup_reports_a_partial_restore
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        rcon, = fake_backup_rcon(version: '2.1.11', written: 1) # 2 asked, 1 written
+        host = QuickbarHost.new(rcon)
+        host.on_join_enriched('alice', 1, {quickbar: PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)})
+
+        out, err = capture_io { host.on_join_enriched('alice', 1, {quickbar: nil}) }
+        assert_includes err, 'restored 1/2 slot(s)', 'a partial restore is reported, not swallowed'
+        assert_includes err, '2.1.11', 'and names the version, which decides the setter shape'
+      end
+    end
+  end
+
+  # the setter command: ids in, names out, the same version branch as the
+  # getter, and a success count instead of silence
+  def test_restore_quickbar_command
+    calls = []
+    rcon = RconClient.allocate
+    rcon.define_singleton_method(:server_version) { @v }
+    rcon.define_singleton_method(:execute) { |cmd| calls << cmd; '2' }
+    rcon.instance_variable_set(:@v, '2.0.77')
+    rcon.instance_variable_set(:@v, '2.0.77')
+    assert_equal 2, rcon.restore_quickbar('alice', { 1 => 30, 30 => 33 })
+    flat = calls.last
+    assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
+    assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
+    assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
+    assert_equal 0, rcon.restore_quickbar('alice', {}), 'nothing to write, no command sent'
+    assert_equal 1, calls.size
+
+    rcon.instance_variable_set(:@v, '2.1.11')
+    rcon.restore_quickbar('bo"b', { 4 => 32 })
+    two = calls.last
+    assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
+    assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
+    assert_includes two, 'game.players["bo\\"ce"]'.sub('ce', 'b'), 'the name is Lua-quoted'
+  end
+
   # ── Quickbar: the RCON grid parses into the 10×10 shape ────────────────
 
   def test_quickbar_rcon_grid_parsing
@@ -835,6 +966,7 @@ class TestServerMode < Minitest::Test
     # what RCON returns, parsed the way the real query is: flat index → grid
     grid = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
     queries = []
+    seen = []
     rcon = Object.new
     rcon.define_singleton_method(:player_attributes_for) do |who|
       queries << who
@@ -863,6 +995,235 @@ class TestServerMode < Minitest::Test
     assert_equal 'pt-BR', db.get_locale(id), 'and the locale, which the translation agent used to ask for itself'
     assert_includes output, 'quickbar=3 slot(s)', 'the enrichment is reported'
     assert_equal 0, db.quickbar_page(id), 'the active page still comes from the packets'
+  end
+
+  # ── Quickbar backup: name-keyed copy, restored into an empty bar ──────
+  #
+  # The feature is a MODULE the plugin manager mixes in (nothing in the
+  # sniffer names it), so the test loads it through a throwaway Manager and
+  # drives it from a host that has what it reaches for: @rcon, @player_db.
+
+  Plugins::Manager.new(File.expand_path('../lib', __dir__)).load(%w[quickbar_backup])
+
+  # Loading through a Manager is what defines the module — that is the whole
+  # registration. A local Manager, not the default one, so the rest of the
+  # suite is unaffected.
+  # Stands in for the sniffer: the module reaches for @rcon and @player_db,
+  # and @player_db is the only thing that records what the module wrote.
+  class QuickbarHost
+    include QuickbarBackup
+    def initialize(rcon)
+      @rcon = rcon
+      @restored = nil
+      host = self
+      @player_db = Object.new
+      @player_db.define_singleton_method(:replace_quickbar) { |i, b| host.instance_variable_set(:@restored, [i, b]) }
+    end
+    def on_join_enriched(name, index, attrs) = super
+    def restored = @restored
+  end
+
+  Plugins::Manager.new(File.expand_path('../lib', __dir__)).load(%w[quickbar_backup])
+
+  def fake_backup_rcon(version: '2.0.77', written: :all)
+    calls = []
+    rcon = Object.new
+    rcon.define_singleton_method(:restore_quickbar) do |name, cells|
+      calls << [name, cells]
+      written == :all ? cells.size : 1
+    end
+    rcon.define_singleton_method(:server_version) { version }
+    [rcon, calls]
+  end
+
+  def test_quickbar_backup_snapshots_and_restores
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        rcon, calls = fake_backup_rcon
+        host = QuickbarHost.new(rcon)
+        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
+
+        # a bar in game is the truth: snapshot it, write nothing to the server
+        host.on_join_enriched('alice', 1, {quickbar: bar})
+        assert_empty calls, 'nothing is written when the bar is already there'
+        saved = JSON.parse(File.read(QuickbarBackup::FILENAME))
+        assert_equal 30, saved['alice'][0][0], 'persisted by NAME, indexed by page/slot'
+
+        # a new save: a fresh host (restart) reads the same file, and she
+        # joins with an empty bar → put the saved one back
+        fresh = QuickbarHost.new(rcon)
+        fresh.on_join_enriched('alice', 7, {quickbar: nil})
+        assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }]], calls,
+                     'restored by name, with the flat cell indices the setter takes'
+        assert_equal [7, PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)], fresh.restored,
+                     'the in-memory cache follows the game'
+
+        # someone we have never seen, joining empty, is left alone
+        before = fresh.restored
+        fresh.on_join_enriched('bob', 8, {quickbar: nil})
+        assert_equal 1, calls.size, 'no restore without a saved bar'
+        assert_equal before, fresh.restored, 'and the cache untouched'
+
+        # a failed Lua read is not an empty bar: leave it alone
+        fresh.on_join_enriched('alice', 7, {quickbar: :failed})
+        assert_equal 1, calls.size, ':failed is not "empty", so no restore'
+      end
+    end
+  end
+
+  def test_quickbar_backup_needs_rcon_and_survives_a_corrupt_file
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        File.write(QuickbarBackup::FILENAME, '{broken')
+        rcon, = fake_backup_rcon
+        host = QuickbarHost.new(rcon)
+        host.on_join_enriched('alice', 1, {quickbar: PlayerDatabase.parse_quickbar('1' => 30)})
+        assert_equal 30, JSON.parse(File.read(QuickbarBackup::FILENAME))['alice'][0][0],
+                     'a corrupt file reads as empty and the next join rewrites it'
+
+        # no RCON (client mode, or RCON down): the seam does nothing at all
+        offline = QuickbarHost.new(nil)
+        offline.on_join_enriched('alice', 1, {quickbar: nil})
+        assert_nil offline.restored, 'no restore without a client to ask'
+      end
+    end
+  end
+
+  def test_quickbar_backup_reports_a_partial_restore
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        rcon, = fake_backup_rcon(version: '2.1.11', written: 1) # 2 asked, 1 written
+        host = QuickbarHost.new(rcon)
+        host.on_join_enriched('alice', 1, {quickbar: PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)})
+
+        out, err = capture_io { host.on_join_enriched('alice', 1, {quickbar: nil}) }
+        assert_includes err, 'restored 1/2 slot(s)', 'a partial restore is reported, not swallowed'
+        assert_includes err, '2.1.11', 'and names the version, which decides the setter shape'
+      end
+    end
+  end
+
+  # the setter command: ids in, names out, the same version branch as the
+  # getter, and a success count instead of silence
+  def test_restore_quickbar_command
+    calls = []
+    rcon = RconClient.allocate
+    rcon.define_singleton_method(:server_version) { @v }
+    rcon.define_singleton_method(:execute) { |cmd| calls << cmd; '2' }
+    rcon.instance_variable_set(:@v, '2.0.77')
+    rcon.instance_variable_set(:@v, '2.0.77')
+    assert_equal 2, rcon.restore_quickbar('alice', { 1 => 30, 30 => 33 })
+    flat = calls.last
+    assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
+    assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
+    assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
+    assert_equal 0, rcon.restore_quickbar('alice', {}), 'nothing to write, no command sent'
+    assert_equal 1, calls.size
+
+    rcon.instance_variable_set(:@v, '2.1.11')
+    rcon.restore_quickbar('bo"b', { 4 => 32 })
+    two = calls.last
+    assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
+    assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
+    assert_includes two, 'game.players["bo\\"ce"]'.sub('ce', 'b'), 'the name is Lua-quoted'
+  end
+
+  # ── Quickbar: the RCON grid parses into the 10×10 shape ────────────────
+
+  def test_quickbar_rcon_grid_parsing
+    # the live join-time payload is a single JSON OBJECT keyed by the game's
+    # FLAT slot index (the all-players startup dump is an array of these)
+    body = '{"a":true,"c":true,"i":1,"k":722,"l":"en","n":"alice","o":7142576,' \
+           '"q":{"1":30,"10":32,"23":33,"100":1,"44":"7","bad":"x","0":5,"101":6}}'
+    attrs = RconClient.parse_player_attrs(body)
+    assert_equal 1, attrs.size, 'a single record object parses like a one-element list'
+    grid = attrs.first[:quickbar]
+    assert_equal 10, grid.size, 'ten pages'
+    # index 1 = page 1 slot 1, index 11 = page 2 slot 1, … (API definition)
+    assert_equal 30, grid[0][0]
+    assert_equal 32, grid[0][9]
+    assert_equal 33, grid[2][2], 'index 23 → page 2, slot 2'
+    assert_equal 1, grid[9][9], 'index 100 → the last cell'
+    assert_equal 7, grid[4][3], 'index 44 → page 4, slot 3; ids arrive as JSON strings'
+    assert_nil grid[0][1], 'unset slots stay nil'
+    assert_nil PlayerDatabase.parse_quickbar('0' => 5), 'index 0 does not exist'
+    assert_nil PlayerDatabase.parse_quickbar('101' => 6), 'index 101 does not exist'
+    assert_nil PlayerDatabase.parse_quickbar('bad' => 1), 'a non-numeric key is dropped'
+    assert_equal 'en', attrs.first[:locale], 'the locale rides along in the same payload'
+
+    assert_nil PlayerDatabase.parse_quickbar('nope'), 'a non-hash payload is nil'
+    assert_nil PlayerDatabase.parse_quickbar({}), 'an empty bar is nil'
+    assert_equal :failed, RconClient.parse_player_attrs('{"i":1,"n":"x","q":false}')
+                          .first[:quickbar], 'q=false (the Lua read raised) is not an empty bar'
+
+    # the all-players startup dump carries no quickbar
+    assert_nil RconClient.parse_player_attrs('[{"i":1,"n":"bob","c":true,"a":false,"o":5,"k":0}]')
+                    .first[:quickbar], 'no quickbar key → nil'
+  end
+
+  # ── Quickbar: a join reads the whole bar from RCON ──────────────────────
+
+  def test_quickbar_refreshed_from_rcon_on_join
+    # what RCON returns, parsed the way the real query is: flat index → grid
+    grid = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
+    queries = []
+    seen = []
+    rcon = Object.new
+    rcon.define_singleton_method(:player_attributes_for) do |who|
+      queries << who
+      { index: 1, name: 'alice', connected: true, admin: false,
+        online_time: 5, afk_time: 0, locale: 'pt-BR', quickbar: grid }
+    end
+
+    output, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
+      s.instance_variable_set(:@rcon, rcon)
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
+      s.send(:process_packet, 2, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197,
+             fixture_packet('client_chat_message_0x0b'))
+      # the enrichment runs on its own thread; wait (bounded) for it to land
+      db = s.instance_variable_get(:@player_db)
+      100.times { break if db.quickbar(db.id_for('alice')); sleep 0.01 }
+    end
+    db = sniffer.instance_variable_get(:@player_db)
+    id = db.id_for('alice')
+    assert_equal 1, queries.size, 'ONE rcon query per join carries the quickbar too'
+    assert_equal db.id_for('alice'), queries.first, 'queried by game index, not by name'
+    assert_equal grid, db.quickbar(id), 'the whole bar came from RCON, in the 10×10 shape'
+    assert_equal 30, grid[0][0], 'index 1 → page 1 slot 1 (substation)'
+    assert_equal 33, grid[2][9], 'index 30 → page 3 slot 10 (pump)'
+    assert_equal 3, grid.flatten.compact.size, 'three slots came through'
+    assert_equal 'pt-BR', db.get_locale(id), 'and the locale, which the translation agent used to ask for itself'
+    assert_includes output, 'quickbar=3 slot(s)', 'the enrichment is reported'
+    assert_equal 0, db.quickbar_page(id), 'the active page still comes from the packets'
+  end
+
+  # The seam every feature module can override: the sniffer calls it with the
+  # join enrichment, BEFORE it stores the bar (that ordering is what lets a
+  # feature restore one). Stubbed on the instance here — the mixin machinery
+  # itself is plugins_test's job, and the backup feature is driven directly
+  # by the tests below.
+  def test_join_enrichment_calls_the_feature_seam
+    rcon = Object.new
+    rcon.define_singleton_method(:player_attributes_for) do |_who|
+      { index: 1, name: 'alice', connected: true, admin: false, online_time: 0,
+        afk_time: 0, locale: 'en', quickbar: nil } # an empty bar in game
+    end
+    _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
+      s.instance_variable_set(:@rcon, rcon)
+      s.define_singleton_method(:on_join_enriched) { |*args| @feature_saw = args }
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
+      s.send(:process_packet, 2, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197,
+             fixture_packet('client_chat_message_0x0b'))
+      100.times { break if s.instance_variable_get(:@feature_saw); sleep 0.01 }
+    end
+    db = sniffer.instance_variable_get(:@player_db)
+    name, index, attrs = sniffer.instance_variable_get(:@feature_saw)
+    assert_equal 'alice', name
+    assert_equal db.id_for('alice'), index, 'the seam gets the bound game index'
+    assert_equal 'en', attrs[:locale]
+    assert_nil attrs[:quickbar], 'and the whole attrs hash, the bar included' 
   end
 
   # ── Heartbeat timeout: crashed/offline players are dropped ────────────

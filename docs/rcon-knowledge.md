@@ -174,6 +174,19 @@ one `pcall`: a wrong guess or a changed return type costs the quickbar
   counter demands one argument; passing self complains `real number expected
   got userdata`), so the active page stays packet-derived.
 
+### `LuaPlayer.set_quick_bar_slot` — writing a bar back
+
+Mirrors the getter, and changed with it: 2.0 takes `(index, item)`, 2.1 takes
+`(page, slot, filter)`. `RconClient#restore_quickbar(name, {flat index => id})`
+builds the right call from the memoised `server_version` (same branch as the
+read), resolves the ids to names through the `prototypes.item` order, wraps
+each call in a `pcall` and returns the COUNT of successes — so a rejected
+write (a 2.1 filter shape we guessed wrong) is a number the caller reports,
+not a silent no-op.
+
+Used by the `quickbar_backup` plugin (`lib/quickbar_backup.rb`) to put a
+player's saved quickbar back after a save change.
+
 ### Player lookup: by index OR name, and not `connected_players`
 
 **Verified live on 2.0.77:**

@@ -18,11 +18,16 @@
 # `plugins: []` to run on no features at all. Hivemind's own plugins
 # (persistence, compaction, followups) are NOT listed here — they live in
 # config-hivemind.yaml.
-#   hivemind     the AI agent answering players who say "hivemind"
-#   translation  relays chat to players who can't read the original
+#   hivemind      the AI agent answering players who say "hivemind"
+#   translation   relays chat to players who can't read the original
+#   quickbar_backup  keeps a name-keyed copy of every player's quickbar
+#                    (quickbars.json) and puts it back when they join a
+#                    save that has none — game indexes reset with a save,
+#                    players-cache.json does not survive one
 plugins:
   - hivemind
   - translation
+  - quickbar_backup
 
 # Capture source (one: port, interface, or server mode)
 

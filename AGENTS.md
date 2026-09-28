@@ -19,6 +19,7 @@ either on a client or on the game server host (server mode, with RCON).
 - `lib/input_actions_lens_20.rb` — `C2S_LENS_20`, the MEASURED C→S payload lengths (94 entries). Owned by `tools/measure_action_lens.rb --decide`/`--type`, guarded by `--check`; kept out of `input_actions_20.rb` so the name dumper cannot clobber it.
 - `lib/server_detect.rb` — Auto-detects a running factorio server
   (game port, RCON endpoint, server IPs, dedicated-server detection)
+- `lib/quickbar_backup.rb` — the `quickbar_backup` feature (config.yaml `plugins:`), a MODULE the plugin manager mixes in like Hivemind's own: it hooks the `on_join_enriched` seam (`FactorioPacketTools::Defaults` — the sniffer's no-op hooks, included BEFORE the features so a feature module overrides the seam it uses) and needs NO glue in the sniffer. Keeps a NAME-keyed copy of every player's quickbar in `quickbars.json` (game indexes reset with a save, players-cache.json does not) and writes it back over RCON when someone joins a save with an empty bar. This is the model for a feature: `lib/foo.rb` defines `Foo`, one list, no edits to the host.
 - `lib/rcon_client.rb` — RCON queries via `rcon.print` + `helpers.table_to_json` (JSON), `#say` (Lua-quoted `game.print`), `#command` (raw console cmd), `#server_version` (`helpers.game_version`), `#player_attributes_for(index_or_name)` (the join-time query, by game INDEX: attrs + the whole quickbar as item wire ids in ONE command, with the read loop chosen from `#server_version`; the live-verified API and its traps are in `docs/rcon-knowledge.md`)
 - `lib/player_db.rb` — Player ID→name mapping (`players-cache.json`) + per-player language overrides (`players-locale.json`, set via `/locales`)
 - `lib/player_attrs.rb` — Mirrors LuaPlayer attributes (connected/admin/online_time), seeded once from RCON, maintained by packets; online_time computed lazily from the game tick (never incremented)
@@ -39,6 +40,7 @@ either on a client or on the game server host (server mode, with RCON).
 - `tools/dump_input_actions.rb` — regenerate `lib/input_actions_20.rb` (2.0 defines dump + validated internal wire actions)
 - `players-cache.json` — 1-indexed player ID→name/locale cache (per-server/savefile; re-seeded from RCON), plus per-player `quickbar` (fixed 10 pages × 10 slots of item prototype ids) and `quickbar_page` tracked from the capture stream
 - `players-locale.json` — name-keyed language overrides ({"KrlosUltimate":["en","pt"]}), set via `/locales`
+- `quickbars.json` — name-keyed quickbar copies (`{name: 10×10 item ids}`) written by the `quickbar_backup` plugin; the one cache that outlives a save change
 - `external/` — Game dumps (`input_actions_dump.txt`, `data-raw-dump.json`, `item_prototypes_runtime.txt`, `entity_prototypes_runtime.txt`, …)
 
 ## Docs (details live here, not in this file)

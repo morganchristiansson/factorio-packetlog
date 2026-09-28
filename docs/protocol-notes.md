@@ -136,6 +136,14 @@ per player in `players-cache.json` as `quickbar` — a fixed 10×10 array
 (`QUICKBAR_PAGES` rows × `QUICKBAR_SLOTS` slots) of item prototype ids, `null`
 for empty/unknown — plus `quickbar_page`.
 
+**Backup across saves (`quickbar_backup` plugin).** The cache above is
+per-savefile — game indexes reset with the save — so the optional
+`quickbar_backup` feature keeps a NAME-keyed copy in `quickbars.json` and, on
+a join whose in-game bar is empty, writes it back with
+`set_quick_bar_slot` (2.0 `(index, item)`, 2.1 `(page, slot, filter)`). The
+feature is a module mixed in by the plugin manager — see
+`lib/quickbar_backup.rb` and the `on_join_enriched` seam.
+
 **Join-time refresh (RCON).** The C→S actions only ever report the quickbar as
 deltas, so on a player's first confirmed heartbeat the sniffer asks the server
 for the whole bar — in the query that already exists for the joiner. One

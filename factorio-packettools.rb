@@ -189,17 +189,18 @@ if __FILE__ == $PROGRAM_NAME
 
   # Plugins: the sniffer's features to load. MANDATORY and explicit — there
   # is no hardcoded default, so config.yaml must say which ones (lib/plugins.rb
-  # has the catalog; anything not listed is never even required). Hivemind's
+  # is the list (lib/plugins.rb is the convention, not a catalog; anything not
+  # listed is never even required). Hivemind's
   # own plugins (persistence / compaction / followups) are NOT here — they
   # are listed in config-hivemind.yaml and loaded by hivemind itself.
-  Plugins.load(options[:plugins])
-  puts "Plugins loaded: #{Plugins.loaded.join(', ')}" unless Plugins.loaded.empty?
+  options[:plugins] = Plugins.list!(options[:plugins])   # absent = startup error
+  puts "Plugins: #{options[:plugins].join(', ')}" unless options[:plugins].empty?
 
   # The AI agent still needs a key for its startup model (and server mode
   # for RCON/game.print), so listing the plugin isn't enough: client/pcap
   # mode never starts it, and a config without a key stays silent.
   options[:ai_agent] = true if options[:server] && !options[:pcap] &&
-                               Plugins.enabled?('hivemind') && HiveMindAgent.key_configured?
+                               Plugins.enabled?(options[:plugins], 'hivemind') && HiveMindAgent.key_configured?
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring

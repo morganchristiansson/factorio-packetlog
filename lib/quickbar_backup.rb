@@ -2,14 +2,14 @@
 
 require 'json'
 
-# Quickbar backup — the file is lib/quickbar_backup.rb, the module takes its
+# Quickbar backup — the file is lib/quickbar_backup.rb, the class takes its
 # CamelCase name, and it is listed in config.yaml `plugins:`. Nothing in the
-# sniffer names it: Plugins.apply_mixins mixes it in, and it hooks the
-# `on_join_enriched` seam.
+# sniffer names it: Plugins.features builds every listed class and pushes
+# `on_join_enriched` at the ones that implement it.
 #
 # What it keeps: a copy of every player's quickbar keyed by NAME, in
-# `quickbars.json` next to the process cwd (same convention as
-# players-cache.json, and no configuration of its own).
+# `quickbars.json` next to the process cwd (the players-cache.json
+# convention, and no configuration of its own).
 #
 # WHY a side file, keyed by name: players-cache.json's 10×10 quickbar is
 # per-savefile — game indexes are handed out in join order and reset when the
@@ -25,61 +25,75 @@ require 'json'
 #   * they have none but we do → write it back over RCON, then bring the
 #     in-memory cache in line with the game.
 #
-# No RCON, no backup: the seam is a no-op when the client is missing (client
-# mode, or RCON down), and the file is only read when something is actually
-# restored — a backup that cannot restore must not look like it works.
-module QuickbarBackup
+# No RCON, no backup: the event is simply not acted on (client mode, or RCON
+# down), and the file is only read when there is something to restore. Other
+# events (Plugins::Feature) are inherited no-ops.
+class QuickbarBackup
   FILENAME = 'quickbars.json'
 
-  private
+  # `host` is the sniffer (Plugins hands every feature its owner): the two
+  # things this one needs are on it, and either may be nil — no RCON, no
+  # backup.
+  def initialize(host)
+    @rcon = host.rcon
+    @player_db = host.player_db
+    @mutex = Mutex.new # one join at a time + the file write (see #persist)
+  end
 
-  # The seam (see FactorioPacketTools::Defaults). Runs on the join thread, so
-  # the restore below is a blocking RCON call on a thread that exists for it.
+  # The event (see FactorioPacketTools#on_join_enriched). Runs on the join
+  # thread, so the restore is a blocking RCON call on a thread that is there
+  # for it.
   def on_join_enriched(name, index, attrs)
-    # nil is the join query's "empty bar" (it always carries the key; only
-    # :failed, the Lua read raising, means we do not know)
+    return unless @rcon
+    # nil is the join query's "empty bar" (the payload always carries the
+    # key); only :failed, the Lua read raising, means we do not know
     return if attrs[:quickbar] == :failed
     bar = attrs[:quickbar]
-    saved = quickbar_saved_bar(name)
-    if quickbar_bar?(bar)
-      quickbar_save_bar(name, bar)
+    saved = saved_bar(name)
+    if filled?(bar)
+      save(name, bar)
     elsif saved
-      quickbar_restore(name, index, saved)
+      restore(name, index, saved)
     end
   end
 
-  def quickbar_backup_enabled? = !@rcon.nil?
+  # The saved bar for a name, or nil.
+  def [](name)
+    saved_bar(name)
+  end
+
+  private
 
   # ── the name-keyed file ───────────────────────────────────────────
 
-  def quickbar_saved_bar(name)
-    return nil unless quickbar_backup_enabled?
-    bar = quickbar_mutex.synchronize { quickbar_bars[name] }
-    bar && deep_copy(bar) # nil for someone we have never seen (deep_copy of
-                          # nil would be [], and [] is truthy)
+  def saved_bar(name)
+    return nil if name.to_s.empty?
+    bar = @mutex.synchronize { bars[name] }
+    bar && copy(bar) # nil for someone we have never seen (copy of nil would
+                     # be [], and [] is truthy)
   end
 
-  def quickbar_save_bar(name, bar)
-    quickbar_mutex.synchronize do
-      quickbar_bars[name] = deep_copy(bar)
-      quickbar_persist
+  def save(name, bar)
+    @mutex.synchronize do
+      bars[name] = copy(bar)
+      persist
     end
   end
 
   # A copy of the stored grid: the caller keeps editing the one it handed us.
-  def deep_copy(grid)
+  def copy(grid)
     Array(grid).map { |slots| slots.is_a?(Array) ? slots.dup : slots }
   end
 
-  def quickbar_bar?(bar)
+  def filled?(bar)
     Array(bar).flatten.compact.any?
   end
 
   # ── restore ──────────────────────────────────────────────────────
 
-  def quickbar_restore(name, index, bar)
-    return unless quickbar_bar?(bar)
-    cells = quickbar_cells(bar)
+  def restore(name, index, bar)
+    return unless filled?(bar)
+    cells = cells_of(bar)
     done = @rcon.restore_quickbar(name, cells)
     if done == cells.size
       puts "[quickbar] #{name}: restored #{done} slot(s) from #{QuickbarBackup::FILENAME}"
@@ -87,12 +101,12 @@ module QuickbarBackup
       version = @rcon.server_version || 'unknown version'
       warn "[quickbar] #{name}: restored #{done}/#{cells.size} slot(s) — #{version} rejected the rest?"
     end
-    @player_db.replace_quickbar(index, bar) # the game now has it; so must the cache
+    @player_db&.replace_quickbar(index, bar) # the game now has it; so must the cache
   end
 
   # 10×10 grid → {flat slot index (1..100) => item id}, the form the setter
   # command takes.
-  def quickbar_cells(bar)
+  def cells_of(bar)
     cells = {}
     bar.each_with_index do |slots, page|
       Array(slots).each_with_index do |item, slot|
@@ -104,30 +118,25 @@ module QuickbarBackup
 
   # ── state ────────────────────────────────────────────────────────
 
-  def quickbar_mutex
-    @quickbar_mutex ||= Mutex.new # one join at a time + the file write
+  def bars
+    @bars ||= load_bars
   end
 
-  def quickbar_bars
-    @quickbar_bars ||= quickbar_load
-  end
-
-  def quickbar_load
-    path = QuickbarBackup::FILENAME
-    return {} unless File.exist?(path)
-    raw = JSON.parse(File.read(path))
+  def load_bars
+    return {} unless File.exist?(QuickbarBackup::FILENAME)
+    raw = JSON.parse(File.read(QuickbarBackup::FILENAME))
     raw.each_with_object({}) { |(name, bar), h| h[name.to_s] = bar if bar.is_a?(Array) }
   rescue JSON::ParserError, SystemCallError
     {} # corrupt or unreadable: start empty, the next join with a bar refills it
   end
 
-  # Assumes the mutex is held (called from #quickbar_save_bar). Same
-  # temp+rename as players-cache.json: a crash mid-write must not leave a file
-  # that would then be read back as "this player's bar is empty".
-  def quickbar_persist
+  # Assumes the mutex is held (called from #save). Same temp+rename as
+  # players-cache.json: a crash mid-write must not leave a file that would
+  # then be read back as "this player's bar is empty".
+  def persist
     path = QuickbarBackup::FILENAME
     tmp = "#{path}.tmp"
-    File.write(tmp, JSON.pretty_generate(quickbar_bars))
+    File.write(tmp, JSON.pretty_generate(bars))
     File.rename(tmp, path)
   rescue StandardError => e
     warn "#{QuickbarBackup::FILENAME} save failed: #{e.class}: #{e.message}"

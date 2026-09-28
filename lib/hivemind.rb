@@ -42,15 +42,15 @@ class HiveMindAgent
   # HIVE_API_KEY remains the sole environment secret; api_key: in this
   # (gitignored) file is the per-provider fallback for it.
   CONFIG_FILE = 'config-hivemind.yaml'
-  # Hivemind's OWN plugins — the same manager class, a prefixed file set: the
+  # Hivemind's OWN plugins — the same convention, a prefixed file set: the
   # `plugins:` list in config-hivemind.yaml names lib/hivemind_persistence.rb,
   # lib/hivemind_compaction.rb, lib/hivemind_followups.rb,
   # lib/hivemind_logwatcher.rb, whose modules are mixed into this class. A
   # plugin that is not listed is never required and never lands on the agent,
   # so a call site asks #plugin?('compaction') before touching one.
-  PLUGINS = Plugins::Manager.new(__dir__, prefix: 'hivemind_', namespace: 'HiveMind')
-  # The plugin list, read where it is USED: here, in the class body, because
-  # that is where the mixins are decided. A file without the key raises
+  #
+  # The list is read where it is USED: here, in the class body, because that is
+  # where the mixins are decided. A file without the key raises
   # `KeyError: key not found: "plugins"` instead of quietly producing an
   # agent with no plugins. A missing FILE is load_config's error to report
   # (in initialize) — the class body must survive a hot reload either way.
@@ -59,10 +59,17 @@ class HiveMindAgent
 
     Array(YAML.safe_load_file(path).fetch('plugins')).map(&:to_s)
   end
-  PLUGINS.load(config_plugins)
-  PLUGINS.apply_mixins(self) # an edited list applies on the next reload; a
-                             # module already mixed in can't be un-mixed, so
-                             # restarting is the clean switch
+  PLUGIN_PREFIX = 'hivemind_'
+  PLUGIN_NAMESPACE = 'HiveMind'
+  # The list, read ONCE per load of this file: a hot reload re-reads the config
+  # and re-mixes, so an edited list applies then. A module already mixed in
+  # can't be un-mixed, so restarting is the clean switch.
+  def self.own_plugins = (@own_plugins ||= config_plugins)
+  def self.plugin_set
+    @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__,
+                                           prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
+  end
+  self.plugin_set.mix_modules_into(self)
   # Identity headers for the OpenCode Go gateway (required, not optional):
   # a custom User-Agent (never a generic SDK/HTTP-library name) plus a
   # stable per-conversation session id (x-opencode-session) for routing
@@ -122,8 +129,8 @@ class HiveMindAgent
   # Which of Hivemind's own plugins (config-hivemind.yaml `plugins:`) are
   # mixed in — what a call site asks before touching a plugin's methods.
   # #plugin_files is what the sniffer re-reads on a hot reload.
-  def plugin?(name) = PLUGINS.enabled?(name)
-  def plugin_files = PLUGINS.files
+  def plugin?(name) = Plugins.enabled?(self.class.own_plugins, name)
+  def plugin_files = self.class.plugin_set.files
 
   # Reload-safe lock accessors: a HOT-RELOADED agent keeps its boot-time
   # ivars, so an agent object built by pre-split code lacks these. `||=`
@@ -177,8 +184,12 @@ class HiveMindAgent
   # its id lazily on first use instead of sending a blank header.
   def opencode_session_id = (@opencode_session_id ||= SecureRandom.uuid)
 
-  def initialize(rcon:, attrs:, current_tick:, player_db:,
+  # plugins: the SNIFFER's list (config.yaml `plugins:`) — the agent consults
+  # it for the features it hooks (translation gates the set_player_languages
+  # tool). Its OWN list is config-hivemind.yaml, read in the class body.
+  def initialize(rcon:, attrs:, current_tick:, player_db:, plugins: [],
                  session_path: nil, memory_dir: nil, config_file: CONFIG_FILE)
+    @sniffer_plugins = plugins.map(&:to_s) # the SNIFFER's list — see plugins: above
     @attrs = attrs
     @current_tick = current_tick
     @player_db = player_db
@@ -542,7 +553,7 @@ class HiveMindAgent
     # The language tool edits the per-player language overrides the
     # TRANSLATION plugin relays chat for, so it is only useful (and only
     # offered) while that plugin is loaded.
-    chat.with_tool(SetPlayerLanguages.new(player_db: @player_db)) if Plugins.enabled?('translation')
+    chat.with_tool(SetPlayerLanguages.new(player_db: @player_db)) if Plugins.enabled?(@sniffer_plugins, 'translation')
   end
 
   def ask_llm(player, message)

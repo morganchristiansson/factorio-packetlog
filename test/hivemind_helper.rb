@@ -14,8 +14,9 @@ require 'plugins'
 
 HIVE_TEST_CONFIG = File.expand_path('../config-hivemind.yaml.example', __dir__)
 
-# The sniffer's feature list (config.yaml).
-Plugins.load(%w[hivemind])
+# The sniffer's feature list (config.yaml) — loaded the way the entry point
+# does, so lib/hivemind.rb is required (it is a feature class, not a module).
+Plugins::PluginSet.new(%w[hivemind], nil).features
 # Hivemind reads its OWN `plugins:` list in its class body, so the require
 # happens in a temp cwd holding the test config: the mixins under test must
 # not depend on whatever config-hivemind.yaml this checkout happens to have.

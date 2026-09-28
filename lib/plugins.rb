@@ -1,136 +1,135 @@
 # frozen_string_literal: true
 
-# Sniffer features are plugins, switched by a MANDATORY list in config.yaml
-# (`plugins:`). Pure convention, no catalog:
+# Sniffer and Hivemind features, by convention and nothing else. There is no
+# registry and no catalogue: a `plugins:` list in the config file IS the list,
+# and a name in it is a file plus a class whose CamelCase name the convention
+# derives. One Plugins object per owner, holding that owner's list.
 #
-#   a feature named `foo` IS the file lib/foo.rb — naming it requires that
-#   file, and nothing outside the list is ever read. The feature's family
-#   (lib/foo_*.rb — tools, prompts, backends, …) belongs to it and is
-#   re-read on Ctrl-C with it; the family is NOT auto-required (the feature
-#   requires what it needs), it only widens the reload list.
+#     quickbar_backup   lib/quickbar_backup.rb → QuickbarBackup
+#     compaction        lib/hivemind_compaction.rb → HiveMindCompaction
 #
-#     hivemind      lib/hivemind.rb + lib/hivemind_*.rb  (the AI agent)
-#     translation   lib/translation.rb + lib/translation_*.rb  (chat relay)
+# One host's list can name a prefixed set in its own namespace, so a feature
+# keeps its family of files and its class names in one flat namespace instead
+# of scattering them: Hivemind's `compaction` is
+# lib/hivemind_compaction.rb defining HiveMindCompaction, from
+# config-hivemind.yaml `plugins:`.
 #
-# A manager can own a prefixed set of files and a module namespace
-# (`prefix: 'hivemind_'`, `namespace: 'HiveMind'`), which is how a feature
-# keeps its OWN plugins in one flat namespace with the rest of the repo
-# instead of scattering them: Hivemind runs a second manager over
-# config-hivemind.yaml `plugins:` (persistence / compaction / followups /
-# logwatcher → lib/hivemind_persistence.rb, module HiveMindPersistence), and
-# those modules are mixed into the agent class instead of being instantiated
-# by the sniffer. The config names stay short, the files keep the prefix that
-# says who owns them, and the module name is derived from both — declared by
-# neither the file nor the plugin, so it cannot drift.
+# A name with a '/' is a path and is loaded as given, so a feature that ships
+# outside lib/ joins the same list.
 #
-# A name with a '/' is a path and is loaded as given, so a feature that
-# ships outside lib/ joins the same list.
-#
-# A feature registers itself, so the host never names it. Either way:
-#   * the file defines the host's CamelCase module (a mixin, see
-#     Manager#apply_mixins) and hooks what it needs by overriding one of the
-#     host's seams; or
-#   * the file is a class the host instantiates (hivemind, translation).
-# Both kinds live in one list; the module is optional.
+# Dispatch is by name: @plugins.emit(:on_join_enriched, …) reaches every
+# feature that implements it and no feature has to implement anything it does
+# not want. The emitter call sites ARE the event catalogue — the whole plugin
+# API, and a new feature never means editing the owner.
 module Plugins
-  class Manager
-    # Loaded plugin names, in the order they were enabled.
-    attr_reader :loaded
-
-    # dir: where the files live (lib/ by default). prefix: prepended to every
-    # name, so one owner can claim a prefixed set of files in a shared dir.
-    # namespace: prepended to every plugin's module name.
-    def initialize(dir = __dir__, prefix: '', namespace: nil)
+  class PluginSet
+    # names: the owner's `plugins:` list (see Plugins.list! — the entry point
+    #   rejects an absent one; nil here just means no features, so a host can
+    #   be built without a config). host: the owner, handed to every feature
+    #   as its constructor argument, so a feature reads shared state (config,
+    #   rcon, player_db) through the interface its owner publishes.
+    # dir/prefix/namespace: the convention for this owner's files and classes.
+    def initialize(names, host, dir: __dir__, prefix: '', namespace: nil)
+      @names = Array(names).map(&:to_s).uniq
+      @host = host
       @dir = dir
       @prefix = prefix
       @namespace = namespace
-      @loaded = []
-      @required = []
+      @features = nil
     end
 
-    # Enable the requested features and return the names. The list is
-    # MANDATORY: no hardcoded default, an absent key is an error, an explicit
-    # empty list means "none". Idempotent per name (a second call is a no-op
-    # for files already on disk).
-    def load(list)
-      if list.nil?
-        raise ArgumentError, '`plugins:` is required — list the features to load; an empty list (`plugins: []`) runs none'
-      end
+    attr_reader :names
 
-      list = Array(list).map(&:to_s).uniq
-      list.each do |name|
+    def enabled?(name) = @names.include?(name.to_s)
+
+    # The owner's feature objects, built on first use: the named files are
+    # required, then the class each contributes is instantiated with the
+    # owner. A name whose class is not there, or one that will not build, is
+    # reported and left out — a feature is never half-alive. This is also what
+    # the hot-reload list is read from, so a reload re-reads the files.
+    def features
+      @features ||= @names.filter_map { |name| build(name) }
+    end
+
+    # Every file the features own (their own plus their family), for the
+    # owner's hot reload.
+    def files
+      @names.flat_map { |name|
         file = path_for(name)
-        raise ArgumentError, "Unknown plugin: #{name} — no #{file}" unless File.file?(file)
-
-        require file
-        @required.concat(family(name))
-      end
-      @loaded |= list
-      @loaded
+        base = File.basename(file, '.rb')
+        [file, *Dir.glob(File.join(@dir, "#{base}_*.rb"))]
+      }.uniq
     end
 
-    def enabled?(name) = @loaded.include?(name.to_s)
-
-    # Absolute paths of every file the LOADED features own (their own file
-    # plus their family), for the sniffer's hot-reload list.
-    def files = @required.uniq
-
-    # Mix every loaded plugin's module into klass — the convention's second
-    # half: lib/quickbar_backup.rb contributes `QuickbarBackup`, and
-    # lib/hivemind_compaction.rb contributes `HiveMindCompaction` under the
-    # Hivemind manager. A feature that contributes NO module (lib/hivemind.rb
-    # and lib/translation.rb are classes the host instantiates itself) is
-    # skipped, so one host can run both kinds from one list.
-    #
-    # Include the host's seam module (the no-op hooks) BEFORE calling this:
-    # Ruby keeps the most recent include closest to the class, so a feature
-    # module overrides the seam it cares about and the others stay no-ops.
-    def apply_mixins(klass)
-      @loaded.each do |name|
-        mixin = mixin_for(name)
-        klass.include(mixin) if mixin
-      end
-    end
-
-    # The module a plugin contributes, or nil when it contributes none (a
-    # feature that is a class the host instantiates — a Class is not a Module
-    # as far as `include` is concerned).
-    def mixin_for(name)
-      mod = Object.const_get("#{@namespace}#{camel(name)}")
-      mod.is_a?(Module) && !mod.is_a?(Class) ? mod : nil
-    rescue NameError
+    # Send an event to every feature that implements it. A feature implements
+    # the events it wants and nothing else.
+    def emit(event, *args)
+      features.each { |f| f.public_send(event, *args) if f.respond_to?(event) }
       nil
     end
 
-    private
+    # INTERIM: Hivemind's four plugins are MODULES the agent calls, and are
+    # being converted to features one file at a time. This mixes in whatever
+    # of a list is still a module; it disappears when the last one lands.
+    def mix_modules_into(klass)
+      @names.each do |name|
+        require path_for(name)
+        mod = Object.const_get("#{@namespace}#{camel(name)}")
+        klass.include(mod) if mod.is_a?(Module) && !mod.is_a?(Class)
+      rescue NameError
+        nil
+      end
+      klass
+    end
+
+    # The class a name contributes, or nil (the constant is missing, or is not
+    # a class — a feature is a class, not a module).
+    def class_for(name)
+      klass = Object.const_get("#{@namespace}#{camel(name)}")
+      klass.is_a?(Class) ? klass : nil
+    rescue NameError
+      nil
+    end
 
     def camel(name)
       File.basename(name.to_s, '.rb').split('_').map { |w| w[0].upcase + w[1..] }.join
     end
 
     def path_for(name)
-      return File.expand_path(name.to_s, @dir) if name.include?('/')
+      return File.expand_path(name.to_s, @dir) if name.to_s.include?('/')
 
       File.expand_path("#{@prefix}#{name}.rb", @dir)
     end
 
-    # The file plus its family (lib/foo.rb and lib/foo_*.rb, prefix
-    # included), as absolute paths — the reload list.
-    def family(name)
+    private
+
+    def build(name)
       file = path_for(name)
-      base = File.basename(file, '.rb')
-      [file, *Dir.glob(File.join(@dir, "#{base}_*.rb"))]
+      require file
+      klass = class_for(name)
+      unless klass
+        warn "[plugin] #{name}: no feature class (expected #{File.basename(file)} to define #{camel(name)})"
+        return nil
+      end
+      klass.new(@host)
+    rescue LoadError, StandardError => e
+      warn "[plugin] #{name} disabled: #{e.class}: #{e.message}"
+      nil
     end
   end
 
-  @default = Manager.new
-
   class << self
-    def load(...) = @default.load(...)
-    def enabled?(name) = @default.enabled?(name)
-    def loaded = @default.loaded
-    def files = @default.files
-    def apply_mixins(klass) = @default.apply_mixins(klass)
-    def mixin_for(name) = @default.mixin_for(name)
+    # An owner's `plugins:` list, or a startup error: an absent key is a
+    # mistake, not a default. An empty list is a valid answer (no features).
+    # Called by the entry point, so the failure is at startup, not later.
+    def list!(names)
+      raise ArgumentError, '`plugins:` is required — list the features to load; an empty list (`plugins: []`) runs none' if names.nil?
+
+      Array(names).map(&:to_s).uniq
+    end
+
+    # Whether a name is in a list, before there is a Plugins object (the
+    # entry point's ai_agent check).
+    def enabled?(list, name) = Array(list).map(&:to_s).include?(name.to_s)
   end
 end

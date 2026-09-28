@@ -133,7 +133,7 @@ class TestHiveMindAgent < Minitest::Test
     end
     # the shipped example enables all four
     assert_equal %w[persistence compaction followups logwatcher], HiveMindAgent.config_plugins(HIVE_TEST_CONFIG)
-    assert_equal HiveMindAgent.config_plugins(HIVE_TEST_CONFIG), HiveMindAgent::PLUGINS.loaded
+    assert_equal HiveMindAgent.config_plugins(HIVE_TEST_CONFIG), HiveMindAgent.own_plugins
     assert @agent.plugin?('compaction')
     assert @agent.plugin?('logwatcher')
     refute @agent.plugin?('nope')

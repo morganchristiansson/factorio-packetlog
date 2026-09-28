@@ -210,6 +210,11 @@ class FactorioPacketTools
       # Optional features: both objects are plain ivars — hot reload swaps
       # the CODE under this object, not the object itself, so there is
       # nothing to carry over or re-point.
+      # Features (config.yaml `plugins:`): one Plugins object for this owner,
+      # which builds them from the list and dispatches what we emit below.
+      # This file names none of them. hivemind and translation are objects
+      # this host drives, not features it emits to.
+      @plugins = Plugins::PluginSet.new(options[:plugins], self)
       @agent = nil
       @translation_agent = nil
       # HiveMind AI agent: reads packet-decoded chat and answers players who
@@ -220,12 +225,13 @@ class FactorioPacketTools
       # packets); online players and stats are cached. Player admin is
       # stored in PlayerDatabase (players-cache.json); targeted RCON
       # attrs lookups happen once for newly joined players only.
-      if Plugins.enabled?('hivemind') && options[:ai_agent]
+      if @plugins.enabled?('hivemind') && options[:ai_agent]
         if @rcon
           begin
             @agent = HiveMindAgent.new(rcon: @rcon, attrs: @attrs,
                                         current_tick: -> { @game_tick },
-                                        player_db: @player_db)
+                                        player_db: @player_db,
+                                        plugins: options[:plugins])
             @agent.ensure_followup_scheduler if @agent.plugin?('followups')
             @agent.ensure_log_watcher(ServerDetect.log_path) if @agent.plugin?('logwatcher')
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
@@ -242,7 +248,7 @@ class FactorioPacketTools
       # the `translation` plugin; no API key required.
       # Backend and Google API key come from config-translation.yaml
       # (`google_api_key:`) with the env overriding it.
-      if Plugins.enabled?('translation') && @rcon
+      if @plugins.enabled?('translation') && @rcon
         begin
           @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
           backend = @translation_agent.backend
@@ -258,14 +264,6 @@ class FactorioPacketTools
       end
     end
 
-    # Features (config.yaml `plugins:`) hook the seams in Defaults; this file
-    # names none of them. Defaults goes in first, so a feature module
-    # (lib/quickbar_backup.rb → QuickbarBackup) overrides the seam it uses
-    # and leaves the rest no-op. Features that are classes rather than modules
-    # (hivemind, translation) are skipped by apply_mixins and instantiated
-    # above.
-    self.class.include(FactorioPacketTools::Defaults)
-    Plugins.apply_mixins(self.class)
 
     # Version → segment-type mapping (server mode may also query RCON here;
     # the RCON client is only created in server mode). Runs on every
@@ -273,16 +271,23 @@ class FactorioPacketTools
     select_protocol_version
   end
 
-  # The seams features override. One no-op hook per thing the sniffer knows
-  # and a feature might want; adding a feature must not mean editing this
-  # class, and a hook with no feature behind it must cost nothing.
-  module Defaults
-    # A player joined and the ONE targeted RCON query for them came back:
-    # their attrs (index, name, connected, admin, online_time, afk_time,
-    # locale) and, on the join query, their whole quickbar (nil = an empty
-    # bar, :failed = the Lua read raised). Runs on the join thread, so a
-    # feature may talk to the server here.
-    def on_join_enriched(name, index, attrs); end
+  # What a feature gets as its owner: this host, and these two are the shared
+  # things most features want. Nil is a real answer — no RCON in client mode.
+  attr_reader :rcon, :player_db
+
+  # THE EVENT CATALOGUE — what the sniffer tells features, and the whole
+  # plugin API. Every event is a no-op on Plugins::Feature, so it is emitted
+  # unconditionally and a feature implements only the ones it uses: adding a
+  # feature never means editing this file, only adding an EVENT does (a
+  # no-op on Plugins::Feature plus the emitter here).
+  #
+  # A player joined and the ONE targeted RCON query for them came back: their
+  # name, their bound game index, and attrs (index, name, connected, admin,
+  # online_time, afk_time, locale, plus on the join query the whole quickbar:
+  # the 10×10 grid, nil for an empty bar, :failed if the Lua read raised).
+  # Emitted on the join thread, so a feature may talk to the server here.
+  def on_join_enriched(name, index, attrs)
+    @plugins.emit(:on_join_enriched, name, index, attrs)
   end
 
   # Run the capture/analysis loop. Blocks until the source is exhausted
@@ -398,7 +403,7 @@ class FactorioPacketTools
   # files, and the loaded hivemind plugins' files. Absolute paths come from
   # Plugins (a feature may live outside lib/), bare names are lib/ files.
   def reload_files
-    (RELOADABLE_LIBS + Plugins.files + [@agent].compact.flat_map(&:plugin_files)).uniq
+    (RELOADABLE_LIBS + @plugins.files + [@agent].compact.flat_map(&:plugin_files)).uniq
   end
 
   # Whether to persist this packet to the capture file. `capture: full`

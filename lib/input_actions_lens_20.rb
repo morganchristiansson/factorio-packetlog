@@ -83,6 +83,9 @@ C2S_LENS_20 = {
   168 => 1, # change_programmable_speaker_alert_parameters
   184 => 25, # custom_input
   212 => 12, # UNIDENTIFIED
+  231 => 4, # quick_bar_pick_slot - 4 bytes [item][slot][op][pad], NOT the
+            # 0 the 2.1 table lends this name; measured 1126 single-action
+            # closures against 62 for the runner-up.
   232 => 2, # quick_bar_set_selected_page
   235 => 13, # UNIDENTIFIED
   239 => 27, # lua_shortcut

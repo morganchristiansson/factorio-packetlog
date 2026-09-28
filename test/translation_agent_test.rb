@@ -270,38 +270,6 @@ class TestTranslationAgent < Minitest::Test
     refute_includes fourth, 'pt-BR'
   end
 
-  def test_note_joined_queries_and_stores_locale
-    commands = []
-    rcon = Object.new
-    rcon.define_singleton_method(:command) do |command|
-      commands << command
-      'ru'
-    end
-    rcon.define_singleton_method(:lua_quote) { |value| RconClient.allocate.lua_quote(value) }
-    player_db = PlayerDatabase.new(nil)
-    player_db[5] = {name: 'StarBurtS'}
-    agent = make_agent(rcon: rcon, player_db: player_db)
-
-    assert_equal 'ru', agent.note_joined(5, 'StarBurtS')
-    assert_equal 1, commands.size
-    assert_includes commands.first, '/sc '
-    assert_includes commands.first, 'game.players["StarBurtS"]'
-    assert_equal 'ru', player_db.get_locale(5)
-
-    nil_commands = []
-    nil_rcon = Object.new
-    nil_rcon.define_singleton_method(:command) do |command|
-      nil_commands << command
-      'nil'
-    end
-    nil_rcon.define_singleton_method(:lua_quote) { |value| RconClient.allocate.lua_quote(value) }
-    nil_db = PlayerDatabase.new(nil)
-    nil_db[6] = {name: 'Unknown'}
-    make_agent(rcon: nil_rcon, player_db: nil_db).note_joined(6, 'Unknown')
-    assert_equal 1, nil_commands.size
-    assert_nil nil_db.get_locale(6)
-  end
-
   def test_relay_skips_unchanged_whitelisted_and_unsupported_targets
     missing_pack = Class.new(MockTranslationService) do
       def translate(text, source_lang:, target_lang:)

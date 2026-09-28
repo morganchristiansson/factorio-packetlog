@@ -631,6 +631,49 @@ class TestFactorioProtocol < Minitest::Test
     refute acts[0][:hit_unknown]
   end
 
+  # Quickbar payloads, pinned from the real captures in captures/
+  # (2026-09-25, player 161). The lengths matter as much as the layout: a
+  # wrong quick_bar_pick_slot length desyncs every action after it.
+  def test_quickbar_layouts
+    FactorioProtocol.select_version('2.0')
+    qb = FactorioProtocol::QuickBar
+
+    # set_slot: [item][slot][op][src u16][client tick u32] — substation (30)
+    # into slot 0, out of inventory slot 32, stamped 17 ticks before the
+    # closure tick 107036661 (0x06613FE2).
+    set = qb.decode(name: 'quick_bar_set_slot',
+                    data: ['1e00002000e23f6106'].pack('H*'))
+    assert_equal({item: 30, slot: 0, op: 0, src: 32, tick: 0x06613FE2}, set)
+
+    # op 1 = clear, src 0xFFFF = no source
+    clear = qb.decode(name: 'quick_bar_set_slot',
+                      data: ['200001ffff01920100'].pack('H*'))
+    assert_equal 1, clear[:op], 'op 1 clears the slot'
+    assert_nil clear[:src], '0xFFFF means "no source"'
+
+    # pick_slot is 4 bytes (was decoded as 0, which ate the next action)
+    pick = qb.decode(name: 'quick_bar_pick_slot', data: ['1e000100'].pack('H*'))
+    assert_equal({item: 30, slot: 0, op: 1}, pick)
+    assert_equal :undecodable, qb.decode(name: 'quick_bar_pick_slot', data: ['1e0001'].pack('H*')),
+                 'a payload of the wrong size is :undecodable, not a guess'
+    assert_nil qb.decode(name: 'use_item', data: ['1e0001'].pack('H*')),
+                 'a non-quickbar action decodes to nil, so callers can tell the two apart'
+
+    # page: byte 1 of set_selected_page, byte 0 of change_active_quick_bar
+    assert_equal({page: 2}, qb.decode(name: 'quick_bar_set_selected_page', data: ['0002'].pack('H*')))
+    assert_equal({page: 2}, qb.decode(name: 'change_active_quick_bar', data: ['02'].pack('H*')))
+
+    # …and the wire really does carry 4 bytes for pick_slot: a closure with
+    # pick_slot followed by another action must not lose the second one.
+    data = [0x06, 0x06, 0, 0, 0, 0].pack('C*') +
+           [0].pack('Q<') + [0x04].pack('C') +
+           [231, 0].pack('C2') + [30, 0, 1, 0].pack('C*') +
+           [3, 0].pack('C2') + [0, 0, 0, 0, 0, 0, 0, 0].pack('C*')
+    acts = extract_actions(FactorioProtocol.parse_udp_payload(data))
+    assert_equal %w[quick_bar_pick_slot stop_mining], acts.map { |a| a[:name] },
+                 "the action AFTER pick_slot survives (4 bytes, not 0)"
+  end
+
   private
 
   # Build a complete server-to-client heartbeat UDP packet with the given actions.

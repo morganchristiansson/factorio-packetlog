@@ -143,24 +143,6 @@ class TranslationAgent
     @translation_service.translate(message, source_lang: msg_lang, target_lang: 'en')
   end
 
-  # Called on a CONFIRMED join: one targeted RCON query to learn the
-  # joiner's locale (joins are rare — not per message, not a timer) and
-  # store it in player_db so every later relay knows it. Locale CHANGES
-  # after the join are ignored by design.
-  def note_joined(game_index, name)
-    return unless @rcon
-    escaped = @rcon.lua_quote(name)
-    lua = %(do local p = game.players["#{escaped}"] rcon.print(p and p.locale or "nil") end)
-    locale = @rcon.command("/sc #{lua}").strip
-    if locale && !locale.empty? && locale != 'nil' && locale != 'false'
-      @player_db.set_locale_by_id(game_index, locale) if @player_db.lookup(game_index) == name
-    end
-    locale
-  rescue StandardError => e
-    warn "[translation] locale query failed for #{name}: #{e.class}: #{e.message}"
-    nil
-  end
-
   # Enable/disable translation at runtime (no background threads to manage)
   private
 

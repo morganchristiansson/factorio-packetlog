@@ -617,9 +617,11 @@ class FactorioPacketTools
           # so joins are detected here and leaves via the final
           # heartbeat's PeerDisconnect sync action.
           @agent&.enqueue(:on_player_event, :joined, name, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
-          # One targeted RCON query to learn the joiner's locale (rare event;
-          # rides the same heartbeat-confirm that bound their game index).
-          @translation_agent&.enqueue(:note_joined, idx, name)
+          # One targeted RCON query for everything only the server knows
+          # about a joiner: their locale and their whole quickbar (the C→S
+          # actions report it as deltas, so a join is the one moment the
+          # bar is knowable). Rare event, off the capture thread.
+          enrich_joined_player(name, idx)
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{name} confirmed as game player ##{idx}"
         end
@@ -658,12 +660,15 @@ class FactorioPacketTools
       @unknown_writer&.write_frame(raw_frame, Time.at(ts))
     end
     
+    qb_desync = false
     hb[:tick_closures]&.each do |tc|
       tc[:actions]&.each do |act|
         @stats[:actions] += 1
+        qb_desync = true if track_quickbar(act)
         log_action(ts, act, hdr[:msg_type] == 7, ghost: @ghost_mode)
       end
     end
+    @unknown_writer&.write_frame(raw_frame, Time.at(ts)) if qb_desync && raw_frame
   ensure
     # Check AFTER this packet refreshes liveness, including sender-index binding.
     check_timeouts_if_due
@@ -849,26 +854,10 @@ class FactorioPacketTools
         count = d.unpack1('v', offset: 2)
         return " #{item_name} count=#{count}"
       end
-    when "quick_bar_pick_slot"
-      if d.bytesize >= 2
-        row = d.getbyte(0)
-        slot = d.getbyte(1)
-        return " row=#{row} slot=#{slot}"
-      end
-    when "quick_bar_set_slot"
-      if d.bytesize >= 9
-        row = d.getbyte(0)
-        slot = d.getbyte(1)
-        action = d.getbyte(2)  # 0=set, 1=clear
-        src_row = d.getbyte(3)
-        src_slot = d.getbyte(4)
-        act = action == 0 ? 'set' : 'clear'
-        if src_row == 0xFF && src_slot == 0xFF
-          return " row=#{row} slot=#{slot} #{act}"
-        else
-          return " move row=#{src_row} slot=#{src_slot} -> row=#{row} slot=#{slot}"
-        end
-      end
+    when "quick_bar_set_slot", "quick_bar_pick_slot",
+         "quick_bar_set_selected_page", "change_active_quick_bar"
+      qb = FactorioProtocol::QuickBar.decode(act)
+      return " #{quickbar_str(qb)}" if qb.is_a?(Hash)
     when "copy"
       return " flags=#{d.unpack1('v')}" if d.bytesize >= 2
     when "cheat"
@@ -878,6 +867,82 @@ class FactorioPacketTools
     return '' unless @options[:dump_raw_types]
     hex = d.bytes.first(8).map { |b| '%02x' % b }.join
     " [#{hex}#{d.bytesize > 8 ? '..' : ''}]"
+  end
+
+  # Quickbar slot/page state from the quickbar input actions, kept in
+  # players-cache.json (PlayerDatabase#set_quickbar_slot / _page). A
+  # set_slot names the item and the slot but NOT the page, so the page the
+  # slot lands on is the one the player last switched to.
+  #
+  # Returns TRUE when the action could not be decoded, or named a page/slot
+  # outside the quickbar. Both mean an EARLIER action's length desynced the
+  # closure — the quickbar action is merely the first to show it — and the
+  # caller forwards the frame to the unknown-packet writer, which is the
+  # corpus for fixing that length. The generic flag (hit_unknown / unknown
+  # player) misses those: the closure parsed to the end, just wrongly.
+  # Measured over captures/server-*.pcap: 355 frames, 104 of which the
+  # generic flag never sees (35080 packets of 496953).
+  def track_quickbar(act)
+    qb = FactorioProtocol::QuickBar.decode(act)
+    return true if qb == :undecodable # a quickbar payload we cannot read
+    return false unless qb            # not a quickbar action
+    if qb.key?(:page)
+      !@player_db.set_quickbar_page(act[:game_player], qb[:page])
+    elsif act[:name] == 'quick_bar_set_slot'
+      # op 1 = clear the slot (drop its filter)
+      item = qb[:op] == 0 ? qb[:item] : nil
+      !@player_db.set_quickbar_slot(act[:game_player], @player_db.quickbar_page(act[:game_player]),
+                                    qb[:slot], item)
+    else
+      false # pick_slot: the selection, no state to keep and nothing to check
+    end
+  end
+
+  # Ask the server about a joiner: ONE targeted RCON query
+  # (RconClient#player_attributes_for) carrying their attrs AND their whole
+  # quickbar, on its own thread — joins are minutes apart and a blocked
+  # capture thread would drop packets. Folds the locale (used by the
+  # translation agent) and the quickbar into players-cache.json; the active
+  # quickbar page still comes from the packets, the game has no API for it.
+  # Queried by game INDEX: the join heartbeat that triggered this already
+  # bound it, so no name ever has to be quoted into Lua.
+  # Returns the thread (tests join it) or nil when RCON isn't available.
+  def enrich_joined_player(name, idx)
+    return nil unless @rcon
+    Thread.new do
+      attrs = @rcon.player_attributes_for(idx)
+      unless attrs
+        warn "[join] #{name} ##{idx}: RCON enrichment returned nothing"
+        next
+      end
+      @player_db.set_locale_by_id(idx, attrs[:locale]) if attrs[:locale]
+      case attrs[:quickbar]
+      when :failed
+        warn "[join] #{name} ##{idx}: quickbar read failed in Lua (API shape vs " \
+             "#{@rcon.server_version || 'unknown version'}?) — attrs kept"
+      when Array
+        @player_db.replace_quickbar(idx, attrs[:quickbar])
+        puts "[join] #{name} ##{idx}: locale=#{attrs[:locale] || '?'} " \
+             "quickbar=#{attrs[:quickbar].flatten.compact.size} slot(s)"
+      end
+    rescue StandardError => e
+      warn "[join] #{name} ##{idx}: RCON enrichment failed (#{e.class}: #{e.message})"
+    end
+  end
+
+  # Decoded quickbar action, for the per-action console line. Item ids, not
+  # names: the quickbar is stored and read as wire ids (see
+  # PlayerDatabase#set_quickbar_slot), so nothing here needs item_db.
+  def quickbar_str(qb)
+    return " page=#{qb[:page]}" if qb.key?(:page)
+    s = +" slot=#{qb[:slot]}"
+    if qb.key?(:src) && qb[:op] != 0
+      s << ' (cleared)'
+    else
+      s << " item=#{qb[:item]}"
+      s << " from inv##{qb[:src]}" if qb[:src]
+    end
+    s
   end
 
   def log_action(ts, act, is_server, ghost: false)

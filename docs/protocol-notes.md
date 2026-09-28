@@ -124,6 +124,82 @@ obvious from the table.
 15. ✅ **open_character_gui / open_blueprint_library_gui (61/64) C→S = 1B** —
     the 15-byte form is the S→C echo only; 15B C→S swallowed the following
     hover stream (`Player_267 gui_inventory_bar_changed` phantom).
+16. ✅ **quick_bar_pick_slot (2.0: 231) = 4 bytes, not 0** — the 2.1 table
+    lends this name a 0, so its 4 payload bytes were re-parsed as a phantom
+    action. Measured 1126 single-action closures against 62 for the
+    runner-up (`measure_action_lens.rb --type 231`). See below.
+
+## Quickbar (2.0: set_slot 230, pick_slot 231, set_selected_page 232, change_active_quick_bar 286)
+
+Decoded in `lib/factorio_protocol/quickbar.rb`; the sniffer keeps the result
+per player in `players-cache.json` as `quickbar` — a fixed 10×10 array
+(`QUICKBAR_PAGES` rows × `QUICKBAR_SLOTS` slots) of item prototype ids, `null`
+for empty/unknown — plus `quickbar_page`.
+
+**Join-time refresh (RCON).** The C→S actions only ever report the quickbar as
+deltas, so on a player's first confirmed heartbeat the sniffer asks the server
+for the whole bar — in the query that already exists for the joiner. One
+`RconClient#player_attributes_for` command (by game **index**, the join path has
+it) now returns the attrs (index, name, connected, admin, online_time,
+afk_time, locale) **and** the quickbar as `{"<flat index>": <item id>}`.
+The Lua builds the read loop from the server version (2.0 takes a flat
+`get_quick_bar_slot(index)` 1..100, 2.1 takes `(page_index, slot_index)`) and
+both branches normalise to the same flat key, so
+`PlayerDatabase.parse_quickbar` folds it row-major into the 10×10 grid. Item PROTOTYPE IDS,
+not names: the Lua builds the name→id map by enumerating `prototypes.item` —
+the same iteration order `DUMP_PROTOTYPES_LUA` uses, i.e. the wire ids
+(re-verified live: 5=transport-belt, 30=substation, 32=pipe-to-ground,
+33=pump) — so the cache needs no `item_db`. The reply replaces the whole grid
+(`PlayerDatabase#replace_quickbar`); the active page still comes from the
+packets (`get_active_quick_bar_page` is not callable on this build). The one
+`pcall` around the read covers a wrong signature guess or the 2.1 return-type
+change: a mismatch costs the quickbar, visibly, not the query. Runs on
+its own thread: a join must not stall the capture. One command per join
+total: the locale the translation plugin used to fetch in a query of its own
+rides along in the same payload (`TranslationAgent#note_joined` is gone for
+that reason). `docs/rcon-knowledge.md` has the live-verified API details — the
+query this replaces was silently broken (it looked players up in
+`game.connected_players`, which returns nil for a name, and parsed a payload
+shape the parser rejected).
+
+| id | bytes | layout |
+|----|-------|--------|
+| 230 `quick_bar_set_slot` | 9 | `[item u8][slot u8][op u8][src u16 LE][client tick u32]` |
+| 231 `quick_bar_pick_slot` | 4 | `[item u8][slot u8][op u8][pad u8]` |
+| 232 `quick_bar_set_selected_page` | 2 | `[pad u8][page u8]` |
+| 286 `change_active_quick_bar` | 1 | `[page u8]` |
+
+`op` on set_slot: 0 = set the slot's filter, 1 = clear it. `src` is the
+inventory slot the item came from, `0xFFFF` = none. The trailing u32 is the
+CLIENT's tick for the event — 15..21 ticks before the closure tick (it
+interpolates, so the offset wobbles), which is what makes the 9-byte length
+checkable.
+
+Byte 0 of 230/231 is the **item**, not the slot: across the captures it only
+ever takes base-game item prototype ids in `prototypes.item` order (0 =
+wooden-chest, 13 = splitter, 30 = substation, 32 = pipe-to-ground, 33 = pump)
+and it holds a single value for minutes at a time as a player works; byte 1,
+the slot, is **0 in all 1073 clean single-action closures** (a quickbar is 10
+slots, so the stored form is a fixed 10-entry array). **The page is not in
+set_slot** — the client announces it separately (232/286, page values 0..4
+observed), so a slot edit lands on whichever page the player last switched to.
+
+Values outside those ranges (slot 59/128/255, op 16/186, page 128) only occur
+in dirty parses and are dropped: the page and slot are bounds-checked against
+the quickbar's size before anything is stored. A quickbar action that fails
+that check — or whose payload shape we cannot decode at all, e.g. an 11-byte
+set_slot from the 3-byte item escape — is treated as evidence that an EARLIER
+action's length desynced the closure, and its frame goes to
+`captures/unknown.packets-*.pcap` (the corpus for fixing that length). This
+catches what the generic flag (hit_unknown / unknown player) cannot: a closure
+that parsed to the last byte, just wrongly. Over `captures/server-*.pcap`:
+355 frames, **104 of them never flagged by the generic path** (496953 packets,
+35080 generically flagged).
+
+Open question: byte 0 is read as a plain u8. No capture shows 0xFF there, so
+an item id >= 255 (a possible 3-byte uint16v escape) is unobserved; if one
+shows up the payload is 11 bytes and the decoder returns nil rather than
+misrecording a slot.
 
 ## Remaining Known Issues
 

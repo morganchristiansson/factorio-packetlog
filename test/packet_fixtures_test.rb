@@ -158,6 +158,7 @@ class TestPacketFixtures < Minitest::Test
     184 => 'custom_input: SCRIPT-DEFINED, no fixed length; the table value is the majority of what we saw',
     212 => 'unidentified: 5 closures',
     232 => 'quick_bar_set_selected_page: 79 closures, no single-action packet',
+    231 => 'quick_bar_pick_slot: 4 bytes ([item][slot][op][pad]) measured by tools/measure_action_lens.rb --type 231 — 1126 single-action closures vs 62 for the runner-up; the 0 this name inherited from 2.1 desynced the rest of every closure containing one',
     239 => 'lua_shortcut: 12 closures',
     269 => 'trash_not_requested_items: 2 closures',
     286 => 'change_active_quick_bar: 2 closures',

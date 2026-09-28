@@ -323,9 +323,11 @@ class TestServerMode < Minitest::Test
       "[{\"a\":true,\"c\":true,\"i\":1,\"k\":722,\"n\":\"morganc\",\"o\":7142576},{\"a\":false,\"c\":false,\"i\":2,\"k\":0,\"n\":\"bob\",\"o\":500}]\n"
     )
     assert_equal [
-      { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722, locale: nil },
-      { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0, locale: nil },
-    ], attrs, 'parse_player_attrs + afk_time'
+      { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722,
+        locale: nil, quickbar: nil },
+      { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0,
+        locale: nil, quickbar: nil },
+    ], attrs, 'parse_player_attrs + afk_time (the all-players dump carries no quickbar)'
     assert_nil RconClient.parse_player_attrs('garbage'), 'non-JSON payload → nil'
 
     # Hard invariant: helpers.write_file must ALWAYS target the server only.
@@ -346,6 +348,40 @@ class TestServerMode < Minitest::Test
       end
       assert ok, "#{const_name}: write_file targets server only (for_player=0, got #{calls.map { |call| call.sub(/\Ahelpers\.write_file\(/, '') }})"
     end
+
+    # The join-time query also reads the quickbar, in the SAME command as the
+    # attrs — one RCON round trip per join, not one per feature. The Lua is
+    # pinned to the two documented getter signatures: 2.0 takes a flat index
+    # (verified live on 2.0.77), 2.1 takes (page, slot) — the same version
+    # split select_version uses for the action tables. Both normalise to the
+    # flat key, so the fold is one Ruby path. Print-only, so there is no
+    # write_file for_player to guard.
+    qb_lua = RconClient.allocate.tap { |c|
+      c.define_singleton_method(:server_version) { '2.0.77' }
+    }.player_attrs_for_lua(7)
+    assert_includes qb_lua, 'game.players[7]', 'looked up by index (no name quoting)'
+    assert_includes qb_lua, 'for i=1,100', '2.0: the flat 1..100 slot space'
+    refute_includes qb_lua, 'p.get_quick_bar_slot(pg,sl)', '2.0: not the two-argument form'
+    v21_lua = RconClient.allocate.tap { |c|
+      c.define_singleton_method(:server_version) { '2.1.11' }
+    }.player_attrs_for_lua(7)
+    assert_includes v21_lua, 'p.get_quick_bar_slot(pg,sl)', '2.1: the two-argument form'
+    assert_includes v21_lua, 'put(pg*10+sl+1,', '2.1: normalised to the same flat key'
+    unknown_lua = RconClient.allocate.tap { |c|
+      c.define_singleton_method(:server_version) { nil }
+    }.player_attrs_for_lua(7)
+    assert_includes unknown_lua, 'for i=1,100', 'unknown version → the verifiable 2.0 shape'
+    [qb_lua, v21_lua].each do |lua|
+      assert_includes lua, 'q[tostring(i)]', 'keyed by the flat index (the page/slot fold is in Ruby)'
+      assert_equal 1, lua.scan('helpers.table_to_json').size, 'one JSON payload: attrs AND quickbar'
+      assert_equal 1, lua.scan('pcall').size, 'one pcall around the read, not one per cell'
+      refute_includes lua, 'helpers.write_file', 'print-only, so there is no write_file for_player to guard'
+    end
+    assert_equal 1, qb_lua.lines.size, '/sc only applies the first line'
+    name_lua = RconClient.allocate.tap { |c|
+      c.define_singleton_method(:server_version) { '2.0.77' }
+    }.player_attrs_for_lua('ali"ce')
+    assert_includes name_lua, 'game.players["ali\\"ce"]', 'a name lookup is still Lua-quoted'
 
     # refresh_roster → load_roster: initial load only (new players come from
     # the packet stream, no periodic refresh)
@@ -591,8 +627,8 @@ class TestServerMode < Minitest::Test
       assert_equal 'alice', parsed['1']['name'], 'clean entry survives'
     end
 
-    # Concurrent writers: the capture thread (add), the translation-agent
-    # event worker (set_locale_by_id via note_joined) and the console thread
+    # Concurrent writers: the capture thread (add), the join-enrichment
+    # thread (set_locale_by_id / replace_quickbar) and the console thread
     # (set_locale_overrides) all mutate the hashes — the mutex must serialize
     # mutations + disk writes (an @players.each racing a key-add raises
     # "can't add a new key into hash during iteration"; two saves race on the
@@ -652,6 +688,181 @@ class TestServerMode < Minitest::Test
       reloaded_legacy = PlayerDatabase.new(path)
       refute (reloaded_legacy['carol'] || {})[:admin], 'missing admin defaults to false'
     end
+  end
+
+  # ── Quickbar tracking: per-player slots/pages in players-cache.json ──
+
+  def test_player_db_quickbar_persistence
+    db = PlayerDatabase.new(nil)
+    db[1] = {name: 'alice'}
+    assert_equal 0, db.quickbar_page(1), 'page 0 is the default'
+    db.set_quickbar_slot(1, 0, 0, 30)   # substation into slot 0
+    db.set_quickbar_slot(1, 0, 1, 32)   # pipe-to-ground into slot 1
+    db.set_quickbar_slot(1, 0, 1, nil)  # …cleared again
+    db.set_quickbar_page(1, 2)
+    db.set_quickbar_slot(1, 2, 9, 33)   # page 2 has its own slots
+    p0 = Array.new(10)
+    p0[0] = 30
+    p2 = Array.new(10)
+    p2[9] = 33
+    expected = Array.new(10)
+    expected[0] = p0
+    expected[2] = p2
+    assert_equal expected, db.quickbar(1), '10 pages x 10 slots, empty pages nil'
+    assert_equal 2, db.quickbar_page(1)
+
+    # a page/slot outside the quickbar is a desync, never stored — and the
+    # caller is told so it can forward the frame for later correction
+    refute db.set_quickbar_slot(1, 0, 255, 30), 'out-of-range slot rejected'
+    refute db.set_quickbar_slot(1, 128, 0, 30), 'out-of-range page rejected'
+    refute db.set_quickbar_page(1, 200), 'out-of-range page switch rejected'
+    assert db.set_quickbar_slot(1, 0, 0, 30), 'an in-range, unchanged write is accepted'
+    assert_equal expected, db.quickbar(1), 'nothing rejected leaked into the state'
+    assert db.set_quickbar_slot(99, 0, 0, 30), 'an unknown player is not this method\'s business'
+    db.set_quickbar_slot(1, 3, 0, 30)
+    db.set_quickbar_slot(1, 3, 0, nil)  # emptying a page clears it back to nil
+    assert_nil db.quickbar(1)[3], 'an emptied page is null again'
+
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'players-cache.json')
+      db2 = PlayerDatabase.new(path)
+      db2[1] = {name: 'alice'}
+      db2.set_quickbar_slot(1, 0, 0, 30)
+      db2.set_quickbar_page(1, 2)
+      reloaded = PlayerDatabase.new(path)
+      assert_equal [p0], reloaded.quickbar(1).compact, 'quickbar survives reload'
+      assert_equal 2, reloaded.quickbar_page(1), 'page survives reload'
+      assert_nil reloaded.quickbar(2), 'players without quickbar state stay empty'
+      raw = JSON.parse(File.read(path))
+      assert_equal 30, raw['1']['quickbar'][0][0], 'persisted as a positional array of item ids'
+      assert_equal 10, raw['1']['quickbar'].size, 'all 10 pages present'
+
+      # a malformed stored grid is dropped, not half-trusted
+      File.write(path, JSON.generate({'1' => {'name' => 'alice', 'quickbar' => 'nonsense'}}))
+      assert_nil PlayerDatabase.new(path).quickbar(1), 'a non-array quickbar is ignored'
+    end
+  end
+
+  # ── Quickbar: bad indices from a desynced closure are forwarded for
+  # later length correction, not silently dropped ───────────────────────
+
+  def test_quickbar_desync_forwards_frame_to_unknown_writer
+    FactorioProtocol.select_version('2.0')
+    db = PlayerDatabase.new(nil)
+    db[1] = {name: 'alice'}
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil, validate: true)
+    sniffer.instance_variable_set(:@player_db, db)
+    unknown = FakePcapWriter.new('unknown.packets.pcap')
+    sniffer.instance_variable_set(:@unknown_writer, unknown)
+
+    # A 2.0 C→S closure holding one quick_bar_set_slot whose slot byte is
+    # 0xFF — parsed without hit_unknown, so the generic flag never sees it,
+    # yet no such slot exists. Player delta 1 = alice, a known player, so
+    # the generic roster check stays quiet and only the quickbar guard can
+    # flag the frame.
+    closure = lambda do |type, payload|
+      [0x06, 0x06, 0, 0, 0, 0].pack('C*') + [0].pack('Q<') + [0x02].pack('C') +
+        [type, 1].pack('C2') + payload + [0, 0, 0, 0, 0, 0, 0, 0].pack('C*')
+    end
+    frame_for = ->(udp) { ("\x00" * 14 + udp).b }
+
+    capture_io do
+      sniffer.send(:process_packet, 1, 1.0, CLIENT_IP, SERVER_IP, 34197, 34197,
+                   closure.call(230, [30, 0xFF, 0, 0xFF, 0xFF, 0x4E, 0x11, 0x61, 0x06].pack('C*')),
+                   frame_for.call(closure.call(230, [30, 0xFF, 0, 0xFF, 0xFF, 0x4E, 0x11, 0x61, 0x06].pack('C*'))))
+    end
+    assert_equal 1, unknown.records.size, 'slot 0xFF forwarded to the unknown-packet corpus'
+    assert_nil db.quickbar(1), 'nothing stored for a slot that cannot exist'
+
+    # a page byte that big is the same story
+    unknown.records.clear
+    page_udp = closure.call(232, [0, 0x80].pack('C2'))
+    capture_io do
+      sniffer.send(:process_packet, 2, 2.0, CLIENT_IP, SERVER_IP, 34197, 34197, page_udp, frame_for.call(page_udp))
+    end
+    assert_equal 1, unknown.records.size, 'page 0x80 forwarded'
+    assert_equal 0, db.quickbar_page(1), 'page unchanged'
+
+    # …and a real slot is neither forwarded nor rejected
+    unknown.records.clear
+    ok_udp = closure.call(230, [30, 3, 0, 0xFF, 0xFF, 0x4E, 0x11, 0x61, 0x06].pack('C*'))
+    capture_io do
+      sniffer.send(:process_packet, 3, 3.0, CLIENT_IP, SERVER_IP, 34197, 34197, ok_udp, frame_for.call(ok_udp))
+    end
+    assert_empty unknown.records, 'a valid quickbar action is not flagged'
+    assert_equal 30, db.quickbar(1)[0][3], 'and it is stored'
+  ensure
+    sniffer&.instance_variable_get(:@pcap_writer)&.close
+    FactorioProtocol.reset_version
+  end
+
+  # ── Quickbar: the RCON grid parses into the 10×10 shape ────────────────
+
+  def test_quickbar_rcon_grid_parsing
+    # the live join-time payload is a single JSON OBJECT keyed by the game's
+    # FLAT slot index (the all-players startup dump is an array of these)
+    body = '{"a":true,"c":true,"i":1,"k":722,"l":"en","n":"alice","o":7142576,' \
+           '"q":{"1":30,"10":32,"23":33,"100":1,"44":"7","bad":"x","0":5,"101":6}}'
+    attrs = RconClient.parse_player_attrs(body)
+    assert_equal 1, attrs.size, 'a single record object parses like a one-element list'
+    grid = attrs.first[:quickbar]
+    assert_equal 10, grid.size, 'ten pages'
+    # index 1 = page 1 slot 1, index 11 = page 2 slot 1, … (API definition)
+    assert_equal 30, grid[0][0]
+    assert_equal 32, grid[0][9]
+    assert_equal 33, grid[2][2], 'index 23 → page 2, slot 2'
+    assert_equal 1, grid[9][9], 'index 100 → the last cell'
+    assert_equal 7, grid[4][3], 'index 44 → page 4, slot 3; ids arrive as JSON strings'
+    assert_nil grid[0][1], 'unset slots stay nil'
+    assert_nil PlayerDatabase.parse_quickbar('0' => 5), 'index 0 does not exist'
+    assert_nil PlayerDatabase.parse_quickbar('101' => 6), 'index 101 does not exist'
+    assert_nil PlayerDatabase.parse_quickbar('bad' => 1), 'a non-numeric key is dropped'
+    assert_equal 'en', attrs.first[:locale], 'the locale rides along in the same payload'
+
+    assert_nil PlayerDatabase.parse_quickbar('nope'), 'a non-hash payload is nil'
+    assert_nil PlayerDatabase.parse_quickbar({}), 'an empty bar is nil'
+    assert_equal :failed, RconClient.parse_player_attrs('{"i":1,"n":"x","q":false}')
+                          .first[:quickbar], 'q=false (the Lua read raised) is not an empty bar'
+
+    # the all-players startup dump carries no quickbar
+    assert_nil RconClient.parse_player_attrs('[{"i":1,"n":"bob","c":true,"a":false,"o":5,"k":0}]')
+                    .first[:quickbar], 'no quickbar key → nil'
+  end
+
+  # ── Quickbar: a join reads the whole bar from RCON ──────────────────────
+
+  def test_quickbar_refreshed_from_rcon_on_join
+    # what RCON returns, parsed the way the real query is: flat index → grid
+    grid = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
+    queries = []
+    rcon = Object.new
+    rcon.define_singleton_method(:player_attributes_for) do |who|
+      queries << who
+      { index: 1, name: 'alice', connected: true, admin: false,
+        online_time: 5, afk_time: 0, locale: 'pt-BR', quickbar: grid }
+    end
+
+    output, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
+      s.instance_variable_set(:@rcon, rcon)
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
+      s.send(:process_packet, 2, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197,
+             fixture_packet('client_chat_message_0x0b'))
+      # the enrichment runs on its own thread; wait (bounded) for it to land
+      db = s.instance_variable_get(:@player_db)
+      100.times { break if db.quickbar(db.id_for('alice')); sleep 0.01 }
+    end
+    db = sniffer.instance_variable_get(:@player_db)
+    id = db.id_for('alice')
+    assert_equal 1, queries.size, 'ONE rcon query per join carries the quickbar too'
+    assert_equal db.id_for('alice'), queries.first, 'queried by game index, not by name'
+    assert_equal grid, db.quickbar(id), 'the whole bar came from RCON, in the 10×10 shape'
+    assert_equal 30, grid[0][0], 'index 1 → page 1 slot 1 (substation)'
+    assert_equal 33, grid[2][9], 'index 30 → page 3 slot 10 (pump)'
+    assert_equal 3, grid.flatten.compact.size, 'three slots came through'
+    assert_equal 'pt-BR', db.get_locale(id), 'and the locale, which the translation agent used to ask for itself'
+    assert_includes output, 'quickbar=3 slot(s)', 'the enrichment is reported'
+    assert_equal 0, db.quickbar_page(id), 'the active page still comes from the packets'
   end
 
   # ── Heartbeat timeout: crashed/offline players are dropped ────────────

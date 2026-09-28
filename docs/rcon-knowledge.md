@@ -134,7 +134,60 @@ Built-in `/players` lists only names, so the sniffer uses one RCON
 1-indexed game id, name, connection/admin flags, online/afk ticks, and
 locale; `FactorioPacketTools` seeds `PlayerAttrs` and `PlayerDatabase` from that
 single response. Later joins are learned from C→S packets, with one
-targeted RCON lookup for a newly joined player's attributes.
+targeted RCON lookup for a newly joined player's attributes
+(`player_attributes_for`, by game index) — which also carries their **whole
+quickbar** (`p.get_quick_bar_slot(i)` for the flat 1..100 slot space, pcall'd
+once, keyed `{"<flat index>": <item id>}`; the Lua builds the name→id map from
+`prototypes.item` so the ids are wire ids). One command per join covers both:
+a full 100-cell bar is ~1.2KB, so `rcon.print` still fits under the cap.
+
+### `LuaPlayer.get_quick_bar_slot` — the quickbar read
+
+**The signature changed in 2.1, and the server version picks the call:**
+
+| version | signature | index space |
+|---------|-----------|-------------|
+| 2.0 | `get_quick_bar_slot(index)` — one flat index | 1..100: "1 for the first slot of page one, 2 for slot two of page one, 11 for the first slot of page 2" |
+| 2.1 | `get_quick_bar_slot(page_index, slot_index)` — two uint8s | 0-based page/slot (assumed, like the wire's `quick_bar_set_selected_page` byte — untested, no 2.1 server here) |
+
+`RconClient#player_attrs_for_lua` builds the loop from
+`RconClient#server_version` (memoised `helpers.game_version` — the same
+version string `FactorioProtocol.select_version` uses for the action tables),
+via `quickbar_page_args?`: 2.0.x → flat loop, anything else → the two-argument
+loop, unknown → the verifiable 2.0 shape. Both normalise to the same flat key
+in the payload, so the page/slot fold is one Ruby path
+(`PlayerDatabase.parse_quickbar`). Passing the wrong arity RAISES
+(`Expected 1 argument but 3 were given`), which is why the read is wrapped in
+one `pcall`: a wrong guess or a changed return type costs the quickbar
+(logged as a failed read) rather than the whole query, attrs included.
+
+**Verified live on 2.0.77 (2026-09-27, RCON, single-player test game):**
+
+- The 1-arg form is what that build has. `0`, `101` and negatives raise;
+  every index 1..100 reads fine, so the flat loop needs no bounds guard.
+  A float index is accepted (1.5 behaves as 1).
+- Writes line up 1:1 — setting 1/7/23/100 read back at the same indices, so
+  the space is contiguous, not per-row. `set_quick_bar_slot(i, nil)` clears.
+- The returned filter has `.name`. 2.1 returns a `QuickBarSlot`/`ItemFilter`,
+  so `.name` is a forward assumption (the pcall is what covers it).
+- `get_active_quick_bar_page` is **not callable** on 2.0.77 (its argument
+  counter demands one argument; passing self complains `real number expected
+  got userdata`), so the active page stays packet-derived.
+
+### Player lookup: by index OR name, and not `connected_players`
+
+**Verified live on 2.0.77:**
+
+- `game.players[1]` and `game.players["name"]` **both** work — use
+  `game.players[...]` for both, and prefer the index: the join path has it,
+  so no name ever has to be quoted into Lua.
+- `game.connected_players["name"]` is **nil** even for a connected player —
+  that table only iterates with `pairs`/`ipairs`. A lookup that uses it
+  silently finds nobody.
+- `game.get_player("name")` works, `game.get_player(lua_player)` does not.
+- `game.get_players` does not exist.
+- The join-time attrs payload is a single JSON **object**; the all-players
+  dump is a JSON **array** of them. `parse_player_attrs` takes both.
 
 ## Connection details
 

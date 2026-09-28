@@ -9,7 +9,7 @@ require 'json'
 #
 # TWO files, both managed here:
 #
-#   players-cache.json     {id: {name: "<name>", locale: "<locale>", admin: <bool>}}
+#   players-cache.json     {id: {name:, locale:, admin:, quickbar:, quickbar_page:}}
 #       The game-index -> identity cache. ONLY valid for a single server +
 #       savefile: ids are handed out in join order and reused across
 #       sessions, so this file is never authoritative across worlds.
@@ -29,9 +29,10 @@ require 'json'
 #
 # THREAD SAFETY: one mutex serializes hash MUTATION + the temp+rename disk
 # write, because both hashes are written from several threads:
-#   @players    capture thread (add / remove_other_entries_for on joins),
-#               translation-agent event worker (set_locale_by_id via
-#               note_joined), main thread (load_roster, --map-player).
+#   @players    capture thread (add / remove_other_entries_for on joins,
+#               set_quickbar_slot on quickbar events), the join-enrichment
+#               thread (set_locale_by_id / replace_quickbar), main thread
+#               (load_roster, --map-player).
 #               Without the lock, an @players.each (rebuild_index /
 #               remove_other_entries_for) racing a concurrent key-add
 #               raises "can't add a new key into hash during iteration",
@@ -43,6 +44,12 @@ require 'json'
 class PlayerDatabase
   DEFAULT_CACHE_BASENAME = 'players-cache.json'
   DEFAULT_LOCALES_BASENAME = 'players-locale.json'
+  # Slots in a quickbar row and rows in a quickbar (game constants behind
+  # `LuaPlayer.set_quick_bar_slot`'s slot_index / page_index). The wire bytes
+  # are bounds-checked against them, so a desynced parse can neither store
+  # nor invent a slot or page outside the quickbar.
+  QUICKBAR_SLOTS = 10
+  QUICKBAR_PAGES = 10
 
   attr_reader :players
 
@@ -50,7 +57,7 @@ class PlayerDatabase
     @path = path
     @locales_path = derive_path(path, DEFAULT_LOCALES_BASENAME)
     @mutex = Mutex.new  # hash mutations + disk writes (see header)
-    @players = {}  # id -> {name:, locale:, admin:}
+    @players = {}  # id -> {name:, locale:, admin:, quickbar:, quickbar_page:}
     @id_by_name = {}  # name -> id
     @overrides = {}  # name -> [lang, ...]
     # load runs at construction (single thread, before any capture/agent
@@ -146,6 +153,116 @@ class PlayerDatabase
     p ? p[:locale] : nil
   end
 
+  # ── Quickbar (players-cache.json, in the player record) ───────────
+  #
+  #   "quickbar": [[10 item ids or nulls] x 10]
+  #       The player's quickbar as the WIRE reports it: QUICKBAR_PAGES fixed
+  #       pages, each a QUICKBAR_SLOTS array indexed by slot, value = item
+  #       prototype id, null = empty slot / no data for that page. Fed by the
+  #       sniffer from the quickbar input actions
+  #       (FactorioProtocol::QuickBar); page 0 is the default. Rebuilt from
+  #       the capture stream, so it is only as good as the packets seen: a
+  #       player who had slots set before the first capture shows nulls there.
+  #   "quickbar_page": <page>
+  #       The page the player last switched to.
+  #
+  # Same mutex as the rest of the record (see the header): quickbar events
+  # arrive on the capture thread, roster/join writes on the main thread.
+  def quickbar_page(id)
+    @players.dig(id.to_i, :quickbar_page) || 0
+  end
+
+  # Set (item id) or clear (nil) one quickbar slot on the given page. Saves
+  # when the slot's content actually changed, so a page nobody ever filled
+  # (or emptied again) stays null.
+  #
+  # Returns FALSE when the page/slot falls outside the quickbar — a slot
+  # byte that big cannot be real, it means an earlier action's length
+  # desynced the closure — and the caller uses that to hand the frame to the
+  # unknown-packet writer. Anything else (including an unknown player, which
+  # the packet-level roster check already flags) returns true.
+  def set_quickbar_slot(id, page, slot, item)
+    page = page.to_i
+    slot = slot.to_i
+    return false unless page.between?(0, QUICKBAR_PAGES - 1) && slot.between?(0, QUICKBAR_SLOTS - 1)
+    @mutex.synchronize do
+      rec = @players[id.to_i]
+      next true unless rec
+      qb = rec[:quickbar]
+      slots = qb&.[](page)
+      if item.nil?
+        next true unless slots && slots[slot]
+      else
+        next true if slots && slots[slot] == item
+      end
+      qb ||= (rec[:quickbar] = Array.new(QUICKBAR_PAGES))
+      slots = (qb[page] ||= Array.new(QUICKBAR_SLOTS))
+      if item.nil?
+        slots[slot] = nil
+        qb[page] = nil if slots.all?(&:nil?)
+      else
+        slots[slot] = item
+      end
+      persist
+      true
+    end
+  end
+
+  # The page the player switched to (quick_bar_set_selected_page /
+  # change_active_quick_bar). Saves when it changed. False when the page is
+  # outside the quickbar (desync) — see #set_quickbar_slot.
+  def set_quickbar_page(id, page)
+    page = page.to_i
+    return false unless page.between?(0, QUICKBAR_PAGES - 1)
+    @mutex.synchronize do
+      rec = @players[id.to_i]
+      next true unless rec
+      next true if rec[:quickbar_page] == page
+      rec[:quickbar_page] = page
+      persist
+      true
+    end
+  end
+
+  # Replace a player's whole quickbar from an AUTHORITATIVE source (the RCON
+  # read on join). The grid is complete, so it overwrites what the packet
+  # stream had inferred; a nil grid (an empty bar) clears the record.
+  def replace_quickbar(id, pages)
+    return unless pages.is_a?(Array) && pages.size == QUICKBAR_PAGES
+    @mutex.synchronize do
+      rec = @players[id.to_i]
+      next unless rec
+      next if rec[:quickbar] == pages
+      rec[:quickbar] = pages
+      persist
+    end
+  end
+
+  # Parse the quickbar payload of the join-time attrs query into the 10×10
+  # array shape, or nil when there is nothing in it. The payload is keyed by
+  # the game's FLAT slot index (see RconClient#player_attrs_for_lua), which
+  # the API defines as 1..10 = page one, 11..20 = page two, … — so the fold
+  # into page/slot lives here, where it is testable, instead of inside a Lua
+  # string. Entries outside 1..100 and non-numeric keys are dropped.
+  def self.parse_quickbar(payload)
+    return nil unless payload.is_a?(Hash)
+    pages = Array.new(QUICKBAR_PAGES) # nil = a page with nothing in it
+    payload.each do |key, id|
+      # Integer(.., exception: false) so a malformed key is nil, not a raise
+      i = Integer(key, exception: false)
+      next unless i&.between?(1, QUICKBAR_PAGES * QUICKBAR_SLOTS)
+      page = (i - 1) / QUICKBAR_SLOTS
+      (pages[page] ||= Array.new(QUICKBAR_SLOTS))[(i - 1) % QUICKBAR_SLOTS] = id.to_i
+    end
+    pages.compact.empty? ? nil : pages
+  end
+
+  # A player's quickbar (QUICKBAR_PAGES pages of QUICKBAR_SLOTS item ids),
+  # or nil if never seen.
+  def quickbar(id)
+    @players.dig(id.to_i, :quickbar)
+  end
+
   # ── Language overrides (players-locale.json, keyed by NAME) ────────
 
   # Override a player's FACTORIO locale with extra languages they read
@@ -223,7 +340,10 @@ class PlayerDatabase
       else
         nil
       end
-      h[k.to_i] = {name: v['name'] || v[:name], locale: v['locale'] || v[:locale], admin: admin}
+      rec = {name: v['name'] || v[:name], locale: v['locale'] || v[:locale], admin: admin}
+      rec[:quickbar] = v['quickbar'] if v['quickbar'].is_a?(Array)
+      rec[:quickbar_page] = v['quickbar_page'] if v['quickbar_page'].is_a?(Integer)
+      h[k.to_i] = rec
     }
     rebuild_index
   rescue JSON::ParserError, TypeError, NoMethodError, Errno::ENOENT
@@ -240,7 +360,12 @@ class PlayerDatabase
   def persist
     return unless @path
     safe = @players.dup.transform_values { |p|
-      {name: clean(p[:name]), locale: p[:locale], admin: p.key?(:admin) ? p[:admin] : nil}
+      rec = {name: clean(p[:name]), locale: p[:locale], admin: p.key?(:admin) ? p[:admin] : nil}
+      # Quickbar state is written only for players who have some, so the
+      # file stays as quiet as it was before quickbar tracking.
+      rec[:quickbar] = p[:quickbar] if p[:quickbar]
+      rec[:quickbar_page] = p[:quickbar_page] if p[:quickbar_page]
+      rec
     }
     tmp = "#{@path}.tmp"
     File.write(tmp, JSON.pretty_generate(safe))

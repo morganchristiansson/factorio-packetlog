@@ -2,6 +2,7 @@
 
 require 'json'
 require 'rcon'
+require_relative 'player_db'
 
 # RCON wrapper for the Factorio server, used to query the connected-player
 # roster ({index, name} pairs) at startup.
@@ -45,18 +46,25 @@ class RconClient
     'local o={} for i=1,#n do o[#o+1]=i.." = "..n[i] end helpers.write_file(f,table.concat(o,"\n"), false, 0) end ' \
     'd("item","factorio-packettools-items.txt") d("entity","factorio-packettools-entities.txt")'
 
-  # Parse a player-attributes payload (see PLAYER_ATTRS_LUA) into
-  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}].
-  # Returns nil when the payload isn't one. A truncated payload (rcon.print cap)
-  # parses as a partial list.
+  # Parse a player-attributes payload into
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:,
+  #   quickbar:}]. Returns nil when the payload isn't one. A truncated
+  # payload (rcon.print cap) parses as a partial list. `quickbar` is only in
+  # the join-time query's payload (see #player_attributes_for); nil for the
+  # all-players dump.
+  #
+  # Both query shapes land here: the all-players dump is a JSON ARRAY of
+  # records, the join-time one a single record OBJECT (live-verified — the
+  # old parser demanded an Array, so that query could never parse).
   #
   # JSON (helpers.table_to_json) instead of serpent.line: serpent sorts
   # keys alphabetically (a, c, i, k, l, n, o), which silently broke an
   # order-sensitive regex — the attrs seed never populated.
   def self.parse_player_attrs(body)
     parsed = parse_json(body)
-    return nil unless parsed.is_a?(Array)
-    parsed.filter_map do |r|
+    return nil if parsed.nil?
+    records = parsed.is_a?(Array) ? parsed : [parsed]
+    records.filter_map do |r|
       next unless r.is_a?(Hash) && r['i'] && r['n']
       { index: r['i'].to_i,
         name: r['n'].to_s,
@@ -64,7 +72,8 @@ class RconClient
         admin: r['a'] == true,
         online_time: r['o'].to_i,
         afk_time: r['k'].to_i,
-        locale: r['l']&.to_s }
+        locale: r['l']&.to_s,
+        quickbar: r.key?('q') ? (r['q'] == false ? :failed : PlayerDatabase.parse_quickbar(r['q'])) : nil }
     end
   end
 
@@ -98,26 +107,61 @@ class RconClient
 
   # Fetch one connected player's attributes for a join-time enrichment query.
   # This is deliberately targeted: the full dump belongs at startup only.
-  # One-line /sc command; returns a parsed LuaPlayer-attr hash or nil.
-  def player_attributes_for(name)
-    escaped = lua_quote(name)
-    body = execute(%(do local p=game.connected_players["#{escaped}"] rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale}) or "nil") end))
-    self.class.parse_player_attrs(body)&.find { |p| p[:name] == name }
+  # `player` is the game player INDEX (what the join path has) or a name.
+  # One-line /sc command; returns a parsed LuaPlayer-attr hash (plus the
+  # quickbar, see .player_attrs_for_lua) or nil.
+  def player_attributes_for(player)
+    records = self.class.parse_player_attrs(execute(player_attrs_for_lua(player)))
+    return nil unless records
+    # One record comes back (the player we asked for). Match by name only
+    # when we queried BY name — an index lookup has no name to match.
+    player.is_a?(Numeric) ? records.first : records.find { |p| p[:name] == player.to_s }
   end
 
-  # Fetch a JSON payload, preferring helpers.write_file to <user-data>
-  # script-output (no 4KB rcon.print response cap) when the server's
-  # script-output dir is known locally — the sniffer runs ON the server
-  # host, so the file is read straight from disk. Falls back to the
-  # rcon.print variant (may truncate on very large results).
-  def json_query(filename, write_lua, print_lua)
-    if @script_output_dir
-      execute(write_lua)
-      path = File.join(@script_output_dir, filename)
-      body = File.read(path) if File.exist?(path)
-      return body if body && !body.empty?
-    end
-    execute(print_lua)
+  # The join-time one-liner: the usual attrs (index, name, connected, admin,
+  # online_time, afk_time, locale) PLUS the player's whole quickbar, keyed by
+  # the FLAT slot index 1..100 (`{"<flat index>": <item id>}`). The quickbar
+  # rides along here rather than in a query of its own because the C→S
+  # actions only ever report it as deltas — a join is the one moment the
+  # whole bar is knowable.
+  #
+  # The read loop follows the server version (the same helpers.game_version
+  # string select_version uses for the action tables) because the getter
+  # changed in 2.1: 2.0 takes a flat index 1..100, 2.1 takes (page, slot).
+  # Both branches normalise to the same flat key, so the page/slot fold lives
+  # in one place (PlayerDatabase.parse_quickbar). The 2.1 branch assumes
+  # 0-based page/slot, like the wire's quick_bar_set_selected_page byte.
+  # An unknown version falls back to the 2.0 shape; the pcall below turns a
+  # wrong guess, or a changed return type, into a visible "quickbar read
+  # failed" — never a dead query, attrs included.
+  #
+  # Item PROTOTYPE IDS, not names, so the cache needs no item_db: the id map
+  # is built right here in the same `prototypes.item` iteration order
+  # DUMP_PROTOTYPES_LUA uses (that order IS the wire id).
+  #
+  # Everything else about this query is live-verified on 2.0.77 — the getter
+  # arity, `.name`, the 1..100 bounds, the id map, game.players[...],
+  # get_active_quick_bar_page being uncallable — and recorded in
+  # docs/rcon-knowledge.md, which is the place to read before editing this.
+  def player_attrs_for_lua(player)
+    key = player.is_a?(Numeric) ? player.to_i.to_s : "\"#{lua_quote(player)}\""
+    slots = PlayerDatabase::QUICKBAR_SLOTS
+    version = server_version.to_s
+    # 2.1+ takes (page, slot); 2.0 and an unknown version take the flat index
+    loop_lua = if !version.empty? && !version.match?(/\A2\.0(\.|\z)/)
+                "for pg=0,#{PlayerDatabase::QUICKBAR_PAGES - 1} do for sl=0,#{slots - 1} do " \
+                  "put(pg*#{slots}+sl+1,p.get_quick_bar_slot(pg,sl)) end end"
+              else
+                "for i=1,#{PlayerDatabase::QUICKBAR_PAGES * slots} do put(i,p.get_quick_bar_slot(i)) end"
+              end
+    'do local p=game.players[' + key + '] local q={} ' \
+      'local function read() local n={} for x in pairs(prototypes.item) do n[#n+1]=x end ' \
+      'local ids={} for i=1,#n do ids[n[i]]=i end ' \
+      'local function put(i,s) if s and s.name and ids[s.name] then q[tostring(i)]=ids[s.name] end end ' \
+      "#{loop_lua} end " \
+      'local okq=p and pcall(read) ' \
+      'rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,' \
+      'o=p.online_time,k=p.afk_time,l=p.locale,q=okq and q or false}) or "nil") end'
   end
 
   # Write item + entity prototype name dumps to the server's script-output
@@ -161,9 +205,13 @@ class RconClient
   # (helpers.game_version — game.version doesn't exist), or nil on failure.
   # Used to pick the protocol's segment-type mapping
   # (FactorioProtocol.select_version).
+  # Memoised: a version never changes under a running server, and the
+  # sniffer asks at startup anyway (select_protocol_version). Failures are
+  # NOT memoised, so a server that was down at boot is retried.
   def server_version
     body = execute('rcon.print(helpers.game_version)').strip
-    body.empty? ? nil : body
+    return nil if body.empty?
+    @server_version = body
   end
 
   # Run an arbitrary RCON console command (raw, NO /sc Lua prefix) and

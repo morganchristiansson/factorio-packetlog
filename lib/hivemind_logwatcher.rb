@@ -23,7 +23,7 @@ require_relative 'log_tail'
 # `log_turn_events` and `log_event_interval` — stay required keys of
 # config-hivemind.yaml, read here where they are used (no list, no code
 # default): switch the feature off and nobody reads them.
-class HiveMindLogwatcher
+class HivemindLogwatcher
   # The agent, as its owner: this feature reads the agent's published
   # interface (hive_config, the LLM entry points, the log helpers) and keeps
   # its own thread and rate-limit stamp to itself.

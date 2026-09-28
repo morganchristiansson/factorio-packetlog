@@ -23,7 +23,7 @@ That is the whole list. An unknown name is a startup error, and a feature
 that is not listed is never even `require`d.
 
 **Hivemind has its own plugins**, in its own config file, through the same
-manager class and the same convention (`HiveMindAgent::PLUGINS`, a second
+same convention (`HivemindAgent.plugin_set`, a second
 `Plugins::Manager`) — so a sniffer without the `hivemind` plugin never even
 looks at them:
 
@@ -37,9 +37,9 @@ plugins:
 ```
 
 Same manager, over a prefixed file set (`prefix: 'hivemind_'`,
-`namespace: 'HiveMind'`), so the config names stay short while the files
+`owner: 'hivemind'`), so the config names stay short while the files
 say who owns them: `persistence` is `lib/hivemind_persistence.rb` and its
-module `HiveMindPersistence`, mixed into `HiveMindAgent` in the class body
+module `HivemindPersistence`, mixed into `HivemindAgent` in the class body
 — only if it is listed. A plugin that is off is never `require`d and its
 methods never reach the agent. Call sites ask first
 (`agent.plugin?('compaction')`) instead of calling a method that may not
@@ -174,7 +174,7 @@ cleared.
 player chat ──► write_to_console action (C→S packet)
                    │  FactorioProtocol.decode_chat
                    ▼
-        lib/hivemind.rb  HiveMindAgent#on_chat(player, message)
+        lib/hivemind.rb  HivemindAgent#on_chat(player, message)
                    │  message contains "hivemind" (case-insensitive)?
                    ▼
         RubyLLM chat (endpoint/provider/model from config-hivemind.yaml)
@@ -306,7 +306,7 @@ required from `config-hivemind.yaml`; the file must exist and contain all
 keys shown in `config-hivemind.yaml.example`. There are no code defaults for
 model, provider, endpoint, prompts, limits, or compaction thresholds. The
 agent auto-enables in server mode iff the startup model has a key
-(`HiveMindAgent.key_configured?`).
+(`HivemindAgent.key_configured?`).
 
 `providers:` defines the endpoints and the models available to `/model` and
 `/try`, plus the ordered automatic fallback list. One entry per

@@ -202,7 +202,7 @@ class RconClient
   # Send a chat message visible to all players (game.print via /sc). The
   # message is Lua-string-quoted, so arbitrary content (quotes, backslashes,
   # newlines) can't break out of the string or inject Lua. Used by the
-  # HiveMind agent to reply to in-game chat.
+  # Hivemind agent to reply to in-game chat.
   def say(text)
     return if text.nil? || text.empty?
     execute("game.print(\"#{lua_quote(text)}\")")

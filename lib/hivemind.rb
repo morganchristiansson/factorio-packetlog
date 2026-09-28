@@ -18,7 +18,7 @@ require_relative 'hivemind_prompts'
 require_relative 'agent_events'
 require_relative 'plugins'
 
-# HiveMind agent — an LLM persona that lives inside the Factorio sniffer.
+# Hivemind agent — an LLM persona that lives inside the Factorio sniffer.
 #
 # Input: in-game chat decoded from the packet stream. The sniffer calls
 # #on_chat(player, message) from log_action for every write_to_console
@@ -35,9 +35,9 @@ require_relative 'plugins'
 # https://opencode.ai/zen/go/v1). More tools (RCON queries, packet-decoder
 # lookups) can be added the same way as HivemindReply — they get access to
 # the rcon client / the sniffer's item/player DBs via the tool constructor.
-class HiveMindAgent
+class HivemindAgent
   include AgentEvents
-  include HiveMindPrompts     # DEFAULT_SOUL / SYSTEM_PROMPT / COMPACTION_PROMPT
+  include HivemindPrompts     # DEFAULT_SOUL / SYSTEM_PROMPT / COMPACTION_PROMPT
   # Non-secret Hivemind settings live only in config-hivemind.yaml.
   # HIVE_API_KEY remains the sole environment secret; api_key: in this
   # (gitignored) file is the per-provider fallback for it.
@@ -59,8 +59,7 @@ class HiveMindAgent
 
     Array(YAML.safe_load_file(path).fetch('plugins')).map(&:to_s)
   end
-  PLUGIN_PREFIX = 'hivemind_'
-  PLUGIN_NAMESPACE = 'HiveMind'
+  PLUGIN_OWNER = 'hivemind'
   # The list, read ONCE per load of this file: a hot reload re-reads the config
   # and re-mixes, so an edited list applies then. A module already mixed in
   # can't be un-mixed, so restarting is the clean switch.
@@ -69,8 +68,7 @@ class HiveMindAgent
   def self.still_modules = %w[persistence compaction].freeze
 
   def self.plugin_set
-    @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__,
-                                           prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
+    @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__, owner: PLUGIN_OWNER)
   end
   self.plugin_set.mix_modules_into(self)
   # Identity headers for the OpenCode Go gateway (required, not optional):
@@ -237,8 +235,7 @@ class HiveMindAgent
     # (building them would report them missing). This line goes away with
     # those two conversions.
     not_yet = self.class.own_plugins - self.class.still_modules
-    @plugins = Plugins::PluginSet.new(not_yet, self, dir: __dir__,
-                                      prefix: PLUGIN_PREFIX, namespace: PLUGIN_NAMESPACE)
+    @plugins = Plugins::PluginSet.new(not_yet, self, dir: __dir__, owner: PLUGIN_OWNER)
     @last_ask_at = {}           # player → last trigger time (per-player anti-spam)
     @last_trigger = nil         # [player, message] of last handled trigger (for /retry)
     @last_greet = 0.0
@@ -281,7 +278,7 @@ class HiveMindAgent
     # learned. Default memories/; memory_dir: false disables. The default
     # SOUL is seeded on first run.
     @memory_store = MemoryStore.new(memory_dir)
-    @memory_store.seed(MemoryStore::SOUL_KEY, HiveMindPrompts::DEFAULT_SOUL) if @memory_store.enabled?
+    @memory_store.seed(MemoryStore::SOUL_KEY, HivemindPrompts::DEFAULT_SOUL) if @memory_store.enabled?
     # Player memories already delivered to the model THIS session (join
     # greetings / chat turns). A fresh process resets it, so a new session
     # re-seeds memories on first contact; within a session the memory
@@ -753,7 +750,7 @@ class HiveMindAgent
   # per turn. (The per-turn user prompt carries only the relevant PLAYER
   # memory — see memory_prompt.)
   def system_prompt_with_memories
-    parts = [HiveMindPrompts::SYSTEM_PROMPT]
+    parts = [HivemindPrompts::SYSTEM_PROMPT]
     blobs = []
     soul = @memory_store.soul
     blobs << "=== SOUL ===\n#{soul}" if soul && !soul.strip.empty?
@@ -811,7 +808,7 @@ class HiveMindAgent
   # and memory injections via memory_prompt.
   def mark_player_seen(name)
     name = clean_text(name).strip
-    return if name.empty? || name == HiveMindAgent::AGENT_NAME
+    return if name.empty? || name == HivemindAgent::AGENT_NAME
     @session_players_mutex.synchronize { @session_players << name }
   end
 
@@ -846,7 +843,7 @@ class HiveMindAgent
     # Track who appeared in this LLM session (persisted; drives compaction
     # targets so they can't drift from what the session actually saw).
     if player
-      mark_player_seen(player) unless player == HiveMindAgent::AGENT_NAME
+      mark_player_seen(player) unless player == HivemindAgent::AGENT_NAME
     elsif msg =~ /\A(\S+) (?:joined|left) the game/
       mark_player_seen(Regexp.last_match(1))
     end

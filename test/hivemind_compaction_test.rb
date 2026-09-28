@@ -20,7 +20,7 @@ class TestHivemindCompaction < Minitest::Test
     Dir.mktmpdir do |dir|
       agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
       store = agent.instance_variable_get(:@memory_store)
-      assert_equal HiveMindAgent::DEFAULT_SOUL, store.soul, 'SOUL seeded from the default personality'
+      assert_equal HivemindAgent::DEFAULT_SOUL, store.soul, 'SOUL seeded from the default personality'
       # An existing/edited SOUL is never overwritten by a new process.
       store.write_key('soul', 'the factory regained its voice')
       new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)

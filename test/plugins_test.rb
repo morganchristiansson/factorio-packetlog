@@ -25,8 +25,10 @@ class TestPlugins < Minitest::Test
     def on_join_enriched(*args) = @emitted << args
   end
 
-  def set_for(names, owner: nil, **kw)
-    Plugins::PluginSet.new(names, owner || Owner.new, dir: FIXTURES, **kw)
+  # host: the stand-in owner object the feature is built with; owner: the
+  # feature-grouping string (see Plugins::PluginSet).
+  def set_for(names, host: nil, **kw)
+    Plugins::PluginSet.new(names, host || Owner.new, dir: FIXTURES, **kw)
   end
 
   def test_the_config_list_is_the_list
@@ -72,7 +74,7 @@ class TestPlugins < Minitest::Test
   # that implement the event — no base class, no empty handlers.
   def test_features_are_built_with_the_owner_and_dispatched_by_name
     owner = Owner.new
-    set = set_for(%w[seamy], owner: owner)
+    set = set_for(%w[seamy], host: owner)
     set.features.each { |f| f.on_join_enriched('recorded', 9, quickbar: nil) }
 
     assert_equal [['recorded', 0, {}]], owner.emitted,
@@ -100,7 +102,7 @@ class TestPlugins < Minitest::Test
   # A host's list can name a prefixed set in its own namespace, so a feature
   # keeps its family of files and its class names in one flat namespace.
   def test_prefixed_list_with_its_own_namespace
-    set = set_for(%w[feature], prefix: 'hive_', namespace: 'Hive')
+    set = set_for(%w[feature], owner: 'hive')
     assert_equal 'Feature', set.camel('feature'), 'the name follows the file'
     assert_equal [File.join(FIXTURES, 'hive_feature.rb')], set.files
     built = set.features.first

@@ -9,7 +9,7 @@
 # Deliberately NOT part of the tool classes: the pending entries are shared
 # state (persisted by the session, listed by compaction) and must survive hot
 # reloads and restarts, while tools are rebuilt fresh per ask.
-class HiveMindFollowups
+class HivemindFollowups
   # The agent, as its owner, plus THIS feature's own state: the pending
   # entries, their lock and condition variable, and the scheduler thread. The
   # agent asks for a feature by name (plugins[:followups]) and the session

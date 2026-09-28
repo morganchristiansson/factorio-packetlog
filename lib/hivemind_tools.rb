@@ -177,7 +177,7 @@ end
 # readers — so the model can set it instead of waiting for an operator.
 #
 # Only registered while the TRANSLATION plugin is loaded (see
-# HiveMindAgent#register_tools): without translation there is nothing to
+# HivemindAgent#register_tools): without translation there is nothing to
 # steer, so the tool would be a no-op with a confusing name.
 class SetPlayerLanguages < RubyLLM::Tool
   def name

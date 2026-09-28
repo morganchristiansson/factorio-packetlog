@@ -4,11 +4,11 @@ require 'json'
 
 # Hivemind plugin `compaction` — the file is lib/hivemind_compaction.rb (the
 # manager's `hivemind_` prefix), the module takes its CamelCase name. Listed
-# in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
+# in config-hivemind.yaml `plugins:`; mixed into HivemindAgent by
 # Plugins.apply_mixins. Long-term memory compaction: the SINGLE pass behind
 # /compact that reviews the session and overwrites the keyed memory blobs
 # (soul / knowledge / <player>) in one request.
-module HiveMindCompaction
+module HivemindCompaction
   # Long-term memory compaction: ONE pass that reviews the session
   # (bounded thread tail + current memories + console) and overwrites every
   # keyed memory blob (soul / knowledge / <player>) from a single reply of
@@ -68,7 +68,7 @@ module HiveMindCompaction
     # soul/knowledge first, then players, stable order. The agent itself is
     # never a target (stray blobs from older builds are ignored, not
     # rewritten).
-    keys = (%w[soul knowledge] + seen.sort).reject { |k| k == HiveMindAgent::AGENT_NAME }
+    keys = (%w[soul knowledge] + seen.sort).reject { |k| k == HivemindAgent::AGENT_NAME }
     pass = nil
     @mutex.synchronize { pass = build_compaction_chat if @chat }
     unless pass
@@ -80,8 +80,8 @@ module HiveMindCompaction
       # Session material rides in its OWN user message; the all-keys turn
       # goes out as the ask. On a retry, ask_with_retry strips just the
       # turn — the material message stays.
-      pass.add_message(role: :user, content: "#{HiveMindPrompts::COMPACTION_PROMPT}\n\n#{material}")
-      turn = format(HiveMindPrompts::COMPACTION_TURN_ALL, keys.join(', '))
+      pass.add_message(role: :user, content: "#{HivemindPrompts::COMPACTION_PROMPT}\n\n#{material}")
+      turn = format(HivemindPrompts::COMPACTION_TURN_ALL, keys.join(', '))
       ask_with_retry(pass, turn)
       bodies = parse_compaction_sections(extract_memory_content(pass.messages).to_s, keys)
       if bodies.nil?
@@ -357,7 +357,7 @@ module HiveMindCompaction
   # Returns a snapshot copy (minus the agent name — replies are not a player).
   def session_players
     players = @session_players_mutex.synchronize { Set.new(@session_players) }
-    players.delete(HiveMindAgent::AGENT_NAME)
+    players.delete(HivemindAgent::AGENT_NAME)
     players
   end
 

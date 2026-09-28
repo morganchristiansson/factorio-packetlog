@@ -2,11 +2,11 @@
 
 # Hivemind plugin `persistence` — the file is lib/hivemind_persistence.rb
 # (the manager's `hivemind_` prefix), the module takes its CamelCase name.
-# Listed in config-hivemind.yaml `plugins:`; mixed into HiveMindAgent by
+# Listed in config-hivemind.yaml `plugins:`; mixed into HivemindAgent by
 # Plugins.apply_mixins. Restart-safe session persistence: console queue +
 # LLM conversation + pending follow-ups serialized to a JSON session file
 # (atomic tmp+rename).
-module HiveMindPersistence
+module HivemindPersistence
   # ── Session persistence (restart-safe) ──────────────────────────
 
   # Restore console history + LLM conversation from the session file so a
@@ -39,7 +39,7 @@ module HiveMindPersistence
     @session_players = Set.new
     if data['session_players'].is_a?(Array)
       @session_players = Set.new(data['session_players'].map { |n| n.to_s })
-      @session_players.delete(HiveMindAgent::AGENT_NAME)
+      @session_players.delete(HivemindAgent::AGENT_NAME)
     end
     # Re-arm pending follow-ups from their absolute unix deadlines. Format:
     #   { "prowl" => { "due_at" => ..., "task" => ... } }

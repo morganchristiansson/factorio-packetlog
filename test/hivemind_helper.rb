@@ -67,7 +67,7 @@ def new_hive_agent(rcon: FakeRcon.new, attrs: nil, current_tick: -> { 0 },
   Array(rows).each_with_index do |row, i|
     player_db[row[:index] || i + 1] = { name: row[:name], admin: row[:admin] }
   end
-  HiveMindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
+  HivemindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
                     player_db: player_db, config_file: HIVE_TEST_CONFIG, **kwargs)
 end
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for the HiveMindAgent core (lib/hivemind.rb): triggers, chat
+# Tests for the HivemindAgent core (lib/hivemind.rb): triggers, chat
 # history/context assembly, player events and greetings.
 # Tool, persistence, compaction, and follow-up tests are separate files.
 # Run: ruby -Ilib test/hivemind_test.rb
@@ -9,7 +9,7 @@
 require_relative 'hivemind_helper'
 require_relative '../lib/player_db'
 require_relative '../lib/player_attrs'
-class TestHiveMindAgent < Minitest::Test
+class TestHivemindAgent < Minitest::Test
   include HivemindSpecHelpers
 
   def setup
@@ -85,7 +85,7 @@ class TestHiveMindAgent < Minitest::Test
       with_env('HIVE_API_KEY' => nil) do
         agent = make_agent(config_file: path)
         assert_equal 'yaml-key', agent.send(:api_key_for, agent.model)
-        assert HiveMindAgent.key_configured?(path), 'a group key turns the agent on'
+        assert HivemindAgent.key_configured?(path), 'a group key turns the agent on'
       end
       with_env('HIVE_API_KEY' => 'env-key') do
         assert_equal 'env-key', make_agent(config_file: path).send(:api_key_for, config['model'])
@@ -95,7 +95,7 @@ class TestHiveMindAgent < Minitest::Test
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, YAML.dump(config.reject { |k, _| k == 'providers' }.merge('providers' => {})))
       with_env('HIVE_API_KEY' => nil) do
-        refute HiveMindAgent.key_configured?(path), 'no key anywhere = no agent'
+        refute HivemindAgent.key_configured?(path), 'no key anywhere = no agent'
         assert_raises(ArgumentError) { make_agent(config_file: path) }
       end
     end
@@ -112,13 +112,13 @@ class TestHiveMindAgent < Minitest::Test
   # The file must exist (named once, with the example to copy); the keys are
   # not validated up front — they raise where they are read.
   def test_config_is_required
-    error = assert_raises(Errno::ENOENT) { HiveMindAgent.load_config('/nonexistent/config-hivemind.yaml') }
+    error = assert_raises(Errno::ENOENT) { HivemindAgent.load_config('/nonexistent/config-hivemind.yaml') }
     assert_includes error.message, 'config-hivemind.yaml.example'
 
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, "model: test\n")
-      assert_raises(KeyError) { HiveMindAgent.load_config(path).fetch('providers') }
+      assert_raises(KeyError) { HivemindAgent.load_config(path).fetch('providers') }
     end
   end
 
@@ -129,17 +129,17 @@ class TestHiveMindAgent < Minitest::Test
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, "plugins:\n  - compaction\n  - followups\n")
 
-      assert_equal %w[compaction followups], HiveMindAgent.config_plugins(path)
+      assert_equal %w[compaction followups], HivemindAgent.config_plugins(path)
     end
     # the shipped example enables all four
-    assert_equal %w[persistence compaction followups logwatcher], HiveMindAgent.config_plugins(HIVE_TEST_CONFIG)
-    assert_equal HiveMindAgent.config_plugins(HIVE_TEST_CONFIG), HiveMindAgent.own_plugins
+    assert_equal %w[persistence compaction followups logwatcher], HivemindAgent.config_plugins(HIVE_TEST_CONFIG)
+    assert_equal HivemindAgent.config_plugins(HIVE_TEST_CONFIG), HivemindAgent.own_plugins
     assert @agent.plugin?('compaction')
     assert @agent.plugin?('logwatcher')
     refute @agent.plugin?('nope')
     # every listed plugin's module is actually mixed in
-    assert_equal HiveMindCompaction, HiveMindAgent.instance_method(:compact_memory!).owner
-    assert_kind_of HiveMindLogwatcher, @agent.plugins[:logwatcher],
+    assert_equal HivemindCompaction, HivemindAgent.instance_method(:compact_memory!).owner
+    assert_kind_of HivemindLogwatcher, @agent.plugins[:logwatcher],
                  'the listed plugin is a feature object, not a mixin'
   end
 
@@ -149,7 +149,7 @@ class TestHiveMindAgent < Minitest::Test
     Dir.mktmpdir do |dir|
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, YAML.safe_load_file(HIVE_TEST_CONFIG).tap { |c| c.delete('plugins') }.to_yaml)
-      error = assert_raises(KeyError) { HiveMindAgent.config_plugins(path) }
+      error = assert_raises(KeyError) { HivemindAgent.config_plugins(path) }
       assert_includes error.message, 'plugins'
     end
   end
@@ -157,7 +157,7 @@ class TestHiveMindAgent < Minitest::Test
   # A missing config file is initialize's error to report — the class must
   # still load (it is `load`ed on every hot reload, in a running sniffer).
   def test_own_plugin_list_tolerates_a_missing_config
-    assert_empty HiveMindAgent.config_plugins('/nonexistent/config-hivemind.yaml')
+    assert_empty HivemindAgent.config_plugins('/nonexistent/config-hivemind.yaml')
   end
 
   def test_try_rejects_unconfigured_model
@@ -283,7 +283,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_system_prompt_is_static
     # The system prompt is personality/rules only — dynamic context lives
     # in the per-turn user prompt (turn_prompt).
-    sp = HiveMindAgent::SYSTEM_PROMPT
+    sp = HivemindAgent::SYSTEM_PROMPT
     refute_includes sp, 'Current context:'
     refute_includes sp, 'Online players ('
   end
@@ -293,7 +293,7 @@ class TestHiveMindAgent < Minitest::Test
     # Coordinates must always be Factorio rich-text GPS tags ([gps=x,y]) —
     # clickable in game — never bare numbers, and never with a label or
     # extra parameters.
-    sp = HiveMindAgent::SYSTEM_PROMPT.gsub(/\s+/, ' ')  # heredoc line-wrap tolerant
+    sp = HivemindAgent::SYSTEM_PROMPT.gsub(/\s+/, ' ')  # heredoc line-wrap tolerant
     assert_includes sp, '[gps=x,y]'
     assert_includes sp, 'clickable'
     assert_includes sp, 'Never write coordinates as bare numbers'
@@ -810,7 +810,7 @@ class TestHiveMindAgent < Minitest::Test
   def test_chat_carries_opencode_identity_headers
     chat = @agent.instance_variable_get(:@chat)
     ua = (chat.headers[:'User-Agent'] || chat.headers['User-Agent']).to_s
-    assert_equal HiveMindAgent::USER_AGENT, ua
+    assert_equal HivemindAgent::USER_AGENT, ua
     refute_match(/ruby_llm|faraday/i, ua)
     sid = (chat.headers[:'x-opencode-session'] || chat.headers['x-opencode-session']).to_s
     refute_empty sid

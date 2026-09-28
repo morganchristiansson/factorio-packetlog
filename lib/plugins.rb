@@ -6,13 +6,14 @@
 # derives. One Plugins object per owner, holding that owner's list.
 #
 #     quickbar_backup   lib/quickbar_backup.rb → QuickbarBackup
-#     compaction        lib/hivemind_compaction.rb → HiveMindCompaction
+#     compaction        lib/hivemind_compaction.rb → HivemindCompaction
 #
-# One host's list can name a prefixed set in its own namespace, so a feature
-# keeps its family of files and its class names in one flat namespace instead
-# of scattering them: Hivemind's `compaction` is
-# lib/hivemind_compaction.rb defining HiveMindCompaction, from
-# config-hivemind.yaml `plugins:`.
+# An owner can group its features, so they keep their family of files and
+# their class names in one flat namespace instead of scattering them (or
+# colliding): an owner of `hivemind` gets lib/hivemind_<name>.rb defining
+# Hivemind<Name>, from its own `plugins:` list. Without one (the sniffer), a
+# feature is lib/<name>.rb defining <Name>. One string, both halves — and the
+# spelling follows the file prefix, so there is only ever one of it.
 #
 # A name with a '/' is a path and is loaded as given, so a feature that ships
 # outside lib/ joins the same list.
@@ -28,13 +29,14 @@ module Plugins
     #   be built without a config). host: the owner, handed to every feature
     #   as its constructor argument, so a feature reads shared state (config,
     #   rcon, player_db) through the interface its owner publishes.
-    # dir/prefix/namespace: the convention for this owner's files and classes.
-    def initialize(names, host, dir: __dir__, prefix: '', namespace: nil)
+    # owner: optional group name. `owner: 'hivemind'` means
+    #   lib/hivemind_<name>.rb defining Hivemind<Name>.
+    def initialize(names, host, dir: __dir__, owner: nil)
       @names = Array(names).map(&:to_s).uniq
       @host = host
       @dir = dir
-      @prefix = prefix
-      @namespace = namespace
+      @prefix = owner ? "#{owner}_" : ''
+      @namespace = owner ? camel(owner) : ''
       @features = nil
     end
 

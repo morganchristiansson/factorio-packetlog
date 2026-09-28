@@ -217,7 +217,7 @@ class FactorioPacketTools
       @plugins = Plugins::PluginSet.new(options[:plugins], self)
       @agent = nil
       @translation_agent = nil
-      # HiveMind AI agent: reads packet-decoded chat and answers players who
+      # Hivemind AI agent: reads packet-decoded chat and answers players who
       # say "hivemind". Needs the `hivemind` plugin (config.yaml `plugins:`)
       # AND a key for its startup model, which the entry point checks into
       # options[:ai_agent]. Context comes from the packet-derived
@@ -228,7 +228,7 @@ class FactorioPacketTools
       if @plugins.enabled?('hivemind') && options[:ai_agent]
         if @rcon
           begin
-            @agent = HiveMindAgent.new(rcon: @rcon, attrs: @attrs,
+            @agent = HivemindAgent.new(rcon: @rcon, attrs: @attrs,
                                         current_tick: -> { @game_tick },
                                         player_db: @player_db,
                                         sniffer_plugins: options[:plugins])

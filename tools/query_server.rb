@@ -12,7 +12,7 @@
 #   ruby tools/query_server.rb chill "deathworld"
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 require 'matchmaking'
-require 'server_query'
+require 'server_probe'
 
 # Args → addresses: IPs/hosts get the default port when bare, anything else
 # is a case-insensitive substring over cached seed names (first 5 hits).
@@ -22,16 +22,16 @@ def normalize_addr(a)
   return "#{a}:34197" if a.match?(/\A[\d.]+\z/) # bare v4
   return "[#{a}]:34197" if a.count(':') > 1 # bare v6
   host, _, port = a.rpartition(':')
-  return a if port.match?(/\A\d+\z/) && !ServerQuery.resolve(host, 34197).empty? # hostname + port
-  return "#{a}:34197" if !ServerQuery.resolve(a, 34197).empty? # bare hostname
+  return a if port.match?(/\A\d+\z/) && !FactorioServerProbe.resolve(host, 34197).empty? # hostname + port
+  return "#{a}:34197" if !FactorioServerProbe.resolve(a, 34197).empty? # bare hostname
   nil
 end
 
 def resolve_addrs(args)
-  seed = Matchmaking.seed
+  seed = FactorioMatchmaking.seed
   args.flat_map do |a|
     next normalize_addr(a) if normalize_addr(a)
-    seed.select { |s| ServerQuery.strip_tags(s['name']).downcase.include?(a.downcase) }
+    seed.select { |s| FactorioProtocol.strip_markup(s['name']).downcase.include?(a.downcase) }
         .first(5).map { |s| s['host_address'] }
   end.compact.uniq
 end
@@ -41,7 +41,7 @@ if $PROGRAM_NAME == __FILE__
   addrs = resolve_addrs(ARGV)
   abort 'No cached server matches that name (run server_rank once to seed).' if addrs.empty?
   addrs.each do |addr|
-    info = ServerQuery.info(addr)
-    puts(info.nil? ? "#{addr}: no reply" : ServerQuery.format_info(info))
+    info = FactorioServerProbe.info(addr)
+    puts(info.nil? ? "#{addr}: no reply" : FactorioServerProbe.format_info(info))
   end
 end

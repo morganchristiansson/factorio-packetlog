@@ -71,16 +71,16 @@ class TestTranslationAgent < Minitest::Test
     refute_includes simulate_error, 'NoMethodError'
 
     locales_output, = capture_io do
-      sniffer.handle_command('/locales KrlosUltimate en,pt')
-      sniffer.handle_command('/locales KrlosUltimate')
+      sniffer.handle_command('/locales somePlayer en,pt')
+      sniffer.handle_command('/locales somePlayer')
       sniffer.handle_command('/locales')
     end
-    assert_equal ['en', 'pt'], player_db.locale_overrides('KrlosUltimate')
-    assert_includes locales_output, 'KrlosUltimate: en,pt'
+    assert_equal ['en', 'pt'], player_db.locale_overrides('somePlayer')
+    assert_includes locales_output, 'somePlayer: en,pt'
     capture_io do
-      sniffer.handle_command('/locales KrlosUltimate -')
+      sniffer.handle_command('/locales somePlayer -')
     end
-    assert_nil player_db.locale_overrides('KrlosUltimate')
+    assert_nil player_db.locale_overrides('somePlayer')
   end
 
   def test_google_api_key_from_yaml_with_env_override
@@ -311,19 +311,19 @@ class TestTranslationAgent < Minitest::Test
     Dir.mktmpdir do |dir|
       cache = File.join(dir, 'players-cache.json')
       db = PlayerDatabase.new(cache)
-      db[7] = {name: 'KrlosUltimate', locale: 'pt-BR'}
-      db.set_locale_overrides('KrlosUltimate', ['en', 'pt'])
+      db[7] = {name: 'somePlayer', locale: 'pt-BR'}
+      db.set_locale_overrides('somePlayer', ['en', 'pt'])
 
-      assert_equal ['en', 'pt'], db.locale_overrides('KrlosUltimate')
+      assert_equal ['en', 'pt'], db.locale_overrides('somePlayer')
       reloaded = PlayerDatabase.new(cache)
-      assert_equal ['en', 'pt'], reloaded.locale_overrides('KrlosUltimate')
+      assert_equal ['en', 'pt'], reloaded.locale_overrides('somePlayer')
       assert File.exist?(File.join(dir, 'players-locale.json'))
-      assert_equal 'KrlosUltimate', reloaded.lookup(7)
+      assert_equal 'somePlayer', reloaded.lookup(7)
       assert_equal 'pt-BR', reloaded.get_locale(7)
 
-      reloaded.set_locale_overrides('KrlosUltimate', [])
+      reloaded.set_locale_overrides('somePlayer', [])
       cleared = PlayerDatabase.new(cache)
-      assert_nil cleared.locale_overrides('KrlosUltimate')
+      assert_nil cleared.locale_overrides('somePlayer')
     end
   end
 end

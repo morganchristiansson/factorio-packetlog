@@ -2,34 +2,47 @@
 
 require 'json'
 
-# Quickbar backup — the file is lib/quickbar_backup.rb, the class takes its
+# Player backup — the file is lib/player_backup.rb, the class takes its
 # CamelCase name, and it is listed in config.yaml `plugins:`. Nothing in the
 # sniffer names it: Plugins.features builds every listed class and pushes
 # `on_join_enriched` at the ones that implement it.
 #
-# What it keeps: a copy of every player's quickbar keyed by NAME, in
-# `quickbars.json` next to the process cwd (the players-cache.json
-# convention, and no configuration of its own).
+# What it keeps, per player, keyed by NAME, in `players-backup.json` next to
+# the process cwd (the players-cache.json convention, and no configuration of
+# its own):
 #
-# WHY a side file, keyed by name: players-cache.json's 10×10 quickbar is
+#   quickbar  the 10×10 grid
+#   color     LuaPlayer.color as [r, g, b, a]
+#
+# WHY a side file, keyed by name: players-cache.json's per-player state is
 # per-savefile — game indexes are handed out in join order and reset when the
 # save does, so index 42 on a new map is a different person. A name is the
-# only thing that survives the save, so this file's lifetime is longer than
-# any single save's.
+# only thing that survives the save, so this file's lifetime is longer than any
+# single save's. That matters most for the quickbar, which the save does NOT
+# carry (verified: no encoding of the slot ids appears anywhere in it), so a
+# bar has to be restored from here or it is lost.
 #
 # WHEN: on a confirmed join, from the ONE RCON query the sniffer already makes
 # for the joiner (see RconClient#player_attributes_for, which reads the whole
-# bar). Their in-game bar is the truth:
+# bar and the colour). Their in-game bar is the truth:
 #   * they have one  → snapshot it, which is also how a player who edited
 #     their bar mid-session gets the new one saved;
 #   * they have none but we do → write it back over RCON, then bring the
 #     in-memory cache in line with the game.
 #
+# The COLOUR is snapshot-only. The save does carry it (four f32s in front of
+# the player's name — docs/save/level-dat.md), so the game never loses it and
+# there is nothing to restore; we keep it because it is the one per-player
+# identity that outlives a save and reads in text ("alice, 208,6,0").
+#
 # No RCON, no backup: the event is simply not acted on (client mode, or RCON
 # down), and the file is only read when there is something to restore. Other
 # events (Plugins::Feature) are inherited no-ops.
-class QuickbarBackup
-  FILENAME = 'quickbars.json'
+class PlayerBackup
+  FILENAME = 'players-backup.json'
+  # The quickbar-only file this feature started as; read once, so renaming it
+  # on a live server does not throw away everybody's saved bars.
+  LEGACY_FILENAME = 'quickbars.json'
 
   # `host` is the sniffer (Plugins hands every feature its owner): the two
   # things this one needs are on it, and either may be nil — no RCON, no
@@ -45,37 +58,59 @@ class QuickbarBackup
   # for it.
   def on_join_enriched(name, index, attrs)
     return unless @rcon
+    saved = saved_record(name) # read BEFORE we overwrite anything
+    note_color(name, attrs[:color])
     # nil is the join query's "empty bar" (the payload always carries the
     # key); only :failed, the Lua read raising, means we do not know
     return if attrs[:quickbar] == :failed
     bar = attrs[:quickbar]
-    saved = saved_bar(name)
     if filled?(bar)
-      save(name, bar)
-    elsif saved
-      restore(name, index, saved)
+      save_quickbar(name, bar)
+    elsif saved && filled?(saved['quickbar'])
+      restore(name, index, saved['quickbar'])
     end
   end
 
-  # The saved bar for a name, or nil.
+  # Everything we keep for a name, or nil: {"quickbar" => …, "color" => […]}.
   def [](name)
-    saved_bar(name)
+    saved_record(name)
+  end
+
+  # The saved bar alone (what the quickbar side of this file is for).
+  def saved_bar(name)
+    saved_record(name)&.fetch('quickbar', nil)
   end
 
   private
 
   # ── the name-keyed file ───────────────────────────────────────────
 
-  def saved_bar(name)
+  # One copy per field: the caller keeps editing what it handed us.
+  def saved_record(name)
     return nil if name.to_s.empty?
-    bar = @mutex.synchronize { bars[name] }
-    bar && copy(bar) # nil for someone we have never seen (copy of nil would
-                     # be [], and [] is truthy)
+    rec = @mutex.synchronize { records[name.to_s] }
+    return nil unless rec.is_a?(Hash) # someone we have never seen (a copy of
+                                      # {} would be truthy)
+    rec.merge('quickbar' => rec['quickbar'] && copy(rec['quickbar']),
+              'color' => rec['color'] && rec['color'].dup)
   end
 
-  def save(name, bar)
+  # The colour the join query reported. The game keeps its own copy (it is in
+  # the save), so this is a snapshot, never a restore.
+  def note_color(name, color)
+    return unless color.is_a?(Array) && color.length == 4
     @mutex.synchronize do
-      bars[name] = copy(bar)
+      rec = (records[name.to_s] ||= {})
+      return if rec['color'] == color.map(&:to_f) # unchanged: no write
+      rec['color'] = color.map(&:to_f)
+      persist
+    end
+  end
+
+  def save_quickbar(name, bar)
+    @mutex.synchronize do
+      rec = (records[name.to_s] ||= {})
+      rec['quickbar'] = copy(bar)
       persist
     end
   end
@@ -96,10 +131,10 @@ class QuickbarBackup
     cells = cells_of(bar)
     done = @rcon.restore_quickbar(name, cells)
     if done == cells.size
-      puts "[quickbar] #{name}: restored #{done} slot(s) from #{QuickbarBackup::FILENAME}"
+      puts "[player-backup] #{name}: restored #{done} slot(s) from #{PlayerBackup::FILENAME}"
     else
       version = @rcon.server_version || 'unknown version'
-      warn "[quickbar] #{name}: restored #{done}/#{cells.size} slot(s) — #{version} rejected the rest?"
+      warn "[player-backup] #{name}: restored #{done}/#{cells.size} slot(s) — #{version} rejected the rest?"
     end
     @player_db&.replace_quickbar(index, bar) # the game now has it; so must the cache
   end
@@ -118,14 +153,25 @@ class QuickbarBackup
 
   # ── state ────────────────────────────────────────────────────────
 
-  def bars
-    @bars ||= load_bars
+  def records
+    @records ||= load_records
   end
 
-  def load_bars
-    return {} unless File.exist?(QuickbarBackup::FILENAME)
-    raw = JSON.parse(File.read(QuickbarBackup::FILENAME))
-    raw.each_with_object({}) { |(name, bar), h| h[name.to_s] = bar if bar.is_a?(Array) }
+  # Reads the current file, or — when it does not exist yet — the
+  # quickbar-only file this feature used to be, so a rename on a live server
+  # keeps every saved bar.
+  def load_records
+    out = {}
+    [FILENAME, LEGACY_FILENAME].each do |file|
+      next unless File.exist?(file)
+      JSON.parse(File.read(file)).each do |name, rec|
+        next unless rec.is_a?(Array) || rec.is_a?(Hash)
+        rec = { 'quickbar' => rec } if rec.is_a?(Array) # the legacy shape
+        out[name.to_s] = rec.select { |k, _v| k == 'quickbar' || k == 'color' }
+      end
+      break unless out.empty?
+    end
+    out
   rescue JSON::ParserError, SystemCallError
     {} # corrupt or unreadable: start empty, the next join with a bar refills it
   end
@@ -134,11 +180,11 @@ class QuickbarBackup
   # players-cache.json: a crash mid-write must not leave a file that would
   # then be read back as "this player's bar is empty".
   def persist
-    path = QuickbarBackup::FILENAME
+    path = FILENAME
     tmp = "#{path}.tmp"
-    File.write(tmp, JSON.pretty_generate(bars))
+    File.write(tmp, JSON.pretty_generate(records))
     File.rename(tmp, path)
   rescue StandardError => e
-    warn "#{QuickbarBackup::FILENAME} save failed: #{e.class}: #{e.message}"
+    warn "#{FILENAME} save failed: #{e.class}: #{e.message}"
   end
 end

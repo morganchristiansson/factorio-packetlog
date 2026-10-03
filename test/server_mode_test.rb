@@ -41,6 +41,13 @@ class TestServerMode < Minitest::Test
     "\x0d".b + [1234].pack('V') + ('A'.b * 503)
   end
 
+  # A real msg-4 carries a session block between the username and the mod
+  # list: flag 0, a session token (empty on a first join), a client timestamp
+  # (empty too), an 8-byte connection id, then the mod count. Building it here
+  # keeps the fixtures honest about the wire format.
+  MSG4_SESSION = "\x00\x00\x00" + ("\x00" * 8) + "\x00".b
+  def msg4_session = MSG4_SESSION
+
   # Build a C→S heartbeat (msg 6) with a pure-segment closure carrying one
   # input-action segment (e.g. a fragment of a split chat message).
   def build_segment_packet(payload, total:, no:, green:)
@@ -320,14 +327,15 @@ class TestServerMode < Minitest::Test
     # alphabetically (a, c, i, k, n, o — NOT insertion order), which silently
     # broke an order-sensitive regex and starved the agent's stats context.
     attrs = RconClient.parse_player_attrs(
-      "[{\"a\":true,\"c\":true,\"i\":1,\"k\":722,\"n\":\"morganc\",\"o\":7142576},{\"a\":false,\"c\":false,\"i\":2,\"k\":0,\"n\":\"bob\",\"o\":500}]\n"
+      "[{\"a\":true,\"c\":true,\"i\":1,\"k\":722,\"n\":\"morganc\",\"o\":7142576," \
+       "\"y\":{\"a\":1,\"b\":0.686,\"g\":0.529,\"r\":0.163}},{\"a\":false,\"c\":false,\"i\":2,\"k\":0,\"n\":\"bob\",\"o\":500}]\n"
     )
     assert_equal [
       { index: 1, name: 'morganc', connected: true, admin: true, online_time: 7_142_576, afk_time: 722,
-        locale: nil, quickbar: nil },
+        locale: nil, color: [0.163, 0.529, 0.686, 1.0], quickbar: nil },
       { index: 2, name: 'bob', connected: false, admin: false, online_time: 500, afk_time: 0,
-        locale: nil, quickbar: nil },
-    ], attrs, 'parse_player_attrs + afk_time (the all-players dump carries no quickbar)'
+        locale: nil, color: nil, quickbar: nil },
+    ], attrs, 'parse_player_attrs + afk_time + LuaPlayer.color (the all-players dump carries no quickbar)'
     assert_nil RconClient.parse_player_attrs('garbage'), 'non-JSON payload → nil'
 
     # Hard invariant: helpers.write_file must ALWAYS target the server only.
@@ -503,7 +511,8 @@ class TestServerMode < Minitest::Test
       sniffer.instance_variable_set(:@agent, agent)
       ts = 1_700_000_000.0
       # msg 4 ConnectionRequestReplyConfirm — connection attempt with username
-      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') +
+        [5].pack('C') + 'alice' + msg4_session
       sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
       # first C→S heartbeat with a real action → confirm → :joined
       sniffer.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
@@ -525,7 +534,8 @@ class TestServerMode < Minitest::Test
       agent = recording_agent
       sniffer.instance_variable_set(:@agent, agent)
       ts = 1_700_000_000.0
-      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') +
+        [5].pack('C') + 'alice' + msg4_session
       sniffer.send(:process_packet, 1, ts, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
       sniffer.send(:process_packet, 2, ts, CLIENT_IP, SERVER_IP, 34197, 34197, fixture_packet('client_chat_message_0x0b'))
       sniffer.send(:process_packet, 3, ts, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
@@ -624,7 +634,8 @@ class TestServerMode < Minitest::Test
       db2 = PlayerDatabase.new(path)
       db2[1] = {name: 'alice'}
       db2.instance_variable_get(:@players)[2] = { name: "sévérin".b, locale: nil }   # legacy poison
-      db2[1] = {name: 'alice'} # any later mutation persists and sanitizes the whole snapshot
+      db2[3] = {name: 'bob'} # the next REAL mutation persists and sanitizes the whole snapshot
+      # (re-writing an unchanged record is a no-op since the no-op-write guard)
       raw = File.read(path)
       parsed = JSON.parse(raw)
       assert_equal 'sévérin', parsed['2']['name'], 'legacy binary entry sanitized during persistence (no GeneratorError)'
@@ -800,6 +811,29 @@ class TestServerMode < Minitest::Test
     FactorioProtocol.reset_version
   end
 
+  # ── Chat: a '?' in the output means the payload wasn't valid UTF-8 ────
+
+  def test_chat_with_undecodable_bytes_is_forwarded_for_review
+    db = PlayerDatabase.new(nil)
+    db[1] = {name: 'alice'}
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil)
+    sniffer.instance_variable_set(:@player_db, db)
+    unknown = FakePcapWriter.new('unknown.packets.pcap')
+    sniffer.instance_variable_set(:@unknown_writer, unknown)
+    frame = ("\x00" * 14 + 'chat').b
+
+    act = ->(data) { {name: 'write_to_console', game_player: 1, type: 1, data: data} }
+    capture_io { sniffer.send(:log_action, 1.0, act.call("\x04ol\xe1".b), false, raw_frame: frame) }
+    assert_equal 1, unknown.records.size, 'invalid UTF-8 chat forwarded to the unknown-packet corpus'
+
+    # a real question mark is valid UTF-8 and must stay out of the corpus
+    capture_io { sniffer.send(:log_action, 2.0, act.call("\x04what?".b), false, raw_frame: frame) }
+    assert_equal 1, unknown.records.size, 'a real "?" is not a decode failure'
+  ensure
+    sniffer&.instance_variable_get(:@pcap_writer)&.close
+    sniffer&.instance_variable_get(:@unknown_writer)&.close
+  end
+
   # ── Quickbar backup: name-keyed copy, restored into an empty bar ──────
   #
   # Built the way the sniffer builds it — from the list, with an owner — so
@@ -808,7 +842,7 @@ class TestServerMode < Minitest::Test
     host = Object.new
     host.define_singleton_method(:rcon) { rcon }
     host.define_singleton_method(:player_db) { player_db }
-    built = Plugins::PluginSet.new(%w[quickbar_backup], host).features
+    built = Plugins::PluginSet.new(%w[player_backup], host).features
     assert_equal 1, built.size, 'the feature is there'
     built.first
   end
@@ -832,7 +866,7 @@ class TestServerMode < Minitest::Test
     db
   end
 
-  def test_quickbar_backup_snapshots_and_restores
+  def test_player_backup_snapshots_and_restores
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
         rcon, calls = fake_backup_rcon
@@ -843,9 +877,9 @@ class TestServerMode < Minitest::Test
         # a bar in game is the truth: snapshot it, write nothing to the server
         backup.on_join_enriched('alice', 1, quickbar: bar)
         assert_empty calls, 'nothing is written when the bar is already there'
-        saved = JSON.parse(File.read(QuickbarBackup::FILENAME))
-        assert_equal 30, saved['alice'][0][0], 'persisted by NAME, indexed by page/slot'
-        assert_equal bar, backup['alice'], 'and readable back'
+        saved = JSON.parse(File.read(PlayerBackup::FILENAME))
+        assert_equal 30, saved['alice']['quickbar'][0][0], 'persisted by NAME, indexed by page/slot'
+        assert_equal bar, backup['alice']['quickbar'], 'and readable back'
 
         # a new save: a fresh instance (restart) reads the same file, and she
         # joins with an empty bar → put the saved one back
@@ -868,25 +902,25 @@ class TestServerMode < Minitest::Test
     end
   end
 
-  def test_quickbar_backup_needs_rcon_and_survives_a_corrupt_file
+  def test_player_backup_needs_rcon_and_survives_a_corrupt_file
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
         rcon, = fake_backup_rcon
         backup = build_backup(rcon: rcon)  # the build requires the feature file
-        File.write(QuickbarBackup::FILENAME, '{broken')
+        File.write(PlayerBackup::FILENAME, '{broken')
         backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30))
-        assert_equal 30, JSON.parse(File.read(QuickbarBackup::FILENAME))['alice'][0][0],
+        assert_equal 30, JSON.parse(File.read(PlayerBackup::FILENAME))['alice']['quickbar'][0][0],
                      'a corrupt file reads as empty and the next join rewrites it'
 
         # no RCON (client mode, or RCON down): the event is a no-op
-        before = File.read(QuickbarBackup::FILENAME)
+        before = File.read(PlayerBackup::FILENAME)
         build_backup.on_join_enriched('alice', 1, quickbar: nil)
-        assert_equal before, File.read(QuickbarBackup::FILENAME), 'no restore without a client to ask'
+        assert_equal before, File.read(PlayerBackup::FILENAME), 'no restore without a client to ask'
       end
     end
   end
 
-  def test_quickbar_backup_reports_a_partial_restore
+  def test_player_backup_reports_a_partial_restore
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
         rcon, = fake_backup_rcon(version: '2.1.11', written: 1) # 2 asked, 1 written
@@ -896,6 +930,40 @@ class TestServerMode < Minitest::Test
         _, err = capture_io { backup.on_join_enriched('alice', 1, quickbar: nil) }
         assert_includes err, 'restored 1/2 slot(s)', 'a partial restore is reported, not swallowed'
         assert_includes err, '2.1.11', 'and names the version, which decides the setter shape'
+      end
+    end
+  end
+
+  # The colour rides along on the same join query and is snapshot-only (the
+  # save keeps the game's own copy), stored beside the bar under one name.
+  def test_player_backup_snapshots_the_colour_beside_the_bar
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        rcon, calls = fake_backup_rcon
+        backup = build_backup(rcon: rcon)
+        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
+        backup.on_join_enriched('alice', 1, quickbar: bar, color: [0.815, 0.024, 0.0, 0.5])
+        saved = JSON.parse(File.read(PlayerBackup::FILENAME))['alice']
+        assert_equal bar, saved['quickbar']
+        assert_equal [0.815, 0.024, 0.0, 0.5], saved['color']
+
+        assert_empty calls, 'the colour is never restored — the save has it'
+
+        # the quickbar-only file this feature used to be is still read
+        File.delete(PlayerBackup::FILENAME)
+        File.write(PlayerBackup::LEGACY_FILENAME, JSON.generate('bob' => bar))
+        fresh = build_backup(rcon: rcon)
+        assert_equal bar, fresh['bob']['quickbar'], 'a rename does not lose saved bars'
+        fresh.on_join_enriched('bob', 2, quickbar: nil)
+        assert_equal 1, calls.size, 'and the legacy bar restores as before'
+
+        # an unchanged colour does not rewrite the file. A join with a bar
+        # re-snapshots it by design, so probe with an empty bar.
+        build_backup(rcon: rcon).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
+        before = File.mtime(PlayerBackup::FILENAME)
+        sleep 0.02 # mtime resolution
+        build_backup(rcon: rcon).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
+        assert_equal before, File.mtime(PlayerBackup::FILENAME)
       end
     end
   end
@@ -974,7 +1042,8 @@ class TestServerMode < Minitest::Test
 
     output, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
       s.instance_variable_set(:@rcon, rcon)
-      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') + [5].pack('C') + 'alice'
+      msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') +
+        [5].pack('C') + 'alice' + msg4_session
       s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, msg4)
       s.send(:process_packet, 2, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197,
              fixture_packet('client_chat_message_0x0b'))

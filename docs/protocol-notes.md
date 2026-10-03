@@ -136,13 +136,53 @@ per player in `players-cache.json` as `quickbar` — a fixed 10×10 array
 (`QUICKBAR_PAGES` rows × `QUICKBAR_SLOTS` slots) of item prototype ids, `null`
 for empty/unknown — plus `quickbar_page`.
 
-**Backup across saves (`quickbar_backup` plugin).** The cache above is
+**Backup across saves (`player_backup` plugin).** The cache above is
 per-savefile — game indexes reset with the save — so the optional
-`quickbar_backup` feature keeps a NAME-keyed copy in `quickbars.json` and, on
+`player_backup` feature keeps a NAME-keyed copy in `players-backup.json`
+(the quickbar plus that player's colour) and, on
 a join whose in-game bar is empty, writes it back with
 `set_quick_bar_slot` (2.0 `(index, item)`, 2.1 `(page, slot, filter)`). The
 feature is a module mixed in by the plugin manager — see
-`lib/quickbar_backup.rb` and the `on_join_enriched` seam.
+`lib/player_backup.rb` and the `on_join_enriched` seam.
+
+**Protocol version comes from the connection request.** `msg 2`
+(ConnectionRequest, C→S, 14 bytes) carries the version the client
+advertises — `FactorioProtocol.detect_version(udp)` returns e.g.
+`"2.0.77 (build 19003)"` straight off the wire, no RCON needed. The sniffer
+reads it on the first msg 2 and selects the matching action tables
+(`select_version`: 2.0 → `ACTIONS_20` + `SEGMENT_TYPES_20` + `C2S_LENS_20`,
+2.1+ → `ACTIONS`), so **pcap mode and client mode decode correctly** — the
+IDs are version-dependent (2.0 `build`=66, 2.1 `build`=68). Precedence:
+`--protocol-version` > RCON `helpers.game_version` > the connection request.
+Do NOT decode a 2.0 capture with the default tables: it names 9.4% of the
+actions `Unknown(n)` and, worse, mis-reads their payload lengths (68k
+phantom actions in one sweep). The summary's `undecoded actions:` line is
+the standing measure of how much of the action space is still unidentified.
+
+**A truncated varint read must not return a nil offset** (found on a real
+380-byte heartbeat, flags 0x26): the heartbeat parser does `offset = v_off`
+and walks from there, so `[nil, nil]` out of bounds raised `NoMethodError`
+mid-packet instead of failing the read. `WireDecode#decode_uint32v` now pins
+the old contract (`[offset + 1, nil]`) — all 497,203 heartbeats in the
+capture set parse without raising.
+
+**Locale: NOT FOUND on the wire (that is not the same as "not there").** The
+client can only learn the server's players' languages if the client sends
+them, so they must arrive somehow — we have not found how. Every place
+`p.locale` comes from
+is server-side: RCON (`player_attributes_for`), the server's account/auth
+state, or the save (290 of 338 records in ours — `docs/save/level-dat.md`).
+Scanning all 380 MB of captures for every multi-char locale code (zh-CN,
+pt-BR, es-ES, zh-TW, sv-SE) finds **zero** hits, and the C→S handshake
+(msg 2, 14 bytes) carries no text at all — so the client does not announce its
+language in a form we can read, and a joining client never learns another
+player's. (A 2-letter code like `de` is useless as a search key: it matches
+`default`, `mod-loaders`, … thousands of times.) Consequence for client mode:
+the locale of players already in the game comes from the map download's save,
+not from the packets. The server must learn it from its account state, not
+from the join packet — the join payload we can see (msg 4, username + an
+8-byte token + the client's mod list and settings, which arrives in several
+~500-byte packets and is otherwise undecoded) holds no locale text.
 
 **Join-time refresh (RCON).** The C→S actions only ever report the quickbar as
 deltas, so on a player's first confirmed heartbeat the sniffer asks the server
@@ -333,9 +373,51 @@ heartbeats (0x40 bit) are skipped (a fragment is not a full message).
 
 A modded client's ConnectionRequestReplyConfirm carries its mod
 list/settings blob (KBs, so every client runs the same deterministic
-sim) and arrives as frags 0..N (~500B chunks, one message_id). Only
-frag 0 holds the leading fields (username); frags 1+ are mid-blob
-slices. Parsing them as whole messages decoded mod text (tech
+sim) and arrives as frags 0..N. Only frag 0 holds the leading fields
+(username); frags 1+ are mid-blob slices.
+
+**How it splits (measured over 25 captures).** It is the PAYLOAD SIZE that
+decides, not the mod count — the settings blob counts too. Whole messages
+arrive up to **343 bytes**; past that the game splits into **508-byte
+chunks** (no fragment is ever larger), 3..6 fragments for our players,
+**1245..2931 bytes** of payload per message. So yes: a player with a huge
+mod list gets a bigger, more fragmented msg 4 — and so does a player with
+few mods and enormous mod settings. `frag_number` orders the pieces and
+the `0x80` flag marks the last one.
+
+**Do NOT group fragments by message_id**: it is `2` for EVERY msg 4 (all
+407 fragmented packets in the captures), so it identifies the message TYPE,
+not the message. Order by `frag_number` until the `0x80` last-frag flag:
+`FactorioProtocol.reassemble_fragments` does exactly that (and
+`FactorioProtocol::GAME_INFO_REQUEST` builds the one-byte msg 16 that starts
+the probe) — the wire format lives with the rest of it on FactorioProtocol,
+and `lib/server_probe.rb` (`FactorioServerProbe`) is left with sockets, timeouts
+and threads — the transport only.
+
+The other fragmenting message is msg 17 (GameInformationRequestReply): it
+splits the same way on a big server (its 505-mod count is the
+`FF F9 01 00 00` uint32v escape `parse_game_info` notes) and comes from a
+server you never joined, so it is a separate path — a direct UDP query of one
+address (`tools/query_server.rb`), never a session message. It appears in
+NONE of the 25 game-session captures, which is the check that settles where
+it belongs.
+
+**Why the capture is C→S only (server mode).** The sniffer records incoming
+packets only, and that is deliberate: with ~10 clients connected the S→C side
+is mostly N identical copies of the same broadcast plus the map download, and
+**everything we decode arrives C→S** — the join, every input action, chat, the
+transfer-block requests. S→C only adds the bytes we already reconstruct from
+C→S (the map download is *requested* by the client in msg 12 and served in
+msg 13, which a client-mode capture does see). So the S→C gap costs
+duplicates, not information. What we cannot see this way: the server's own
+replies (msg 5 peer list, msg 10, msg 17) — which are answered from the other
+side of the connection anyway.
+
+**Not the browser.** The in-game server browser is the HTTPS matchmaking API
+(`https://multiplayer.factorio.com/get-games`, `FactorioMatchmaking` in
+`lib/matchmaking.rb`); msg 16/17 is the per-server UDP probe the game does
+when it talks to a server directly (and that `tools/query_server.rb` does).
+Two different paths, two different files. Parsing them as whole messages decoded mod text (tech
 prerequisites, research triggers, spawn weights) as phantom "usernames"
 — one real "morganc connected" plus 4-5 phantom "X connected" lines in
 the same millisecond, last-write-wins @ip_names, and the first heartbeat
@@ -343,6 +425,119 @@ bound a phantom as the game player (players-cache.json "1" = log-like text).
 Fix: parse_udp_payload skips frag_number > 0 (header only); frag 0
 parses as before. Proof: captures/server-34197-20260910-205559.pcap
 pkts 34154-34159, saved as test/fixtures/frag_confirm_{0..5}.bin.
+
+**The mod list and settings decode — from the reassembled message.** Past the
+username, frag 0
+carries, in order:
+
+```
+client_id(4) server_id(4) instance_id(4)  username
+11 bytes  (`00 00 00` + an 8-byte token)
+[u8 count] mod*      mod := [len]name + u16 version + u32 crc + u8 ?
+settings: `05 00` + u32 count + entries
+entry   := `00` [len]key value
+value   := `03 00 00` [len]bytes | `01 00 00` [byte] | `05 00` …(a table)
+```
+
+**A client joins TWICE, and the second carries an auth session.** Between the
+username and the mod list sits:
+
+```
+0x00                  flag (always 0 across 90 joins)
+[len] ascii           session token — 24 chars of base64, EMPTY on the first join
+[len] ascii           client clock  "260925030027" = 2026-09-25 00:51:06 (matches the
+                      capture to the second), EMPTY on the first join
+8 bytes               a per-connection id (stable per client across its two joins)
+[u8 count] mods …
+```
+
+Both joins arrive with their own client id (msg 2 carries a fresh one each
+time): the first is the LAN / pre-auth attempt, the second adds the token the
+client got from the auth service.
+
+The server log confirms the sequence and names the refusals — one line per
+attempt:
+
+```
+ConnectionRequestReplyConfirm … from(IP ADDR:({<peer-ip>:<port>}))
+Refusing connection for address …, username (<player>). UserVerificationMissing   ← attempt 1, no token
+ConnectionRequestReplyConfirm … from(IP ADDR:({<peer-ip>:<port>}))
+Refusing connection for address …, username (<player>). ModsMismatch             ← attempt 2, wrong mod list
+… Replying to connectionRequest for address …                                    ← attempt 3, accepted
+  ServerMultiplayerManager.cpp: Serving map(/…/mp-save-8.zip) size(29154547) auxiliary(1178) crc(<crc>)
+```
+
+(Names and addresses redacted — log excerpts in these notes never carry
+them.)
+
+Two consequences for us:
+
+- **A msg 4 in a capture is not necessarily a join.** Up to three appear per
+  player, and only the last is accepted. (Our join path keys on msg 4 + the
+  first action-bearing heartbeat, i.e. the accepted attempt, so it is already
+  on the right one.)
+- **The served map carries a size and a CRC32** — `size(29154547) crc(…)`.
+  That is a free end-to-end check for the map-download reassembly
+  (lib/map_download.rb): reassemble the client's msg-13 stream, and the zip's
+  size and `Zlib.crc32` must equal the log line's. Not yet wired: our capture
+  set is server-side, so it has no downloads in it — it needs one client-mode
+  capture to be worth asserting. **That is where an account is identified** —
+the server has a token, not a locale — and `FactorioWire`'s string reader
+needed `allow_empty:` for it, since an empty token is a normal value, not a
+misdecode.
+
+**Mod names are arbitrary client-side strings.** morganc's join carries
+`EverythingOnNauvis-morganc` — his own fork of "Everything on Nauvis" on the
+mod portal (mods.factorio.com/mod/EverythingOnNauvis-morganc, 349 users), not
+a per-player copy the server generates. So a mod name can happen to contain a
+player's name, the list is whatever *that client* has installed (order
+included), and the settings blob is that client's own `mod-settings.dat`
+startup section. Nothing here keys on a mod name being shared, and nothing
+should.
+
+The mod framing is the same one msg 17 (GameInformationRequestReply) and the
+save header use, and the settings blob is **PropertyTree** — the
+`mod-settings.dat` format, i.e. the client ships its own settings file contents
+inside msg 4. The spec and a reference implementation are pinned by the
+server's `tools/sync-mod-settings` (whitequark/factorio-data-codec, cached at
+`.cache/factorio-data-codec/factorio_data.py`); `lib/factorio_property_tree.rb`
+implements it:
+
+```
+value := [type u8][any_type u8][payload]      0 null  1 bool(1B)  2 number(f64)
+                                            3 string  4 list     5 dictionary
+                                            6 signed(i64)       7 unsigned(u64)
+key   := [0|1][len u8 (0xFF then u32 LE)][bytes]   0 = present
+```
+
+Getting there took the spec: the obvious reading (a u32 type word) is one byte
+off, and a reader that assumes the wrong one silently eats the next key's
+length byte as a value length. Verified end to end on morganc's real join —
+all 10 settings decode and the walk lands on the **exact end** of the 2629-byte
+message, so msg 4 is now fully accounted for: ids, username, the token field,
+11 mods, 2368 bytes of settings, nothing left over. Verified against morganc's real join
+(`test/fixtures/frag_confirm_{0..5}.bin`, reassembled: 11 mods — `base 0.2`,
+`AutoDeconstruct 0.1`, … `RateCalculator 3.3`, `space-age 0.2` — then the
+settings table, whose first entry is
+`eon-remove-space-platform-restrictions = eon-holmium-ore`). A setting value is
+FOUR header bytes plus its payload: a 0/1 byte for a boolean/enum, or a
+LENGTH for an item prototype name (`01 00 00 00 0f "eon-holmium-ore"`) — the
+form `FactorioSave.setting_value` reads. The settings table is the **LuaValue serialization** the
+save uses for every Lua table — hence `FactorioSave.lua_value`, shared by
+the save reader and this packet (`lib/factorio_save.rb`, worked example and
+tests there). Note the asymmetry: a table is the two-byte `05 00` prefix,
+while a scalar's four bytes are a u32 packing the type in the low byte and
+its payload (a string's LENGTH) in the high one — `03 00 00 0c` is the
+12-byte string "default-bold".
+
+Verified end to end: a client's frag 0 walks its mod list exactly (16 mods
+with versions, e.g. `base 0.2`, `squeak-through-2 1.0`) and its settings
+(`damage-indicator-font-family = {value = "default-bold"}`). What is NOT
+complete: msg 4 arrives in up to 6 fragments and nothing reassembles them,
+so a big loadout is cut at the fragment edge — `ConnectionConfirmPacket`
+reports `mods_truncated` / `settings_truncated` (position, not a guess).
+Message-level reassembly is the missing piece; per-mod trailing byte (0 for
+some mods, >0 for others) is unidentified.
 
 ## open_gui (type 5) — server echo 14 bytes / client 8 bytes
 

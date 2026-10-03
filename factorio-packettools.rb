@@ -17,6 +17,9 @@ end
 #   Live capture: sudo ruby factorio-packettools.rb
 #   Server mode:  sudo ruby factorio-packettools.rb          (auto-detects IP/port/interface from the running factorio process)
 #   Pcap analysis: ruby factorio-packettools.rb -r capture.pcap
+#                    ruby factorio-packettools.rb -r captures/*.pcap   (a whole
+#                    set in ONE process — repeat -r, or let the shell expand the
+#                    glob after a single -r; state carries across files)
 #   Player cache (hardcoded): players-cache.json next to the process cwd
 #   Capture: always on for live capture — auto-named captures/server-<port>-<ts>.pcap
 #     (server), latest file is the live one, rotation + retention always on
@@ -32,12 +35,14 @@ end
 #   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY,
 #   FACTORIO_USERNAME, FACTORIO_TOKEN
 
+require 'rbconfig'
 require_relative 'lib/server_detect'
 require_relative 'lib/factorio_protocol'
 require_relative 'lib/item_db'
 require_relative 'lib/player_db'
 require_relative 'lib/pcap'
 require_relative 'lib/live_capture'
+require_relative 'lib/map_download'
 require_relative 'lib/rcon_client'
 require_relative 'lib/plugins'
 require_relative 'lib/factorio_packet_tools'
@@ -162,14 +167,25 @@ if __FILE__ == $PROGRAM_NAME
     opts.banner = "Usage: #{$PROGRAM_NAME} [options]"
     opts.separator ''
     opts.separator 'Capture sources (specify one):'
-    opts.on('-r', '--read PCAP', 'Read from pcap file') { |v| options[:pcap] = v }
+    opts.on('-r', '--read PCAP', 'Read from pcap file (repeatable)') do |v|
+      (options[:pcaps] ||= []) << v
+      options[:pcap] ||= v # first one: the pcap-read path is what everything else keys off
+    end
     opts.separator ''
     opts.on('--list-interfaces', 'List available network interfaces') { |v| options[:list_interfaces] = v }
     opts.on('-h', '--help', 'Show help') { puts opts; exit }
   end
 
   op.parse!
-
+  options[:pcaps] ||= []
+  # `-r a.pcap b.pcap c.pcap` (a shell glob) as well as repeated -r: -r takes
+  # the first path, the rest are left over.
+  options[:pcaps].concat(ARGV) unless ARGV.empty?
+  ARGV.clear
+  options[:pcaps] = [options[:pcap]] if options[:pcaps].empty? && options[:pcap]
+  # One process for the whole set: N captures cost N Ruby startups otherwise
+  # (~0.3s each, and 460 of the files in captures/ are 24-byte unknown-packets
+  # debris).
 
 
   # Auto-enable server mode: when no explicit mode was chosen (no server config,

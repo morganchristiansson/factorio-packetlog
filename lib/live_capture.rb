@@ -3,7 +3,7 @@
 # Live Capture (pcaprub)
 # ─────────────────────────────────────────────────────────────────────
 class LiveCapture
-  def initialize(interface:, port:, bpf: nil, transfer_block_sink: nil)
+  def initialize(interface:, port:, bpf: nil, transfer_block_sink: nil, transfer_block_hook: nil)
     @interface = interface
     @port = port
     @bpf = bpf || (port ? "udp port #{port}" : 'udp')
@@ -12,6 +12,23 @@ class LiveCapture
     # frames are written straight here (e.g. the pcap writer) and skipped
     # from the parse pipeline entirely.
     @transfer_block_sink = transfer_block_sink
+    # Optional hook called with (block number, 503-byte payload) per
+    # TransferBlock — live map-download reassembly (MapDownload). Runs on
+    # this thread, so it must stay trivial (see MapDownload#add_block).
+    @transfer_block_hook = transfer_block_hook
+  end
+
+  # Ethernet+IPv4 frame -> [block number, payload] of a map-download
+  # TransferBlock (msg 13: `[u8 msg][u32 block][503 bytes]`), or nil. Split
+  # out of the capture fast path so the offsets can be tested without a live
+  # capture, and so the reassembler never sees the framing.
+  def self.transfer_block(frame)
+    return nil if frame.bytesize < 42
+    ihl = (frame.getbyte(14) & 0x0F) * 4
+    udp = 22 + ihl
+    return nil unless (frame.getbyte(udp) & 0x1F) == 13
+    return nil if frame.bytesize <= udp + 5
+    [frame.unpack1('V', offset: udp + 1), frame.byteslice(udp + 5, frame.bytesize - udp - 5).to_s]
   end
 
   def self.list_interfaces
@@ -76,9 +93,9 @@ class LiveCapture
       # all — persist the frame if saving and skip the full yield/parse
       # pipeline (the bottleneck that overflowed the buffer before).
       if (pkt.getbyte(14 + ihl + 8) & 0x1F) == 13
-        if @transfer_block_sink
-          @transfer_block_sink.write_frame(pkt)
-        end
+        @transfer_block_sink&.write_frame(pkt)
+        block = LiveCapture.transfer_block(pkt) if @transfer_block_hook
+        @transfer_block_hook&.call(*block) if block
         next
       end
 
@@ -98,8 +115,9 @@ class LiveCapture
       ts = Time.now.to_f
       pkt_num += 1
       yield(pkt_num, ts,
-            raw[12..15].bytes.join('.'),
-            raw[16..19].bytes.join('.'),
+            # 4.5x faster than raw[..].bytes.join('.') — twice per packet
+            "#{raw.getbyte(12)}.#{raw.getbyte(13)}.#{raw.getbyte(14)}.#{raw.getbyte(15)}",
+            "#{raw.getbyte(16)}.#{raw.getbyte(17)}.#{raw.getbyte(18)}.#{raw.getbyte(19)}",
             sport, dport, udp_data, pkt)
 
       # Surface capture loss early (report when it jumps by >= 1000)

@@ -30,9 +30,11 @@ class RconClient
   # ~50 players.
   PLAYER_ATTRS_FILENAME = 'factorio-packettools-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
-    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
+    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
+     'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
-    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale} end rcon.print(helpers.table_to_json(t))'
+    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
+     'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end rcon.print(helpers.table_to_json(t))'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -48,7 +50,7 @@ class RconClient
 
   # Parse a player-attributes payload into
   # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:,
-  #   quickbar:}]. Returns nil when the payload isn't one. A truncated
+  #   color:, quickbar:}]. Returns nil when the payload isn't one. A truncated
   # payload (rcon.print cap) parses as a partial list. `quickbar` is only in
   # the join-time query's payload (see #player_attributes_for); nil for the
   # all-players dump.
@@ -73,8 +75,19 @@ class RconClient
         online_time: r['o'].to_i,
         afk_time: r['k'].to_i,
         locale: r['l']&.to_s,
+        color: parse_color(r['y']),
         quickbar: r.key?('q') ? (r['q'] == false ? :failed : PlayerDatabase.parse_quickbar(r['q'])) : nil }
     end
+  end
+
+  # LuaPlayer.color -> [r, g, b, a] floats 0..1, rounded so the cache file
+  # round-trips unchanged. nil when the payload has no color (an older query
+  # shape, or a truncated read).
+  def self.parse_color(c)
+    return nil unless c.is_a?(Hash)
+    rgba = %w[r g b a].map { |k| c[k] }
+    return nil unless rgba.all? { |v| v.is_a?(Numeric) }
+    rgba.map { |v| v.to_f.round(4) }
   end
 
   # Parse the rcon.print body as JSON (helpers.table_to_json output).
@@ -161,7 +174,8 @@ class RconClient
       "#{loop_lua} end " \
       'local okq=p and pcall(read) ' \
       'rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,' \
-      'o=p.online_time,k=p.afk_time,l=p.locale,q=okq and q or false}) or "nil") end'
+      'o=p.online_time,k=p.afk_time,l=p.locale,y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a},' \
+      'q=okq and q or false}) or "nil") end'
   end
 
   # Set a player's quickbar cells: `cells` is {flat slot index => item id}

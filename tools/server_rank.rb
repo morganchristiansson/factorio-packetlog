@@ -4,7 +4,7 @@
 # Wube's API.
 #
 # Seed once from the matchmaking API (cached at ~/.cache/factorio-server-list.json),
-# then refresh counts directly from the servers over UDP (ServerQuery).
+# then refresh counts directly from the servers over UDP (FactorioServerProbe).
 # Cache hits mean zero official-API traffic. `--say` prints in-game via RCON.
 #
 # Usage:
@@ -16,10 +16,9 @@
 $LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 require 'optparse'
 require 'matchmaking'
-require 'server_query'
+require 'server_probe'
 
 # Keep the historical top-level helper while sharing the implementation.
-def strip_tags(s) = ServerQuery.strip_tags(s)
 
 def player_count(s)
   (s['players'] || []).length
@@ -42,16 +41,16 @@ def rank_report(sorted, top:, match: nil, live: {}, pool: nil)
   lines = sorted.first(top).each_with_index.map do |s, i|
     n = live.fetch(s['host_address'], player_count(s))
     extra = live.key?(s['host_address']) ? (n.nil? ? ' (offline?)' : " (live: #{n})") : ''
-    "##{i + 1} #{strip_tags(s['name'])} — #{n || player_count(s)} players (#{s.dig('application_version', 'game_version')}#{', 🔒' if s['has_password']}) @ #{s['host_address']}#{extra}"
+    "##{i + 1} #{FactorioProtocol.strip_markup(s['name'])} — #{n || player_count(s)} players (#{s.dig('application_version', 'game_version')}#{', 🔒' if s['has_password']}) @ #{s['host_address']}#{extra}"
   end
   if match
-    hits = pool.each_with_index.select { |s, _| strip_tags(s['name']).downcase.include?(match.downcase) }
+    hits = pool.each_with_index.select { |s, _| FactorioProtocol.strip_markup(s['name']).downcase.include?(match.downcase) }
     if hits.empty?
       lines << "No server matching #{match.inspect} in list (#{sorted.length} servers)."
     else
       hits.each do |s, i|
         n = live.fetch(s['host_address'], player_count(s))
-        lines << "=> #{strip_tags(s['name'])} is ##{i + 1} with #{n.nil? ? player_count(s) : n} players @ #{s['host_address']}#{', 🔒' if s['has_password']}#{' (live)' if live.key?(s['host_address']) && !n.nil?}."
+        lines << "=> #{FactorioProtocol.strip_markup(s['name'])} is ##{i + 1} with #{n.nil? ? player_count(s) : n} players @ #{s['host_address']}#{', 🔒' if s['has_password']}#{' (live)' if live.key?(s['host_address']) && !n.nil?}."
       end
     end
   end
@@ -64,7 +63,7 @@ end
 # exact version); --all-versions keeps the global list. Returns [version, note].
 def resolve_version(list, server:, version:, all_versions:)
   return [version, nil] if version || all_versions || server.nil?
-  hit = ranked_servers(list, include_locked: true).find { |s| strip_tags(s['name']).downcase.include?(server.downcase) }
+  hit = ranked_servers(list, include_locked: true).find { |s| FactorioProtocol.strip_markup(s['name']).downcase.include?(server.downcase) }
   hit ? [hit.dig('application_version', 'game_version'), "(#{hit.dig('application_version', 'game_version')} servers only)"] : [nil, nil]
 end
 
@@ -83,7 +82,7 @@ if $PROGRAM_NAME == __FILE__
     o.on('--reseed', 'force fresh API seed, rewrite cache') { opts[:reseed] = true }
     o.on('--interactive', 'prompt for row numbers to expand details via UDP (implies --live)') { opts[:interactive] = true; opts[:live] = true }
   end.parse!
-  list = Matchmaking.seed(reseed: opts[:reseed])
+  list = FactorioMatchmaking.seed(reseed: opts[:reseed])
   version, note = resolve_version(list, server: opts[:server], version: opts[:version], all_versions: opts[:all_versions])
   in_scope = version ? list.select { |s| (gv = s.dig('application_version', 'game_version')) && (gv == version || gv.start_with?("#{version}.")) } : list
   hidden = opts[:include_locked] ? 0 : in_scope.count { |s| s['has_password'] }
@@ -95,10 +94,10 @@ if $PROGRAM_NAME == __FILE__
               sorted.map { |s| s['host_address'] }.compact.uniq
             else
               shown = sorted.first(opts[:top])
-              shown += pool.select { |s| strip_tags(s['name']).downcase.include?(opts[:server].downcase) } if opts[:server]
+              shown += pool.select { |s| FactorioProtocol.strip_markup(s['name']).downcase.include?(opts[:server].downcase) } if opts[:server]
               shown.map { |s| s['host_address'] }.compact.uniq
             end
-    live = ServerQuery.refresh_counts(addrs)
+    live = FactorioServerProbe.refresh_counts(addrs)
     # Purely live ranking on full refresh: re-sort by live counts (nil keeps snapshot).
     sorted = sorted.sort_by { |s| -(live.fetch(s['host_address'], player_count(s)) || player_count(s)) } if opts[:refresh_all]
   end
@@ -110,7 +109,7 @@ if $PROGRAM_NAME == __FILE__
     by_rank = {}
     sorted.each_with_index { |s, i| by_rank[i + 1] = s }
     if opts[:server]
-      pool.each_with_index.select { |s, _| strip_tags(s['name']).downcase.include?(opts[:server].downcase) }
+      pool.each_with_index.select { |s, _| FactorioProtocol.strip_markup(s['name']).downcase.include?(opts[:server].downcase) }
             .each { |s, i| by_rank[i + 1] = s }
     end
     loop do
@@ -122,8 +121,8 @@ if $PROGRAM_NAME == __FILE__
         puts 'no such row'
         next
       end
-      info = ServerQuery.info(s['host_address'])
-      puts(info.nil? ? "#{s['host_address']}: no reply" : ServerQuery.format_info(info))
+      info = FactorioServerProbe.info(s['host_address'])
+      puts(info.nil? ? "#{s['host_address']}: no reply" : FactorioServerProbe.format_info(info))
     end
   end
   if opts[:say]

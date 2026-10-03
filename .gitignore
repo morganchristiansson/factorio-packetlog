@@ -6,6 +6,13 @@ config*.yaml
 captures/
 logs/
 
+# Downloaded saves (40+ MB; recover the roster from them, don't commit them)
+*.zip
+# Server truth dumps pulled for format work (RCON console output)
+truth.txt
+pos.txt
+mod-settings.dat
+
 # Runtime state
 players-cache.json
 players-locale.json
@@ -25,3 +32,12 @@ memories/
 
 # stray session tmp files
 .tmp
+
+# scratch/ — pulled from the live server for format work (the save, the
+# client's mod settings, the RCON console truth dumps) and other throwaway
+# artefacts. Nothing in the repo reads it; nothing in it belongs in git.
+scratch/
+
+# editor scratch
+*.kate-swp
+tmp.txt

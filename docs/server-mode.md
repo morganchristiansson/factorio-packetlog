@@ -156,7 +156,7 @@ Ctrl-C needed) to filter the console output:
 /stats                     session summary
 /locales                   list per-player language overrides
 /locales NAME en,pt        set a player's languages (e.g. pt-BR interface
-                           but actually English: /locales KrlosUltimate en,pt)
+                           but actually English: /locales somePlayer en,pt)
 /locales NAME -            clear a player's languages
 /help                      list commands
 ```

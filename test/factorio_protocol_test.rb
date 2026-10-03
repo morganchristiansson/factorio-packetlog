@@ -735,4 +735,22 @@ class TestFactorioProtocol < Minitest::Test
     hb = result[:heartbeat]
     hb[:tick_closures]&.flat_map { |tc| tc[:actions] } || []
   end
+
+  # A truncated varint read must not hand the caller a nil offset: the
+  # heartbeat parser does `offset = v_off` and then walks from there, so a nil
+  # raises NoMethodError mid-packet instead of failing the read. Found on a real
+  # heartbeat (2.0.77, 380 B, flags 0x26) — the kind that arrives when a
+  # client's action list runs past the packet.
+  def test_a_truncated_varint_read_keeps_a_usable_offset
+    klass = Class.new do
+      include FactorioProtocol::WireDecode
+    end.new
+    data = "\x26\x06\xfc\x51\xee\x1d".b
+    after, value = klass.decode_uint32v(data, data.bytesize - 1)
+    assert_equal data.bytesize, after, 'the offset stays usable'
+    assert_nil value
+    # and the packet that triggered it parses without raising
+    payload = ("\x26\x06\xfc\x51\xee\x1d\x41\x55\x60\x06\x00\x00\x00\x00\x00\x05\xf0\xba\x05\x10fluid-name.water\x01\x00\x05\xc3\x81").b
+    refute_raises(NoMethodError) { FactorioProtocol.parse_udp_payload(payload) }
+  end
 end

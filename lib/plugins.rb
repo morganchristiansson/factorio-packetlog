@@ -5,7 +5,7 @@
 # and a name in it is a file plus a class whose CamelCase name the convention
 # derives. One Plugins object per owner, holding that owner's list.
 #
-#     quickbar_backup   lib/quickbar_backup.rb → QuickbarBackup
+#     player_backup     lib/player_backup.rb → PlayerBackup
 #     compaction        lib/hivemind_compaction.rb → HivemindCompaction
 #
 # An owner can group its features, so they keep their family of files and

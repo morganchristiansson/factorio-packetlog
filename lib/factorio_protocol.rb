@@ -527,9 +527,57 @@ ACTIONS = {
     hdr
   end
 
-  # ── Length-Prefixed String ─────────────────────────────────────────
+  # Length-prefixed strings are decoded by WireDecode#decode_string, which is
+  # the shared FactorioWire reader (same `[length][bytes]` shape, no
+  # terminator on the wire) — see lib/factorio_wire.rb.
 
-  # [uint32v len][bytes] — returns [next_offset, string] or [nil, nil]
+  # Factorio rich text ([color=…], [img=…], [entity=…], [virtual-signal=…])
+  # → plain text. A LocalisedString concern, next to decode_localized_string
+  # above: server descriptions and game names arrive as markup.
+  def self.strip_markup(s)
+    s.to_s.gsub(/\[[^\]]*\]/, '').strip.squeeze(' ')
+  end
+
+  # ── Fragmented messages ──────────────────────────────────────────
+
+  # A big message is split into UDP payloads: the 0x40 flag, a frag_number and
+  # the 0x80 flag on the last one (see parse_network_header). Two messages in
+  # our captures do this: a modded client's msg 4 (its mod list + settings,
+  # split past ~343 bytes of payload into 508-byte chunks) and the msg 17
+  # GameInformationReply a server sends when asked (a 505-mod server splits
+  # too). Order the fragments by frag_number and concatenate the payloads.
+  #
+  # NOTE: message_id does NOT identify a message — it is 2 for EVERY msg 4
+  # (all 407 fragmented packets in the captures), so it identifies the message
+  # TYPE. Key the fragments by their source and their arrival, not by it.
+  #
+  # frames: the raw UDP payloads, in any order.
+  # => the reassembled message payload (headers stripped) once fragments
+  #    0..last_frag have all arrived, else nil.
+  def self.reassemble_fragments(frames)
+    by_number = {}
+    last = nil
+    type = nil
+    frames.each do |f|
+      hdr = parse_network_header(f)
+      next unless hdr && hdr[:fragmented]
+      type ||= hdr[:msg_type]
+      next unless hdr[:msg_type] == type
+      by_number[hdr[:frag_number].to_i] = f.byteslice(hdr[:header_size], f.bytesize - hdr[:header_size])
+      last = hdr[:frag_number].to_i if hdr[:last_frag]
+    end
+    return nil if type.nil? || last.nil?
+    return nil unless (0..last).all? { |i| by_number.key?(i) }
+    (0..last).map { |i| by_number[i] }.join
+  end
+
+  # ── GameInformationRequest (16) ──────────────────────────────────
+  #
+  # The whole request is one byte: msg type 16, no flags, no session — what
+  # the game client (and the server browser) sends to probe a server. The
+  # reply is msg 17, parsed by parse_game_info. Both are plain UDP and belong
+  # here with the rest of the wire format; FactorioServerProbe does the socket.
+  GAME_INFO_REQUEST = "\x10".b
 
   # ── Full UDP Payload Parse ─────────────────────────────────────────
 
@@ -563,7 +611,7 @@ ACTIONS = {
       ConnectionAcceptPacket.parse(data).result
     when 17
       # GameInformationRequestReply: only whole payloads parse — fragmented
-      # replies reassemble in server_query.rb, not here.
+      # replies reassemble in FactorioProtocol.reassemble_fragments.
       return { header: hdr } if hdr[:fragmented]
       { header: hdr, game_info: parse_game_info(data[1..]) }
     else
@@ -575,7 +623,7 @@ ACTIONS = {
 
   # Parse a REASSEMBLED msg-17 payload (header byte already stripped;
   # unfragmented replies have a 1-byte header, fragmented ones 4 — see
-  # server_query.rb). Reverse-engineered live against 2.0.77/2.1.14 servers:
+  # lib/server_probe.rb). Reverse-engineered live against 2.0.77/2.1.14 servers:
   #   [u32 token][u64 zero][uint32v len][name][3B version][u32le build]
   #   [uint32v len][description][u32le time_min*65536][u32 ?]
   #   [uint32v len][host:port][01 00 01][uint32v nmods][mods: len+name+3B ver+u32 crc]

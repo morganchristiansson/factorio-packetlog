@@ -31,7 +31,9 @@ names. Save-file internals are detailed in `docs/save/`.
   (optim-str) + difficulty + bools + loaded_from(3×optim-u16) +
   loaded_from_build(u32) + allowed_commands + [00 00 a0 00] + mods
   [count][name][ver][crc]. Optim encoding: byte < 0xFF = value, else full
-  dtype. Verified: version 2.1.14.1, build 87436.
+  dtype. Verified: version 2.0.77 (the header's `version64` is the save's own
+  game version — 2.0.77, build 84539; an earlier note here said 2.1.14, which
+  was a misread of the same field on a different save).
 - **Console buffer** in level.dat (near the end, with the chat log):
   `02 [len]["name [planet=...]: msg"] 00 [INDEX] 00 [color][tick]` — the
   INDEX is the sender's 0-indexed game index (VERIFIED: morganc=27,

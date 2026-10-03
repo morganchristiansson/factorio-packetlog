@@ -5,14 +5,19 @@ require 'json'
 require 'net/http'
 require 'uri'
 
-# Matchmaking HTTP API client (https://multiplayer.factorio.com/get-games).
-# One endpoint, one purpose: seed the server list. Everything live after
-# that comes straight from the servers via UDP (see server_query.rb), so a
-# cached seed means zero official-API traffic.
+# The MATCHMAKING API (https://multiplayer.factorio.com/get-games) — this is
+# the HTTPS path: the public server list the game shows in its server browser.
+# One endpoint, one purpose: seed that list. Everything live after it comes
+# straight from each server over UDP (see server_probe.rb), so a cached seed
+# means zero official-API traffic.
+#
+# Do not confuse it with the UDP probe (msg 16/17, GameInformationRequest):
+# that asks ONE server directly, needs no matchmaking API and no login, and is
+# what FactorioProtocol::GAME_INFO_REQUEST + FactorioServerProbe do.
 #
 # Every get-games entry already carries host_address ("ip:port") — no
 # per-server details call is ever needed to refresh counts directly.
-class Matchmaking
+class FactorioMatchmaking
   API_ROOT = 'https://multiplayer.factorio.com'
   CACHE_PATH = File.expand_path('~/.cache/factorio-server-list.json')
   PLAYER_DATA_CANDIDATES = [

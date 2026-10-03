@@ -9,7 +9,7 @@ require 'json'
 #
 # TWO files, both managed here:
 #
-#   players-cache.json     {id: {name:, locale:, admin:, quickbar:, quickbar_page:}}
+#   players-cache.json     {id: {name:, locale:, admin:, color:, quickbar:, quickbar_page:}}
 #       The game-index -> identity cache. ONLY valid for a single server +
 #       savefile: ids are handed out in join order and reused across
 #       sessions, so this file is never authoritative across worlds.
@@ -66,6 +66,20 @@ class PlayerDatabase
     load_overrides
   end
 
+  # Re-read the cache file into memory. For a process that did not write the
+  # file: the map-download roster seed runs the extraction tool (which owns
+  # that code) and merges into players-cache.json, so the running session
+  # picks the names up here. Everything the DB holds is persisted on every
+  # write (see #persist), so re-reading loses nothing.
+  def reload!
+    return unless @path
+    @mutex.synchronize do
+      load
+      @id_by_name = {}
+      @players.each { |id, info| @id_by_name[info[:name]] = id }
+    end
+  end
+
   def lookup(id)
     p = @players[id]
     p ? p[:name] : "Player_#{id}"
@@ -92,9 +106,15 @@ class PlayerDatabase
     return unless id
     @mutex.synchronize do
       rec = (record || {}).dup
+      # A record without a name is useless (every read is by name or renders
+      # "Player_#N"), and an empty name comes from a decode that produced
+      # nothing — so never write one and never blank an existing one.
       rec[:name] = clean(rec[:name]) if rec.key?(:name)
-      @players[id] = (@players[id] || {}).merge(rec)
-      @id_by_name[@players[id][:name]] = id if @players[id][:name]
+      rec.delete(:name) if rec[:name].to_s.empty?
+      merged = (@players[id] || {}).merge(rec)
+      return if @players[id] == merged # same mapping again (a packet path re-stating it)
+      @players[id] = merged
+      @id_by_name[merged[:name]] = id if merged[:name]
       persist
     end
   end
@@ -127,7 +147,7 @@ class PlayerDatabase
           changed = true
         end
       end
-      rebuild_index
+      rebuild_index if changed # O(players) — only when a slot actually moved
       persist if changed
     end
   end
@@ -341,6 +361,8 @@ class PlayerDatabase
         nil
       end
       rec = {name: v['name'] || v[:name], locale: v['locale'] || v[:locale], admin: admin}
+      color = v['color'] || v[:color]
+      rec[:color] = color if color.is_a?(Array) && color.length == 4
       rec[:quickbar] = v['quickbar'] if v['quickbar'].is_a?(Array)
       rec[:quickbar_page] = v['quickbar_page'] if v['quickbar_page'].is_a?(Integer)
       h[k.to_i] = rec
@@ -361,6 +383,7 @@ class PlayerDatabase
     return unless @path
     safe = @players.dup.transform_values { |p|
       rec = {name: clean(p[:name]), locale: p[:locale], admin: p.key?(:admin) ? p[:admin] : nil}
+      rec[:color] = p[:color] if p[:color] # LuaPlayer.color, [r,g,b,a] 0..1 (RCON)
       # Quickbar state is written only for players who have some, so the
       # file stays as quiet as it was before quickbar tracking.
       rec[:quickbar] = p[:quickbar] if p[:quickbar]

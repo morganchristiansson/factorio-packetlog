@@ -45,7 +45,7 @@ class TestPlugins < Minitest::Test
     lib = File.expand_path('../lib', __dir__)
     assert File.file?(File.join(lib, 'hivemind.rb')), 'hivemind → lib/hivemind.rb'
     assert File.file?(File.join(lib, 'translation.rb')), 'translation → lib/translation.rb'
-    assert File.file?(File.join(lib, 'quickbar_backup.rb')), 'quickbar_backup → lib/quickbar_backup.rb'
+    assert File.file?(File.join(lib, 'player_backup.rb')), 'player_backup → lib/player_backup.rb'
   end
 
   # No hardcoded default: the operator states which features run. The error is

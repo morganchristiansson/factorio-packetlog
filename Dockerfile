@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iputils-ping \
     dnsutils \
     xxd \
+    unzip zip \
+    ripgrep \
     git \
     python3-pip \
     ddgr pandoc \
@@ -36,7 +38,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
 
 # ── npm global packages ─────────────────────────────────────────────────────
-RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 && \
+RUN npm install -g @earendil-works/pi-coding-agent@1.0.0 && \
     pi --version
 
 # ── Ruby gems ──────────────────────────────────────────────

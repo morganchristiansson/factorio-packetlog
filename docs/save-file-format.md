@@ -66,8 +66,48 @@ sudo tcpdump -i eth0 -w session.pcap 'udp port 34197'
   Requires the capture to include TransferBlocks: run the sniffer with
   `capture: save` in config.yaml (off by default since 2025 —
   TransferBlocks are ~12% of file size and contain no player actions).
-- `tools/extract_players_from_save.rb` — parse the console buffer from a
-  decompressed level.dat → 1-indexed name→index JSON.
+- `tools/extract_players_from_save.rb` — recover the FULL roster from a save
+  archive or a decompressed level.dat (index → name, play time, last-online
+  tick, locale; all verified against a live `game.players` dump — the locale
+  for 290 of 338 records, zero wrong), and optionally `--merge` the names
+  (and any locale the cache lacks) into players-cache.json. Needs no cache —
+  a player record is a name with a play-time pair in front of it — and when
+  players-cache.json does have names it also validates them (refuses a save
+  from another world). `admin` is server state (adminlist.json), not in the
+  save.
+
+## Client mode: seed the roster from the map download
+
+Client mode has no RCON and only ever sees players who join *after* us, so
+the names of everyone already in the game are unknown. The map download is
+the fix: it is the server's own save, and it carries the whole roster.
+
+**Live (the normal path).** Every msg 13 TransferBlock the client receives is
+handed to `lib/map_download.rb` from the capture thread — a hash store under a
+mutex, nothing else. A worker thread waits for the stream to go quiet (5 s),
+concatenates blocks 0..N into `captures/map-download-<ts>.zip` and runs
+`tools/extract_players_from_save.rb` on it with `--merge`, then reloads the
+in-memory cache, so the running session knows the names. The archive is
+deleted once the roster is out of it (the pcap keeps the blocks if you asked
+for `capture: save`/`full`). A download with a hole in it (capture loss) is
+reported and skipped — the zip's central directory lives at the end, so a
+partial archive is not a usable save. No new config: it turns itself on in
+client mode, because that is the only mode that needs it.
+
+**Offline** (the same two steps by hand, e.g. after the fact):
+
+```bash
+ruby tools/extract_save_from_pcap.rb captures/client-<ip>-<ts>.pcap outdir
+ruby tools/extract_players_from_save.rb outdir/save.zip players-cache.json --merge
+```
+
+An index that turns out to be off (the run is assumed to start at index 1)
+self-corrects on the first join seen on the wire, via
+`PlayerDatabase#remove_other_entries_for`. The save also carries each
+player's **locale** (290 of 338 here, never wrong), so a client-mode session
+gets the languages of players already in the game too — the one thing the
+wire never carries (checked: no capture contains a single multi-char locale
+code).
 
 ## Capture size note (verified on a 4.9M-packet / 444 MB client-mode capture)
 

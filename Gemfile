@@ -10,3 +10,7 @@ gem 'ruby_llm-responses_api', '0.5.4' # Responses API for muse-spark-1.3-contrib
 
 # Test suite
 gem 'minitest', '~> 5.0'
+
+# Dev-only: sampling profiler for the full capture decode
+#   bundle exec ruby -r./tools/profile.rb factorio-packettools.rb -r cap.pcap
+gem 'vernier', '~> 1.11', require: false

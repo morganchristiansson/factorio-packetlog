@@ -37,7 +37,8 @@ class ServerRankSpec < Minitest::Test
     lines = rank_report(list, top: 1, match: 'mine')
     assert_match(/#1 other/, lines.first)
     assert_match(/Mine is #2 with 3 players/, lines.join("\n"))
-    assert_equal 'Mine', strip_tags('[color=red]Mine[/color]')
+    assert_equal 'Mine', FactorioProtocol.strip_markup('[color=red]Mine[/color]'),
+                 'the markup stripper lives on FactorioProtocol'
   end
 
   def test_locked_hidden_by_default

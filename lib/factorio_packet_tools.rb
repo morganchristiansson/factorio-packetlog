@@ -75,7 +75,8 @@ class FactorioPacketTools
       %w[normal full save].include?(@capture_mode)
     @options = options
     @player_db = PlayerDatabase.new(options[:player_db])
-    @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0 }
+    @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0, bad_string: 0, unknown: 0, desync: 0 }
+    @unknown_names = {} # undecoded action type -> how often we saw it
     # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
     # analysis (-r) doesn't re-capture. Auto-naming writes timestamped files
     # directly (captures/server-<port>-<ts>.pcap) — the latest file IS the
@@ -312,9 +313,14 @@ class FactorioPacketTools
       puts '  capture: TransferBlocks (msg 13) and keepalive-only heartbeats excluded (`capture: full` records everything)'
     end
 
+    # Client mode has no RCON and only sees players who join from now on, so
+    # the map download is the only source for the players already in the game.
+    if map_download_hook
+      puts '  roster: seeded from the map download when we join (the only way to learn the players already here)'
+    end
+
     if @options[:pcap]
-      reader = PcapReader.new(@options[:pcap])
-      reader.each_packet { |*args| process_packet(*args) }
+      read_pcaps
     elsif @options[:interface]
       # Seed the roster before capturing so existing players' names are
       # known from the start (RCON is authoritative; later joiners are
@@ -329,6 +335,7 @@ class FactorioPacketTools
         interface: @options[:interface],
         port: @options[:port],
         transfer_block_sink: (@capture_mode == 'normal' ? nil : @pcap_writer),
+        transfer_block_hook: map_download_hook,
       )
       puts "Listening on #{@options[:interface]} port #{@options[:port]}..."
       puts 'Press Ctrl+C to reload code; Ctrl+C again to quit.'
@@ -346,6 +353,7 @@ class FactorioPacketTools
   # Finalize the session: summary and close writers.
   # Memory is NOT distilled here — compaction is manual only (`/compact`).
   def finish
+    @map_download&.stop
     @agent&.close_events
     @translation_agent&.close_events
     print_summary
@@ -446,6 +454,13 @@ class FactorioPacketTools
     # identifiable packet and create the writer (server mode creates it at
     # init — server-<port>).
     ensure_pcap_writer(src_ip, dst_ip) if @pending_capture
+
+    # Protocol version from the connection request a client sends when it
+    # joins (msg 2 carries it). Without this, pcap mode and client mode have
+    # no RCON to ask and decode 2.0 traffic with the 2.1 tables: 9% of the
+    # actions came out as Unknown(66) — 66 being 2.0's `build`, which 2.1
+    # numbers 68 — with the wrong data lengths behind them.
+    detect_protocol_version(udp_data) if (udp_data.getbyte(0) & 0x1F) == 2 && @protocol_version.nil?
 
     # RequestForHeartbeatWhenDisconnecting (msg 14) — documented as a C→S
     # clean-quit request (header only). Never observed in captures so far
@@ -554,6 +569,15 @@ class FactorioPacketTools
       end
     end
 
+    # A message whose STRING field would not decode is a misdecode (the
+    # length ran past the buffer, or the bytes are not valid UTF-8 — FactorioWire
+    # returns nil instead of scrubbing a different name). Keep the frame: a
+    # scrubbed name would silently become another player.
+    if raw_frame && string_decode_failed?(parsed)
+      @stats[:bad_string] += 1
+      @unknown_writer&.write_frame(raw_frame, Time.at(ts))
+    end
+
     return unless (hb = parsed[:heartbeat])
 
     # Track the game tick (clock for lazy online_time): the last tick closure
@@ -652,13 +676,20 @@ class FactorioPacketTools
           puts "#{ts_str}  #{name} confirmed as game player ##{idx}"
         end
       elsif @self_name && src_ip == @self_ip
-        @player_db[idx] = {name: @self_name, locale: nil}
-        # Peer-id-based guess (peer_id+1) may differ for returning players;
-        # remove any other slot claiming our name.
-        @player_db.remove_other_entries_for(@self_name, idx)
+        # ONCE per binding: this block runs for every heartbeat that carries
+        # an action, and re-stating the same index wrote the whole cache
+        # (and printed the line) thousands of times in a 5h capture. The
+        # attrs index is (re)stated either way — it is in-memory and needed
+        # for the session's own stats.
         @attrs.set_index(@self_name, idx)
-        ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
-        puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx}"
+        if @player_db.id_for(@self_name) != idx
+          @player_db[idx] = {name: @self_name, locale: nil}
+          # Peer-id-based guess (peer_id+1) may differ for returning players;
+          # remove any other slot claiming our name.
+          @player_db.remove_other_entries_for(@self_name, idx)
+          ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
+          puts "#{ts_str}  [self]  #{@self_name} confirmed as game player ##{idx}"
+        end
       end
     end
 
@@ -679,6 +710,11 @@ class FactorioPacketTools
                         end&.flatten&.reject { |pid| known_players.include?(pid) } || []
                       end
     if hb[:hit_unknown] || invalid_players.any?
+      # A desync: an action type with no length (or one before it desynced),
+      # so the rest of this packet's actions were misread. Counted for the
+      # summary — `undecoded actions` is the decoder's to-do list, this is the
+      # damage it did.
+      @stats[:desync] += 1
       last_act = hb[:tick_closures]&.filter_map { |tc| tc[:actions]&.last }&.last
       if @options[:validate] && hb[:hit_unknown] && last_act
         warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
@@ -690,8 +726,15 @@ class FactorioPacketTools
     hb[:tick_closures]&.each do |tc|
       tc[:actions]&.each do |act|
         @stats[:actions] += 1
+        # Decoder coverage: an action type we have no name/layout for. Counted
+        # always (it is the answer to "what is still undecoded?"), not only
+        # under --validate.
+        if act[:name].to_s.start_with?('Unknown')
+          @stats[:unknown] += 1
+          @unknown_names[act[:name]] = @unknown_names.fetch(act[:name], 0) + 1
+        end
         qb_desync = true if track_quickbar(act)
-        log_action(ts, act, hdr[:msg_type] == 7, ghost: @ghost_mode)
+        log_action(ts, act, hdr[:msg_type] == 7, ghost: @ghost_mode, raw_frame: raw_frame)
       end
     end
     @unknown_writer&.write_frame(raw_frame, Time.at(ts)) if qb_desync && raw_frame
@@ -942,6 +985,10 @@ class FactorioPacketTools
         next
       end
       @player_db.set_locale_by_id(idx, attrs[:locale]) if attrs[:locale]
+      # The colour rides along with the locale: an identity the packets
+      # carry but we do not decode yet, and a join is the one moment the
+      # server hands it over.
+      @player_db[idx] = { color: attrs[:color] } if attrs[:color]
       bar = attrs[:quickbar]
       if bar == :failed
         warn "[join] #{name} ##{idx}: quickbar read failed in Lua (API shape vs " \
@@ -950,7 +997,7 @@ class FactorioPacketTools
         # The read is authoritative, empty bar included (nil clears the cache).
         @player_db.replace_quickbar(idx, bar)
       end
-      # Features see every join, after the store: quickbar_backup restores an
+      # Features see every join, after the store: player_backup restores an
       # empty bar here and re-stores it, so its value is the one that sticks.
       on_join_enriched(name, idx, attrs)
       unless bar == :failed
@@ -977,9 +1024,8 @@ class FactorioPacketTools
     s
   end
 
-  def log_action(ts, act, is_server, ghost: false)
+  def log_action(ts, act, is_server, ghost: false, raw_frame: nil)
     pid = act[:game_player]
-    ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     arrow = is_server ? '<-' : '->'
 
     # Dump raw type info for reverse engineering
@@ -996,9 +1042,16 @@ class FactorioPacketTools
     if act[:name] == 'write_to_console'
       data = chat_action_data(act, pname, ts)
       if data
+        # A '?' in the printed chat means decode_chat's scrub() replaced
+        # bytes: the payload is not valid UTF-8, so the chat decode (or the
+        # segment split) is wrong — keep the frame for review. Checked on
+        # the BYTES, not the string, so a real "?" never lands here.
+        if raw_frame && !data.dup.force_encoding('UTF-8').valid_encoding?
+          @unknown_writer&.write_frame(raw_frame, Time.at(ts))
+        end
         msg = FactorioProtocol.decode_chat(data)
         if msg
-          puts "#{ts_str}  #{arrow} #{pname}: #{msg}"
+          puts "#{log_ts(ts)}  #{arrow} #{pname}: #{msg}"
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
           @agent&.enqueue(:on_chat, pname, msg, now: now)
           @translation_agent&.enqueue(:on_chat, { game_player: act[:game_player] }, msg, now: now)
@@ -1029,7 +1082,43 @@ class FactorioPacketTools
     # and invalid/missing-decode warnings) prints regardless; this is only
     # the per-action dump, shown when inspecting decodes.
     return unless @debug
-    puts "#{ts_str}  #{arrow} #{pname.ljust(16)} #{act[:name].ljust(28)}#{data_str}#{suffix}"
+    puts "#{log_ts(ts)}  #{arrow} #{pname.ljust(16)} #{act[:name].ljust(28)}#{data_str}#{suffix}"
+  end
+
+  # Console timestamp. Built at the PRINT sites only: formatting it per
+  # action cost ~13% of a full capture decode (Time.at + strftime on every
+  # action, almost all of which are filtered out before printing).
+  def log_ts(ts)
+    Time.at(ts).strftime('%H:%M:%S.%L')
+  end
+
+  # ── Pcap replay (one process for the whole set) ──────────────────
+
+  # Every -r path in order, in ONE process: the rolling set is hundreds of
+  # files and N Ruby startups (~0.3s each) was minutes of the run. Sniffer
+  # state carries across files (players, attrs, the name index), so a set
+  # reads as one session — which is what it is. A file that cannot be read
+  # (a .gz capture still being written, a truncated rotation) is reported and
+  # skipped: whatever it yielded before failing is kept.
+  def read_pcaps
+    paths = Array(@options[:pcaps])
+    paths = [@options[:pcap]] if paths.empty?
+    paths.each_with_index do |path, i|
+      puts "[pcap] #{i + 1}/#{paths.size} #{path}" if paths.size > 1
+      begin
+        PcapReader.new(path).each_packet { |*args| process_packet(*args) }
+      rescue StandardError => e
+        warn "[pcap] #{path}: #{e.class}: #{e.message} — stopped reading this file"
+      end
+    end
+  end
+
+  # The messages that carry strings (username, game name, mod list, peer
+  # names). The key is PRESENT but nil when the parse failed — a fragment > 0
+  # omits the key entirely, which is not a failure.
+  STRING_MESSAGES = %i[connection_request connection_confirm connection_accept].freeze
+  def string_decode_failed?(parsed)
+    STRING_MESSAGES.any? { |k| parsed.key?(k) && parsed[k].nil? }
   end
 
   # ── Interactive filter console (stdin) ──────────────────────────
@@ -1073,7 +1162,7 @@ class FactorioPacketTools
     connected = attrs.select { |a| a[:connected] }
     return if connected.empty?
     connected.each do |a|
-      @player_db[a[:index]] = {name: a[:name], locale: a[:locale], admin: a[:admin]}
+      @player_db[a[:index]] = {name: a[:name], locale: a[:locale], admin: a[:admin], color: a[:color]}
       @player_db.remove_other_entries_for(a[:name], a[:index])
       # Authoritative live-roster seed (connected + index + fresh hb);
       # time accounting is player_attributes' job (load_player_attrs).
@@ -1109,6 +1198,19 @@ class FactorioPacketTools
     puts "[protocol] factorio #{version} — action tables: #{label}"
   rescue => e
     warn "Protocol version detection failed: #{e.class}: #{e.message}"
+  end
+
+  # Same, from the wire: a joining client's connection request (msg 2)
+  # advertises the version, so a capture needs no RCON and no flag. Stashed in
+  # @protocol_version so a hot reload re-applies the same tables.
+  def detect_protocol_version(udp_data)
+    version = FactorioProtocol.detect_version(udp_data)
+    return unless version
+    @protocol_version = version
+    label = FactorioProtocol.select_version(version)
+    puts "[protocol] factorio #{version} — action tables: #{label} (from the connection request)"
+  rescue => e
+    warn "Protocol version detection from the connection request failed: #{e.class}: #{e.message}"
   end
 
   # ── Interactive filter console (stdin) ──────────────────────────
@@ -1314,6 +1416,12 @@ class FactorioPacketTools
     puts "[summary] packets=#{@stats[:packets]} factorio=#{@stats[:factorio_packets]} actions=#{@stats[:actions]}"
     puts "[summary] packets not captured (keepalives/outgoing/transfer)=#{@stats[:capture_skipped]}" if @stats[:capture_skipped]&.positive?
     puts "[summary] outgoing broadcasts skipped (server mode)=#{@stats[:outgoing_skipped]}" if @options[:server]
+    puts "[summary] packets kept for a failed string decode=#{@stats[:bad_string]}" if @stats[:bad_string]&.positive?
+    return if @unknown_names.empty?
+    puts "[summary] packets with a suspected desync: #{@stats[:desync]}" if @stats[:desync]&.positive?
+    puts "[summary] undecoded actions: #{@stats[:unknown]}/#{@stats[:actions]} " \
+         "(#{@unknown_names.size} type(s)) — top: " \
+         "#{@unknown_names.sort_by { |_, v| -v }.first(12).map { |k, v| "#{k}=#{v}" }.join(', ')}"
   end
 
   # Clean-quit signal in server mode: called from the C→S PeerDisconnect
@@ -1415,6 +1523,39 @@ class FactorioPacketTools
     merged = (0...total).map { |n| group[n] }.join
     @chat_segments.delete(key)
     merged
+  end
+
+  # ── Live map-download roster seed (client mode) ───────────────────
+
+  # Client mode never sees the players who were already in the game: the
+  # wire only carries joins from now on, and there is no RCON. The map
+  # download is the server's own save, and a save holds the whole roster, so
+  # we reassemble it off the live stream (MapDownload, off the capture
+  # thread) and seed the roster from it. Server mode has both the save on
+  # disk and RCON, so it does neither.
+  def map_download_hook
+    return nil if @options[:server] || !@options[:interface] || @options[:player_db].nil?
+    @map_download ||= MapDownload.new(dir: default_capture_dir) do |zip, blocks|
+      seed_roster_from_save(zip, blocks)
+    end
+  end
+
+  # Runs on the MapDownload worker thread, never the capture thread. The
+  # roster scan is the tool's job (it is the tested implementation), so this
+  # shells out to it and reloads the in-memory cache afterwards — otherwise
+  # the names would only reach the file, not the running session.
+  def seed_roster_from_save(zip, blocks)
+    tool = File.expand_path('../tools/extract_players_from_save.rb', __dir__)
+    out = IO.popen([RbConfig.ruby, tool, zip, @options[:player_db], '--merge'], err: [:child, :out], &:read)
+    if $?.success?
+      @player_db.reload!
+      puts out.lines.grep(/\A(?:roster|new|play time):/).map { |l| "[map-download] #{l}" }
+      File.delete(zip) # the roster was the point; the pcap keeps the blocks if wanted
+    else
+      warn "[map-download] roster seeding failed, save kept at #{zip}:\n#{out}"
+    end
+  rescue StandardError => e
+    warn "[map-download] roster seeding failed: #{e.class}: #{e.message}"
   end
 
   # ── Always-on auto-named capture ────────────────────────────────

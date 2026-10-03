@@ -184,7 +184,7 @@ each call in a `pcall` and returns the COUNT of successes — so a rejected
 write (a 2.1 filter shape we guessed wrong) is a number the caller reports,
 not a silent no-op.
 
-Used by the `quickbar_backup` plugin (`lib/quickbar_backup.rb`) to put a
+Used by the `player_backup` plugin (`lib/player_backup.rb`) to put a
 player's saved quickbar back after a save change.
 
 ### Player lookup: by index OR name, and not `connected_players`
@@ -201,6 +201,13 @@ player's saved quickbar back after a save change.
 - `game.get_players` does not exist.
 - The join-time attrs payload is a single JSON **object**; the all-players
   dump is a JSON **array** of them. `parse_player_attrs` takes both.
+- `LuaPlayer.color` is read as its four components, `p.color.r/.g/.b/.a`
+  (0..1) — sending the `LuaColor` itself through `helpers.table_to_json` is
+  not something to rely on. It rides along in both attr queries as its own
+  `y` object and lands in players-cache.json as `color: [r,g,b,a]`
+  (`RconClient.parse_color`, rounded to 4 places so the file round-trips).
+  The packets carry a player's colour too, but nothing decodes it yet —
+  RCON is where we get it first.
 
 ## Connection details
 

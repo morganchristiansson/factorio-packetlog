@@ -36,6 +36,7 @@ GEM
       ruby_llm (>= 1.0)
     ruby_llm-schema (0.4.0)
     uri (1.1.1)
+    vernier (1.11.0)
     zeitwerk (2.8.3)
 
 PLATFORMS
@@ -48,6 +49,7 @@ DEPENDENCIES
   rconrb (~> 0.2)
   ruby_llm (~> 1.16)
   ruby_llm-responses_api (= 0.5.4)
+  vernier (~> 1.11)
 
 CHECKSUMS
   base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
@@ -69,6 +71,7 @@ CHECKSUMS
   ruby_llm-responses_api (0.5.4) sha256=8b8f73d4eb78d217d240f0ed50038b597c776ac3e28a364c3fa13a5298129421
   ruby_llm-schema (0.4.0) sha256=e930f5a5316f9301bff3fb7fe572e44727d05bb8e50621001bbb49a47d63b8da
   uri (1.1.1) sha256=379fa58d27ffb1387eaada68c749d1426738bd0f654d812fcc07e7568f5c57c6
+  vernier (1.11.0) sha256=ffc3859da1d53df96a109c6609892dab9f1d96ffbdd77cf13fa4d74032331216
   zeitwerk (2.8.3) sha256=2c85125a8467ce069e20123d1e709a08955c9d29c118c25b46b7b7fafdbb92e5
 
 BUNDLED WITH

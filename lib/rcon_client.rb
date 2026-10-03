@@ -27,14 +27,26 @@ class RconClient
   # Seeds PlayerAttrs at startup; afterwards the sniffer maintains these from
   # the packet stream. Same write_file/print duality as the roster — at
   # ~80 B/player the attrs JSON exceeds the 4KB rcon.print cap beyond
-  # ~50 players.
+  # ~50 players, which is why the whole roster (game.players, offline
+  # included) costs nothing extra here: the file is read off the server's
+  # disk, not out of a response. Consumers still filter on :connected.
   PLAYER_ATTRS_FILENAME = 'factorio-packettools-attrs.json'
   PLAYER_ATTRS_WRITE_LUA =
-    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
      'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end helpers.write_file(' + PLAYER_ATTRS_FILENAME.inspect + ', helpers.table_to_json(t), false, 0)'
   PLAYER_ATTRS_PRINT_LUA =
-    'local t={} for _,p in pairs(game.connected_players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
+    'local t={} for _,p in pairs(game.players) do t[#t+1]={i=p.index,n=p.name,c=p.connected,a=p.admin,o=p.online_time,k=p.afk_time,l=p.locale,' \
      'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end rcon.print(helpers.table_to_json(t))'
+
+  # name → item prototype id, built in the `prototypes.item` iteration order
+  # (that order IS the wire id — see DUMP_PROTOTYPES_LUA). Defined ONCE per
+  # command and used by every player a quickbar read loop walks.
+  ITEM_ID_MAP_LUA =
+    'local n={} for x in pairs(prototypes.item) do n[#n+1]=x end local ids={} for i=1,#n do ids[n[i]]=i end '
+
+  # The whole-roster backup dump (name + colour + the entire quickbar for
+  # EVERY player game.players knows, offline included — see #roster_backup).
+  ROSTER_BACKUP_FILENAME = 'factorio-packettools-roster.json'
 
   # One-liner dumping ALL item + entity prototype names to script-output via
   # helpers.write_file (see docs/rcon-knowledge.md). The wire protocol's
@@ -109,13 +121,49 @@ class RconClient
   # <user-data>/script-output — where helpers.write_file output lands.
   attr_reader :script_output_dir
 
-  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}] for
-  # the CONNECTED players, or nil if the query failed. Same write_file-first
-  # path as the roster (attrs exceed 4KB beyond ~50 players). Connected-only:
-  # every consumer filters on :connected or targets connected players, and a
-  # game.players dump keeps growing with every player who ever joined.
+  # [{index:, name:, connected:, admin:, online_time:, afk_time:, locale:}]
+  # for every player game.players knows (offline included), or nil if the
+  # query failed. Consumers filter on :connected themselves.
   def player_attributes
     self.class.parse_player_attrs(json_query(PLAYER_ATTRS_FILENAME, PLAYER_ATTRS_WRITE_LUA, PLAYER_ATTRS_PRINT_LUA))
+  end
+
+  # The SAME dump with every player's whole quickbar attached, read in ONE
+  # command. This is the player_backup feature's startup snapshot: its
+  # join-time query only ever sees whoever joins AFTER we start, so without
+  # this the backup knows nothing about the hundreds of players who played
+  # before us — and a save change takes their bars with it.
+  #
+  # Offline players included, because that is the point, and the size is not
+  # a problem: this rides helpers.write_file (no 4KB rcon.print cap) and the
+  # sniffer runs on the server host, so the file is read straight off disk.
+  # A player whose quickbar getter raises (offline players may not answer
+  # at all) lands as quickbar :failed and is simply skipped.
+  def roster_backup
+    lua = 'do ' + ITEM_ID_MAP_LUA +
+          'local t={} for _,p in pairs(game.players) do ' + quickbar_read_lua('q') +
+          'local okq=pcall(read) t[#t+1]={i=p.index,n=p.name,c=p.connected,q=okq and q or false,' \
+          'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end ' \
+          "helpers.write_file(#{ROSTER_BACKUP_FILENAME.inspect}, helpers.table_to_json(t), false, 0) end"
+    # No print fallback: the whole-roster payload is far past any response
+    # cap, so a truncated parse would be worse than nil.
+    self.class.parse_player_attrs(json_query(ROSTER_BACKUP_FILENAME, lua, nil))
+  end
+
+  # Fetch a JSON payload, preferring helpers.write_file to <user-data>
+  # script-output (no 4KB rcon.print response cap) when the server's
+  # script-output dir is known locally — the sniffer runs ON the server
+  # host, so the file is read straight from disk. Falls back to the
+  # rcon.print variant (may truncate on very large results); a nil
+  # print_lua means there is no fallback and the file IS the answer.
+  def json_query(filename, write_lua, print_lua)
+    if @script_output_dir
+      execute(write_lua)
+      path = File.join(@script_output_dir, filename)
+      body = File.read(path) if File.exist?(path)
+      return body if body && !body.empty?
+    end
+    print_lua ? execute(print_lua) : nil
   end
 
   # Fetch one connected player's attributes for a join-time enrichment query.
@@ -138,44 +186,47 @@ class RconClient
   # actions only ever report it as deltas — a join is the one moment the
   # whole bar is knowable.
   #
+  # Item PROTOTYPE IDS, not names, so the cache needs no item_db (see
+  # ITEM_ID_MAP_LUA). Everything else about this query is live-verified on
+  # 2.0.77 — the getter arity, `.name`, the 1..100 bounds, the id map,
+  # game.players[...], get_active_quick_bar_page being uncallable — and
+  # recorded in docs/rcon-knowledge.md, the place to read before editing it.
+  def player_attrs_for_lua(player)
+    key = player.is_a?(Numeric) ? player.to_i.to_s : "\"#{lua_quote(player)}\""
+    'do local p=game.players[' + key + '] ' + ITEM_ID_MAP_LUA + quickbar_read_lua('q') +
+      'local okq=p and pcall(read) ' +
+      'rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,' +
+      'o=p.online_time,k=p.afk_time,l=p.locale,y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a},' +
+      'q=okq and q or false}) or "nil") end'
+  end
+
+  # The quickbar read, shared by the two queries that read a WHOLE bar: the
+  # join-time one (#player_attrs_for_lua) and the full-roster dump
+  # (#roster_backup). Defines `local <qvar>={}` plus a `read()` function that
+  # fills it with item prototype ids keyed by the FLAT slot index 1..100 —
+  # the page/slot fold itself lives in one place (PlayerDatabase.parse_quickbar).
+  # The caller must have defined `p` (the LuaPlayer) and the `ids` name→id
+  # map (ITEM_ID_MAP_LUA) first.
+  #
   # The read loop follows the server version (the same helpers.game_version
   # string select_version uses for the action tables) because the getter
   # changed in 2.1: 2.0 takes a flat index 1..100, 2.1 takes (page, slot).
-  # Both branches normalise to the same flat key, so the page/slot fold lives
-  # in one place (PlayerDatabase.parse_quickbar). The 2.1 branch assumes
-  # 0-based page/slot, like the wire's quick_bar_set_selected_page byte.
-  # An unknown version falls back to the 2.0 shape; the pcall below turns a
-  # wrong guess, or a changed return type, into a visible "quickbar read
-  # failed" — never a dead query, attrs included.
-  #
-  # Item PROTOTYPE IDS, not names, so the cache needs no item_db: the id map
-  # is built right here in the same `prototypes.item` iteration order
-  # DUMP_PROTOTYPES_LUA uses (that order IS the wire id).
-  #
-  # Everything else about this query is live-verified on 2.0.77 — the getter
-  # arity, `.name`, the 1..100 bounds, the id map, game.players[...],
-  # get_active_quick_bar_page being uncallable — and recorded in
-  # docs/rcon-knowledge.md, which is the place to read before editing this.
-  def player_attrs_for_lua(player)
-    key = player.is_a?(Numeric) ? player.to_i.to_s : "\"#{lua_quote(player)}\""
+  # The 2.1 branch assumes 0-based page/slot, like the wire's
+  # quick_bar_set_selected_page byte. An unknown version falls back to the
+  # 2.0 shape; the pcall at each call site turns a wrong guess, or a changed
+  # return type, into a visible "quickbar read failed" — never a dead query,
+  # attrs included.
+  def quickbar_read_lua(qvar)
     slots = PlayerDatabase::QUICKBAR_SLOTS
-    version = server_version.to_s
-    # 2.1+ takes (page, slot); 2.0 and an unknown version take the flat index
-    loop_lua = if !version.empty? && !version.match?(/\A2\.0(\.|\z)/)
+    loop_lua = if !server_version.to_s.empty? && !server_version.to_s.match?(/\A2\.0(\.|\z)/)
                 "for pg=0,#{PlayerDatabase::QUICKBAR_PAGES - 1} do for sl=0,#{slots - 1} do " \
                   "put(pg*#{slots}+sl+1,p.get_quick_bar_slot(pg,sl)) end end"
               else
                 "for i=1,#{PlayerDatabase::QUICKBAR_PAGES * slots} do put(i,p.get_quick_bar_slot(i)) end"
               end
-    'do local p=game.players[' + key + '] local q={} ' \
-      'local function read() local n={} for x in pairs(prototypes.item) do n[#n+1]=x end ' \
-      'local ids={} for i=1,#n do ids[n[i]]=i end ' \
-      'local function put(i,s) if s and s.name and ids[s.name] then q[tostring(i)]=ids[s.name] end end ' \
-      "#{loop_lua} end " \
-      'local okq=p and pcall(read) ' \
-      'rcon.print(p and helpers.table_to_json({i=p.index,n=p.name,c=p.connected,a=p.admin,' \
-      'o=p.online_time,k=p.afk_time,l=p.locale,y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a},' \
-      'q=okq and q or false}) or "nil") end'
+    "local #{qvar}={} local function read() " \
+      "local function put(i,s) if s and s.name and ids[s.name] then #{qvar}[tostring(i)]=ids[s.name] end end " \
+      "#{loop_lua} end "
   end
 
   # Set a player's quickbar cells: `cells` is {flat slot index => item id}

@@ -341,6 +341,31 @@ Correlating those names with the packet capture's wire IDs by
 Flags OK (table matches), MISMATCH (different name for the ID), and
 NOT IN TABLE entries.
 
+## `set_player_color` (2.0 wire 296, 2.1 311): FOUR UNORM bytes R,G,B,A
+
+Table length 4, and it holds: 2313 occurrences over the whole rolling set,
+all one player (`karada`, colour picker open, ~25/second), no desync around
+them. The four bytes are RGB in that order plus alpha, each 0..255 —
+measured, not guessed:
+
+- byte 3 is **127 in every single sample**, and the save says karada's
+  `LuaPlayer.color` is `[1,1,1,0.5]`; 0.5 through an 8-bit channel is 127
+  (truncated) / 128 (rounded), so that byte is alpha and the game's default
+  colour carries alpha 0.5 — the same 0.5 `FactorioSave.color_at` reads for
+  all 338 players in the save.
+- bytes 0..2 sweep the full range and contain the pure corners:
+  `[0,0,255]` alone is blue, `[0,255,0]` green, `[255,255,255]` white —
+  R, G, B in that order (4 f32s would be 16 bytes and NaN patterns; a
+  LuaColor is not what the wire carries).
+
+Decoded in `FactorioPacketTools#log_action` as `[b/255 rounded 4]` into
+`players-cache.json` (keyed by game index) and, through the `player_backup`
+plugin, `players-backup.json` (keyed by NAME, which survives a save change
+that resets indexes). Alpha therefore lands at 0.498 where RCON says 0.5 —
+the 8-bit wire's own quantisation, and RCON still overwrites with 0.5 at
+startup and on the next join. A colour whose game index has no name yet is
+dropped rather than written under a `Player_N` placeholder.
+
 ## Chat Message Formats (`write_to_console`, type 106)
 
 Prefix formats (first byte is a message-type marker):

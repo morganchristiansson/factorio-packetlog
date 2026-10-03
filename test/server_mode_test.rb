@@ -357,6 +357,24 @@ class TestServerMode < Minitest::Test
       assert ok, "#{const_name}: write_file targets server only (for_player=0, got #{calls.map { |call| call.sub(/\Ahelpers\.write_file\(/, '') }})"
     end
 
+    # The whole-roster dump (every player, offline included, with their whole
+    # quickbar) is a METHOD, not a constant — it needs the server version for
+    # the getter shape. Same hard invariant: write_file to the server, never a
+    # player. Plus: it walks game.players (not connected_players), so the
+    # backup covers players who never join while the sniffer runs.
+    rcon = RconClient.allocate
+    rcon.define_singleton_method(:server_version) { '2.0.77' }
+    rcon.define_singleton_method(:execute) { |cmd| (@lua = cmd) and '' }
+    rcon.instance_variable_set(:@script_output_dir, '/nonexistent') # execute the write, read nothing
+    rcon.roster_backup
+    roster_lua = rcon.instance_variable_get(:@lua).to_s
+    assert_includes roster_lua, 'pairs(game.players)', 'the roster dump is the WHOLE roster, offline players included'
+    assert_includes roster_lua, 'get_quick_bar_slot', 'and it reads each bar whole'
+    calls = roster_lua.scan(/helpers\.write_file\((?:[^()]|\([^()]*\))*\)/)
+    refute_empty calls, 'expected a write_file call'
+    tails = calls.map { |c| c.sub(/\Ahelpers\.write_file\(/, '').sub(/\)\z/, '').split(',').last.to_s.strip }
+    assert tails.all? { |t| t == '0' || t.empty? }, "roster dump: write_file targets server only (got #{tails})"
+
     # The join-time query also reads the quickbar, in the SAME command as the
     # attrs — one RCON round trip per join, not one per feature. The Lua is
     # pinned to the two documented getter signatures: 2.0 takes a flat index
@@ -847,7 +865,7 @@ class TestServerMode < Minitest::Test
     built.first
   end
 
-  def fake_backup_rcon(version: '2.0.77', written: :all)
+  def fake_backup_rcon(version: '2.0.77', written: :all, roster: nil)
     calls = []
     rcon = Object.new
     rcon.define_singleton_method(:restore_quickbar) do |name, cells|
@@ -855,6 +873,7 @@ class TestServerMode < Minitest::Test
       written == :all ? cells.size : 1
     end
     rcon.define_singleton_method(:server_version) { version }
+    rcon.define_singleton_method(:roster_backup) { roster }
     [rcon, calls]
   end
 
@@ -916,6 +935,76 @@ class TestServerMode < Minitest::Test
         before = File.read(PlayerBackup::FILENAME)
         build_backup.on_join_enriched('alice', 1, quickbar: nil)
         assert_equal before, File.read(PlayerBackup::FILENAME), 'no restore without a client to ask'
+      end
+    end
+  end
+
+  # The colour comes off the wire too: set_player_color carries 4 UNORM
+  # bytes R,G,B,A, so a player who changes colour mid-session lands in
+  # players-cache.json (and through the plugin, the backup) without waiting
+  # for their next join. Ground truth for the layout is the save — karada's
+  # [1,1,1,0.5] is [255,255,255,127] on the wire (the 8-bit alpha is the
+  # game's 0.5 truncated, hence 0.498 here).
+  def test_set_player_color_decodes_into_the_player_db
+    Dir.mktmpdir do |dir|
+      db_path = File.join(dir, 'players-cache.json')
+      Dir.chdir(dir) do
+        sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP], player_db: db_path)
+        db = PlayerDatabase.new(db_path)
+        sniffer.instance_variable_set(:@player_db, db)
+        db[3] = { name: 'karada' }
+        # 2.0 wire 296 = set_player_color; the name comes from the game index
+        act = { name: 'set_player_color', type: 296, game_player: 3,
+                data: [255, 255, 255, 127].pack('C4') }
+        capture_io { sniffer.send(:log_action, 0, act, false) }
+        assert_equal [1.0, 1.0, 1.0, 0.498], db[3][:color],
+                     '4 UNORM bytes → [r,g,b,a] 0..1 on the cache record'
+        assert_equal [1.0, 1.0, 1.0, 0.498],
+                     JSON.parse(File.read(db_path))['3']['color'],
+                     'and persisted to players-cache.json'
+
+        # An unknown player (no name bound to that index) is left alone: a
+        # colour with no owner would poison somebody else's record.
+        other = { name: 'set_player_color', type: 296, game_player: 9, data: "\x00\x00\x00\x7F".b }
+        capture_io { sniffer.send(:log_action, 0, other, false) }
+        assert_nil db[9], 'no name, no write — the packet path never invents a record'
+      end
+    end
+  end
+
+  # Startup seeds the WHOLE roster from one RCON query — including players
+  # who never join while we run, which is the whole reason the query exists.
+  def test_player_backup_snapshots_the_whole_roster_at_startup
+    Dir.mktmpdir do |dir|
+      Dir.chdir(dir) do
+        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
+        roster = [
+          { name: 'alice', connected: true, color: [0.815, 0.024, 0.0, 0.5], quickbar: bar },
+          { name: 'bob', connected: false, color: [0.1, 0.2, 0.3, 1.0], quickbar: bar },
+          # an offline player whose getter raised: :failed is NOT an empty bar
+          { name: 'carol', connected: false, color: nil, quickbar: :failed },
+          { name: 'dave', connected: false, color: nil, quickbar: nil } # empty bar: nothing to learn
+        ]
+        rcon, calls = fake_backup_rcon(roster: roster)
+        backup = build_backup(rcon: rcon)
+        out, = capture_io { backup.on_start }
+        saved = JSON.parse(File.read(PlayerBackup::FILENAME))
+        assert_equal 4, saved.size, 'every player in the dump gets a record'
+        assert_equal bar, backup['bob']['quickbar'], 'a player who never joins us is still snapshotted'
+        assert_equal [0.1, 0.2, 0.3, 1.0], saved['bob']['color'], 'and their colour with it'
+        assert_nil saved['carol']['quickbar'], ':failed saves nothing'
+        assert_nil saved['dave']['quickbar'], 'an empty bar teaches us nothing'
+        assert_empty calls, 'a snapshot never writes to the server'
+        assert_includes out, 'roster snapshot: 4 players', 'the operator sees what was captured'
+
+        # A second startup changes nothing and rewrites nothing.
+        before = File.mtime(PlayerBackup::FILENAME)
+        capture_io { backup.on_start }
+        assert_equal before, File.mtime(PlayerBackup::FILENAME), 'unchanged roster = no rewrite'
+
+        # No RCON (client mode): a no-op, like every other event here.
+        assert_empty capture_io { build_backup.on_start }.first,
+                     'without RCON there is no roster and nothing to say'
       end
     end
   end

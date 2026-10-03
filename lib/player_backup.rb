@@ -22,9 +22,12 @@ require 'json'
 # carry (verified: no encoding of the slot ids appears anywhere in it), so a
 # bar has to be restored from here or it is lost.
 #
-# WHEN: on a confirmed join, from the ONE RCON query the sniffer already makes
-# for the joiner (see RconClient#player_attributes_for, which reads the whole
-# bar and the colour). Their in-game bar is the truth:
+# WHEN: once at startup, from ONE query over the WHOLE roster (see #on_start)
+# — every player the save knows, offline included, so a save change cannot
+# take a bar we never heard of. Then on every confirmed join, from the ONE
+# RCON query the sniffer already makes for the joiner (see
+# RconClient#player_attributes_for, which reads the whole bar and the colour).
+# Their in-game bar is the truth:
 #   * they have one  → snapshot it, which is also how a player who edited
 #     their bar mid-session gets the new one saved;
 #   * they have none but we do → write it back over RCON, then bring the
@@ -51,6 +54,56 @@ class PlayerBackup
     @rcon = host.rcon
     @player_db = host.player_db
     @mutex = Mutex.new # one join at a time + the file write (see #persist)
+  end
+
+  # A player changed their colour mid-session (the set_player_color action,
+  # 4 UNORM bytes — see FactorioPacketTools#log_action). The game and the
+  # save keep their own copy, so this is a snapshot like every other colour
+  # here: it just keeps the file current between joins instead of at the next
+  # one. The picker sends ~25 samples/second while it is open, so the
+  # no-op-if-unchanged check in #note_color is load-bearing, not a nicety.
+  def on_player_color(name, rgba)
+    note_color(name, rgba)
+  end
+
+  # Startup (see FactorioPacketTools#on_start): ONE query for the whole
+  # roster and a snapshot of everyone in it, joined or not. Without this the
+  # file only ever learns about players who join AFTER we start — on a
+  # long-running server that is nobody who played before us, and their bars
+  # are exactly the ones a save change takes away. The roster goes through
+  # helpers.write_file, so its size (a 300-player server × 100 slots) costs
+  # nothing but disk.
+  #
+  # Same rules as the join path: an empty bar teaches us nothing (we keep
+  # what we have — that is the whole point of this file), and a :failed read
+  # (an offline player whose getter raises) is not an empty bar. The join
+  # query still runs and still overwrites: it is the only source for a bar
+  # edited mid-session, and it reads the same Lua this does, so a player in
+  # both must come back identical.
+  def on_start
+    return unless @rcon
+    roster = @rcon.roster_backup
+    return if roster.nil? || roster.empty?
+    bars = colors = 0
+    @mutex.synchronize do
+      roster.each do |p|
+        name = p[:name].to_s
+        next if name.empty?
+        rec = (records[name] ||= {})
+        color = p[:color]
+        if color.is_a?(Array) && color.length == 4 && rec['color'] != color.map(&:to_f)
+          rec['color'] = color.map(&:to_f)
+          colors += 1
+        end
+        bar = p[:quickbar]
+        next if bar == :failed # the getter raised: not an empty bar, nothing to save
+        next unless filled?(bar) && rec['quickbar'] != copy(bar)
+        rec['quickbar'] = copy(bar)
+        bars += 1
+      end
+      persist if bars + colors > 0 # one write for the whole roster, not one per player
+    end
+    puts "[player-backup] roster snapshot: #{roster.size} players, #{bars} bar(s), #{colors} colour(s) saved"
   end
 
   # The event (see FactorioPacketTools#on_join_enriched). Runs on the join

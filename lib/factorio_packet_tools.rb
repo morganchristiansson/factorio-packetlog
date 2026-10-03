@@ -152,6 +152,13 @@ class FactorioPacketTools
     # over the --debug startup flag. Default is OFF — the normal operator
     # output is chat + join/leave events + warnings.
     @debug = !!@options[:debug]
+    # Features (config.yaml `plugins:`): one Plugins object for this owner,
+    # which builds them from the list and dispatches what we emit below.
+    # This file names none of them. hivemind and translation are objects
+    # this host drives, not features it emits to. MODE-INDEPENDENT and
+    # outside any mode block: the packet path emits on_player_color in
+    # every mode (pcap replay included), so @plugins must always exist.
+    @plugins = Plugins::PluginSet.new(options[:plugins], self)
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -211,11 +218,6 @@ class FactorioPacketTools
       # Optional features: both objects are plain ivars — hot reload swaps
       # the CODE under this object, not the object itself, so there is
       # nothing to carry over or re-point.
-      # Features (config.yaml `plugins:`): one Plugins object for this owner,
-      # which builds them from the list and dispatches what we emit below.
-      # This file names none of them. hivemind and translation are objects
-      # this host drives, not features it emits to.
-      @plugins = Plugins::PluginSet.new(options[:plugins], self)
       @agent = nil
       @translation_agent = nil
       # Hivemind AI agent: reads packet-decoded chat and answers players who
@@ -291,6 +293,25 @@ class FactorioPacketTools
     @plugins.emit(:on_join_enriched, name, index, attrs)
   end
 
+  # A player changed their colour: the 4 UNORM bytes R,G,B,A (0..255) from the
+  # set_player_color action (2.0 wire 296, 2.1 311), as [r,g,b,a] 0..1. On the
+  # packet thread, and only while the value actually CHANGES — the colour
+  # picker sends ~25 samples/second while it is open, so an unchanged colour
+  # must not reach the files.
+  def on_player_color(name, rgba)
+    @plugins.emit(:on_player_color, name, rgba)
+  end
+
+  # Startup, once the RCON client exists (server mode only): the whole-roster
+  # dump — every player the save knows, offline included, with colour and the
+  # entire quickbar, in one helpers.write_file query (RconClient#roster_backup).
+  # Features that keep per-player state they want for players who joined
+  # BEFORE we started (the player_backup plugin's snapshot) seed from this;
+  # a join can only ever tell a feature about players who come after.
+  def on_start
+    @plugins.emit(:on_start)
+  end
+
   # Run the capture/analysis loop. Blocks until the source is exhausted
   # (pcap) or Interrupt is raised (live capture). Does NOT finalize — the
   # entry point calls #finish when actually shutting down, so a hot reload
@@ -328,6 +349,7 @@ class FactorioPacketTools
       # reload — see load_roster for why that re-seed matters.
       load_roster if @rcon
       load_player_attrs if @rcon
+      on_start if @rcon
       # Memoized: a reload must NOT reopen the capture device. Reusing this
       # handle across reloads is what makes them lossless (and avoids two
       # BPF listeners duplicating every packet).
@@ -1058,6 +1080,25 @@ class FactorioPacketTools
         end
       end
       return
+    end
+
+    # set_player_color (2.0 wire 296 / 2.1 311): FOUR UNORM bytes R,G,B,A,
+    # 0..255. Measured over the whole capture set (2313 occurrences, all one
+    # player with the colour picker open, no desync around them): bytes 0..2
+    # sweep the full range — [0,0,255] alone is blue, [0,255,0] green,
+    # [255,255,255] white, so the order is R,G,B — and byte 3 is 127 in EVERY
+    # sample. The save settles it: karada's LuaPlayer.color [1,1,1,0.5] is
+    # [255,255,255,127] on the wire (the 8-bit alpha truncates 0.5, hence
+    # 0.498 here). RCON is authoritative and still seeds both files at
+    # startup; this keeps them current for a player who changes colour while
+    # we run, without waiting for their next join. A colour with no NAME
+    # (an index we never bound) is dropped: the cache is keyed by name, and a
+    # nameless record would poison whoever takes that slot later.
+    if act[:name] == 'set_player_color' && act[:data]&.bytesize == 4 && pname &&
+       !pname.start_with?('Player_')
+      rgba = act[:data].unpack('C4').map { |v| (v / 255.0).round(4) }
+      @player_db[pid] = { color: rgba }
+      on_player_color(pname, rgba)
     end
 
     return unless visible?(pname, act)

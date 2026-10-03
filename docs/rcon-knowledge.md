@@ -141,6 +141,22 @@ once, keyed `{"<flat index>": <item id>}`; the Lua builds the name→id map from
 `prototypes.item` so the ids are wire ids). One command per join covers both:
 a full 100-cell bar is ~1.2KB, so `rcon.print` still fits under the cap.
 
+### The whole roster, bars included: `RconClient#roster_backup`
+
+One query over `game.players` (every player the save knows, offline included)
+that carries each player's colour AND whole quickbar, written with
+`helpers.write_file` and read back off the server's disk. It exists because
+`player_attributes_for` only ever sees players who join AFTER the sniffer
+starts, so without it a long-running server's backup knows nothing about
+whoever played before us — exactly the bars a save change destroys.
+
+Both dumps use `game.players`, not `game.connected_players`: the write_file
+path means the roster's size costs nothing but disk (a 300-player server ×
+100 slots is a payload no `rcon.print` response cap survives — hence no
+print fallback for this one). A player whose `get_quick_bar_slot` raises
+(offline players may not answer at all) lands as `quickbar: :failed` and is
+skipped rather than mistaken for an empty bar.
+
 ### `LuaPlayer.get_quick_bar_slot` — the quickbar read
 
 **The signature changed in 2.1, and the server version picks the call:**

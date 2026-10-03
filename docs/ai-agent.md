@@ -160,12 +160,17 @@ cleared.
   per-turn user prompt so the conversation prefix stays identical between
   compactions — provider-side prompt caching keeps working.
 - **Per-player memories** ride in the per-turn user prompt: the player
-  this turn concerns (the one who triggered the chat, or the one being
-  greeted on join). On a **fresh session** (process start / `/compact` /
-  conversation reset) the memories of **all currently-online players are
-  seeded too** — joins alone can't reach players who were already
-  connected when the session began. Each player is delivered **once per
-  session** (a fresh session re-seeds).
+  this turn concerns (the one who triggered the chat, or the one joining).
+  On a **fresh session** (`/compact`, auto-compaction, conversation reset)
+  the memories of **all currently-online players are seeded too** — joins
+  alone can't reach players who were already connected when the session
+  began. Each player is delivered **once per session AND context**: the
+  block stays in the conversation, so it is never repeated (not on a
+  re-join, not on their next chat line) until compaction trims it away. The
+  dedup set is **persisted with the session file**, so a restart that
+  restores the conversation also restores it — the restored thread already
+  carries the injection. (An older session file without the key re-seeds
+  them once: a harmless duplicate.)
 
 ## How it works
 
@@ -231,7 +236,7 @@ player chat ──► write_to_console action (C→S packet)
   long an entry lives. You can only infer the window indirectly: a long
   gap between triggers where `cached` drops to 0 means the prior prefix
   expired.
-- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `session_path: false` is available to tests only.
+- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation (plus which players' memories it already carries) are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `session_path: false` is available to tests only.
 - **Join briefing**: joining players get a **personal, LLM-generated
   briefing on the run** — they cannot see what happened before they
   arrived, so the model greets them *and* tells them the state of the run

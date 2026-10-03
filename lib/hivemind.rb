@@ -280,9 +280,11 @@ class HivemindAgent
     @memory_store = MemoryStore.new(memory_dir)
     @memory_store.seed(MemoryStore::SOUL_KEY, HivemindPrompts::DEFAULT_SOUL) if @memory_store.enabled?
     # Player memories already delivered to the model THIS session (join
-    # greetings / chat turns). A fresh process resets it, so a new session
-    # re-seeds memories on first contact; within a session the memory
-    # already sits in the conversation after the first delivery.
+    # briefings / chat turns). PERSISTED with the session file: a restored
+    # conversation still contains the injection, so re-sending it after a
+    # restart would duplicate a block the model has already read. Cleared
+    # by compaction (the trimmed thread no longer has it), so the memories
+    # re-inject into the new context exactly once each.
     @memories_sent = Set.new
     # Players encountered THIS LLM session (since last compaction/reset).
     # Persisted with the session file; drives compaction targets so they
@@ -778,12 +780,12 @@ class HivemindAgent
   # dedup set clears on a fresh session, so the next one re-seeds).
   def memory_prompt(player: nil)
     lines = []
-    candidates = ([player].compact + online_player_list).reject { |n| @memories_sent.include?(n) }
+    candidates = ([player].compact + online_player_list).reject { |n| memories_sent.include?(n) }
     candidates.uniq.each do |name|
       mem = @memory_store.player(name)
       next unless mem && !mem.strip.empty?
       lines << "=== memory of #{name} ===\n#{mem}"
-      @memories_sent << name
+      mark_memory_sent(name)
       mark_player_seen(name)
     end
     return '' if lines.empty?
@@ -816,6 +818,30 @@ class HivemindAgent
     name = clean_text(name).strip
     return if name.empty? || name == HivemindAgent::AGENT_NAME
     @session_players_mutex.synchronize { @session_players << name }
+  end
+
+  # ── memories_sent ────────────────────────────────────────────────
+  #
+  # WHICH players' long-term memories this session has already handed the
+  # model. Once per session AND context: the injection stays in the
+  # conversation until compaction trims it away, so a player who rejoins
+  # (or simply speaks again) must not get the same block twice. It is
+  # persisted, so a restart that restores the conversation also restores
+  # this; compaction clears it (the trimmed thread lost the injection).
+  #
+  # Read, mark and reset all take @session_players_mutex — the packet thread
+  # snapshots it for the session file while the ask path injects.
+  def memories_sent
+    @session_players_mutex.synchronize { @memories_sent.dup }
+  end
+
+  def mark_memory_sent(name)
+    @session_players_mutex.synchronize { @memories_sent << clean_text(name).strip }
+  end
+
+  # Replace the set (session restore) or empty it (compaction).
+  def reset_memories_sent(names = [])
+    @session_players_mutex.synchronize { @memories_sent = Set.new(Array(names).map(&:to_s)) }
   end
 
   def unread_console(exclude: nil)
@@ -1047,7 +1073,7 @@ class HivemindAgent
     msg = "hivemind #{msg}" unless trigger_match?(msg)
     # Build prompt without mutating real state (queue / memories_sent).
     saved_queue = @console_mutex.synchronize { @console_queue.dup }
-    saved_memories = @memories_sent.dup
+    saved_memories = memories_sent
     saved_players = @session_players_mutex.synchronize { @session_players.dup }
     prompt = nil
     begin
@@ -1061,7 +1087,7 @@ class HivemindAgent
       )
     ensure
       @console_mutex.synchronize { @console_queue.replace(saved_queue) }
-      @memories_sent.replace(saved_memories)
+      reset_memories_sent(saved_memories)
       @session_players_mutex.synchronize { @session_players.replace(saved_players) } if saved_players
     end
     snapshot = @mutex.synchronize { @chat ? @chat.messages.dup : [] }

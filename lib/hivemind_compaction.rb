@@ -165,7 +165,7 @@ module HivemindCompaction
       # with it: post-compaction is a new conversation identity.
       @opencode_session_id = SecureRandom.uuid
       apply_request_headers(@chat)
-      @memories_sent.clear
+      reset_memories_sent            # the trimmed thread lost the injections
       @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
       @chat.with_instructions(system_prompt_with_memories)
       @persisted_messages = nil   # force re-serialization of the trimmed thread

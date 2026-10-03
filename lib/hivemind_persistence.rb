@@ -21,11 +21,12 @@ module HivemindPersistence
   def load_session
     return unless @session_path && File.exist?(@session_path)
     data = JSON.parse(File.read(@session_path))
-    # The restored conversation may or may not contain past
-    # memory injections — either way the players' memories re-seed (the
-    # dedup set is empty at process start; a duplicate injection is
-    # harmless).
-    @memories_sent.clear
+    # Players whose long-term memory this session already handed the model.
+    # RESTORED, not cleared: the conversation we are about to resume still
+    # contains those injections, so re-sending them would duplicate a block
+    # the model has read. An older file without the key re-seeds them (one
+    # duplicate, harmless).
+    reset_memories_sent(data['memories_sent'])
     if data['console_queue'].is_a?(Array)
       @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] }
     end
@@ -106,6 +107,9 @@ module HivemindPersistence
       'opencode_session' => opencode_session_id,
       'console_queue' => @console_queue,
       'session_players' => @session_players.to_a,
+      # Players whose memory block this conversation already carries — see
+      # HivemindAgent#memories_sent.
+      'memories_sent' => memories_sent.to_a,
       # JSON object keyed by timer name — the followups feature owns the
       # entries and hands them over in this shape (the file is ours).
       'followups' => (plugins[:followups]&.pending || [])

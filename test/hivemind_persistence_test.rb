@@ -41,6 +41,35 @@ class TestHivemindPersistence < Minitest::Test
   end
 
 
+  # A player's long-term memory is injected ONCE per session and context:
+  # the block stays in the conversation, so re-sending it after a restart
+  # would duplicate what the model already read. The dedup set is therefore
+  # persisted with the session — and compaction is what clears it.
+  def test_memories_sent_survives_a_restart_and_is_cleared_by_compaction
+    Dir.mktmpdir do |dir|
+      sess = File.join(dir, 'session.json')
+      mem_dir = File.join(dir, 'mem')
+      a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: mem_dir)
+      a1.instance_variable_get(:@memory_store).write_key('alice', 'alice builds belts')
+      a1.send(:memory_prompt, player: 'alice')
+      assert_equal ['alice'], a1.send(:memories_sent).to_a, 'delivered once'
+      assert_empty a1.send(:memory_prompt, player: 'alice'), 'and not re-injected within the session'
+      a1.send(:persist!)
+
+      assert_equal ['alice'], JSON.parse(File.read(sess))['memories_sent'],
+                   'the set is in the session file'
+
+      a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: mem_dir)
+      assert_equal ['alice'], a2.send(:memories_sent).to_a, 'restored on restart'
+      assert_empty a2.send(:memory_prompt, player: 'alice'), 'the restored conversation already carries it'
+
+      # Compaction trims the thread, so the memories must be able to speak again.
+      a2.send(:reset_memories_sent)
+      assert_empty a2.send(:memories_sent).to_a
+      assert_includes a2.send(:memory_prompt, player: 'alice'), 'memory of alice'
+    end
+  end
+
   def test_corrupt_session_starts_fresh
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')

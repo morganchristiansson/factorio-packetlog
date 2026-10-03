@@ -11,6 +11,14 @@ gem 'ruby_llm-responses_api', '0.5.4' # Responses API for muse-spark-1.3-contrib
 # Test suite
 gem 'minitest', '~> 5.0'
 
-# Dev-only: sampling profiler for the full capture decode
-#   bundle exec ruby -r./tools/profile.rb factorio-packettools.rb -r cap.pcap
-gem 'vernier', '~> 1.11', require: false
+
+# NOT HERE: vernier, the sampling profiler. `bundle install` should not pull
+# a profiler in for every run, and there is no "optional gem" in bundler —
+# so it stays out and profiling runs it directly (once, outside the bundle):
+#
+#   gem install vernier     # once
+#   vernier run -- ruby factorio-packettools.rb -r captures/<file>.pcap
+#   vernier view --top 25 profile-*.vernier.json.gz
+#
+# The child ruby still gets the app's gems (factorio-packettools.rb requires
+# bundler/setup itself), so `bundle exec` is not needed on either command.

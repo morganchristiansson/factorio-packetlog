@@ -325,8 +325,14 @@ ruby tools/rcon.rb status          # version/players/admins/time/evolution
 ruby tools/rcon.rb exec "/shout hi"  # or /sc for silent Lua
 
 # Profile a full capture decode (sampling profiler, dev-only gem):
-bundle exec vernier run -- ruby factorio-packettools.rb -r captures/server-<port>-<ts>.pcap
-bundle exec vernier view --top 25 profile-*.vernier.json.gz
+# Profiling is a one-off and vernier is deliberately NOT in the Gemfile
+# (no "optional gem" in bundler, and a profiler is not something every
+# `bundle install` should fetch): gem install it once, outside the bundle,
+# and run it without `bundle exec` — the child ruby still gets the app's
+# gems, because factorio-packettools.rb requires bundler/setup itself.
+gem install vernier
+vernier run -- ruby factorio-packettools.rb -r captures/server-<port>-<ts>.pcap
+vernier view --top 25 profile-*.vernier.json.gz
 
 # Tests (bundle exec: server_mode/translation need the rcon gem, and it
 # makes the whole suite runnable in one process — 365 runs, no version-table

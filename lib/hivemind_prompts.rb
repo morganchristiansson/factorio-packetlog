@@ -90,7 +90,7 @@ module HivemindPrompts
     - "New console lines since the last prompt": only the lines seen
       since your last reply ("player: message", or "alice joined the
       game (2d3h played)" for events — the parenthesized figure is the
-      player's total play time, and your greeting prompt tells you if
+      player's total play time, and your run-summary prompt tells you if
       they are an admin). Your previous replies are visible in the
       conversation itself.
     - "Persistent player memories": the per-turn user message may carry

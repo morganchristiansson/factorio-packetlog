@@ -232,15 +232,19 @@ player chat ──► write_to_console action (C→S packet)
   gap between triggers where `cached` drops to 0 means the prior prefix
   expired.
 - **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `session_path: false` is available to tests only.
-- **Join greeting**: joining players get a **personal, LLM-generated
-  welcome** — the model greets them informed by the current console
-  context (recent chat, who else is online, their play history), one or
-  two short sentences, sent through the say tool. The join event line
+- **Join briefing**: joining players get a **personal, LLM-generated
+  briefing on the run** — they cannot see what happened before they
+  arrived, so the model greets them *and* tells them the state of the run
+  (what has happened since it started), informed by the current console
+  context (recent chat, their play history, what the run left in long-term
+  memory), one or two short sentences, sent through the say tool. It stays
+  a greeting too: the player's memory rides along with the prompt, so being
+  recognised counts. The join event line
   includes the player's current total play time from the cached
   packet-derived attrs (seeded from RCON at startup; a single targeted
   RCON lookup is used for newly joined players), formatted the same way
   as the context snapshot's stats (`2d3h`, `45m`):
-  `alice joined the game (2d3h played)`. The greeting instruction also
+  `alice joined the game (2d3h played)`. The briefing instruction also
   states the player's admin status ("they have played 2d3h in total and
   are an admin" — from the same attrs query), and the player's long-term
   memory is injected into the prompt once per session. Runs off the packet

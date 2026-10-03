@@ -131,8 +131,9 @@ class TestHivemindAgent < Minitest::Test
 
       assert_equal %w[compaction followups], HivemindAgent.config_plugins(path)
     end
-    # the shipped example enables all four
-    assert_equal %w[persistence compaction followups logwatcher], HivemindAgent.config_plugins(HIVE_TEST_CONFIG)
+    # the shipped example enables every feature
+    assert_equal %w[persistence compaction followups logwatcher tags],
+                 HivemindAgent.config_plugins(HIVE_TEST_CONFIG)
     assert_equal HivemindAgent.config_plugins(HIVE_TEST_CONFIG), HivemindAgent.own_plugins
     assert @agent.plugin?('compaction')
     assert @agent.plugin?('logwatcher')

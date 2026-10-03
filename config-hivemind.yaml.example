@@ -23,11 +23,14 @@ model: deepseek-v4-flash
 #   compaction   /compact + long-term memory (SOUL/KNOWLEDGE/players)
 #   followups    schedule_followup / cancel_followup timers
 #   logwatcher   tail factorio-current.log: scenario events feed the agent
+#   tags         the set_player_tag tool — the agent's ONLY write to game
+#                state, kept out of the list here so it is an explicit choice
 plugins:
   - persistence
   - compaction
   - followups
   - logwatcher
+  - tags
 
 # One entry per endpoint/credential set. Every model listed under a
 # provider uses that provider's provider/api_base/api_key_env; a model

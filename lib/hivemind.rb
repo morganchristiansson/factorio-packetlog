@@ -526,27 +526,30 @@ class HivemindAgent
     end
   end
 
-  # Personal, LLM-generated welcome for a joining player, informed by the
-  # console context (recent chat, who's online, their play history). Runs
-  # on the event worker with its own arrival-time rate limit.
-  # A greeting can delay subsequent agent events, never packet decoding.
+  # LLM-generated run briefing WITH a personal greeting for a joining player:
+  # what has happened in this run so far, said to them as they arrive, plus
+  # a greeting informed by who they are (their memory rides along with the
+  # prompt). Informed by the console context (recent chat, who's online),
+  # their play history, and whatever the run has left in long-term memory.
+  # Runs on the event worker with its own arrival-time rate limit; it can
+  # delay subsequent agent events, never packet decoding.
   # `line` is the exact join console line (greet_join's exclude must match
   # it so the event reaches the model only via the instruction), `attrs`
-  # the player's attribute snapshot (play time + admin) or nil. The
-  # player's long-term memory is injected into the greeting prompt (once
-  # per session) so the welcome is informed by who they are.
+  # the player's attribute snapshot (play time + admin) or nil.
   def greet_join(name, line, attrs = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     rate_mutex.synchronize do
       return if now - @last_greet < @greet_interval
       @last_greet = now
     end
     prompt = turn_prompt(
-      "#{name} just joined the game. Greet them personally and briefly " \
-      "(one or two short sentences, under 150 characters), informed by " \
-      "what is happening right now: the recent console lines, who else " \
-      "is online, and their play history" \
-      "#{join_facts(attrs)}. " \
-      'Call the reply tool with your greeting.',
+      "#{name} just joined the game. Greet them personally and briefly — " \
+      "you remember them (their memory rides along with this prompt) — and " \
+      "brief them on the run: what has happened since it started, in one " \
+      "or two short sentences (under 150 characters). They cannot see what " \
+      "came before they arrived, so make it a briefing, not a welcome " \
+      "speech. Use what you can see and what you remember about this run" \
+      "#{join_facts(attrs)}. If you know nothing about the run yet, greet " \
+      'them and stop. Call the reply tool with it.',
       exclude: [nil, line],
       player: name
     )
@@ -579,7 +582,10 @@ class HivemindAgent
     return unless chat
     chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
     chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
-    chat.with_tool(SetPlayerTag.new(rcon: @rcon)) if defined?(SetPlayerTag)
+    # The state-changing tool is a feature, not a constant: with `tags` out of
+    # config-hivemind.yaml's list the file is never required and the model is
+    # never offered the write (no guard needed here — nil plugin, nil call).
+    plugins[:tags]&.register(chat, @rcon)
     chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp) && plugin?('followups')
     chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp) && plugin?('followups')
     # The language tool edits the per-player language overrides the

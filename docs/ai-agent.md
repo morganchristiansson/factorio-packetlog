@@ -312,9 +312,16 @@ HIVE_API_KEY=... sudo ruby factorio-packettools.rb        # server mode; agent a
 
 The key comes from the environment **first** (`api_key_env`, by default
 `HIVE_API_KEY`), then from the provider group's `api_key:` in
-`config-hivemind.yaml` — the file is gitignored, so a key stored there
-stays local, and the env still overrides it for CI/ops. Deliberately no CLI
-flag and no `OPENAI_API_KEY` fallback. Every other Hivemind setting is
+`config-hivemind.yaml` (or a model entry's own `api_key:`) — the file is
+gitignored, so a key stored there stays local, and the env still overrides
+it for CI/ops. An **empty** value counts as absent at every step: an env
+var set to `""` (shell profile, systemd unit, container env) used to
+short-circuit the `||` chain, and the agent started with an empty
+credential, which the gateway reports as "authentication header missing".
+The key and endpoint are written to **the model's own provider slot**
+(`RubyLLM` reads `<provider>_api_key`, so `provider: deepseek` gets
+`deepseek_api_key`, not `openai_api_key`). Deliberately no CLI flag and no
+`OPENAI_API_KEY` fallback. Every other Hivemind setting is
 required from `config-hivemind.yaml`; the file must exist and contain all
 keys shown in `config-hivemind.yaml.example`. There are no code defaults for
 model, provider, endpoint, prompts, limits, or compaction thresholds. The

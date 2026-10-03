@@ -109,6 +109,87 @@ class TestHivemindAgent < Minitest::Test
     old.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 
+  # "authentication header missing" was two bugs, both about the key:
+  #
+  #   1. An EMPTY env var beat the config file. `ENV['HIVE_API_KEY']` is ""
+  #    (not nil) when a shell profile/systemd unit/container sets it to
+  #    nothing, and `"" || fallback` short-circuits — so the agent started,
+  #    raised nothing, and sent an empty credential on every call.
+  #   2. The key went to RubyLLM's OPENAI slot whatever the provider, so a
+  #    `provider: deepseek` (or anthropic/gemini/...) group configured a key
+  #    the request never carried. RubyLLM reads `<provider>_api_key`.
+  def test_an_empty_env_var_does_not_shadow_the_config_key
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    config['providers'].values.first['api_key'] = 'yaml-key'
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      with_env('HIVE_API_KEY' => '') do
+        agent = make_agent(config_file: path)
+        assert_equal 'yaml-key', agent.send(:api_key_for, agent.model),
+                     'an env var set to nothing is not a credential'
+        assert HivemindAgent.key_configured?(path)
+      end
+    end
+  end
+
+  def test_key_and_base_go_to_the_models_own_provider_slot
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    group = config['providers'].values.first
+    group['provider'] = 'deepseek'
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      agent = with_env('HIVE_API_KEY' => 'sk-test') { make_agent(config_file: path) }
+      llm = RubyLLM.config
+      assert_equal 'sk-test', llm.deepseek_api_key, 'the key lands on the provider RubyLLM reads'
+      assert_equal group['api_base'], llm.deepseek_api_base
+      assert_equal :deepseek, agent.send(:model_provider, agent.model)
+
+      # Switching models re-applies it through the same seam.
+      other = group['models'].map { |m| m.is_a?(Hash) ? m['name'] : m }.find { |m| m != config['model'] }
+      agent.send(:configure_model!, other)
+      assert_equal 'sk-test', llm.deepseek_api_key, 'configure_model! uses the same slot'
+    end
+  end
+
+  # A key on a MODEL entry counts, exactly as it does at request time — the
+  # startup check reads the same flattened config the agent builds from.
+  def test_key_on_a_model_entry_counts
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    name = config['model']
+    group = config['providers'].values.first
+    # string keys: this YAML goes through safe_load_file on the way back in
+    group['models'] = group['models'].map { |m| { 'name' => m.is_a?(Hash) ? m['name'] : m, 'api_key' => 'model-key' } }
+    group.delete('api_key')
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      with_env('HIVE_API_KEY' => nil) do
+        assert HivemindAgent.key_configured?(path), 'a per-model key turns the agent on'
+        assert_equal 'model-key', make_agent(config_file: path).send(:api_key_for, name)
+      end
+    end
+  end
+
+  # "Is my config key actually being read?" has to be answerable from the
+  # startup log, not by guesswork: one line naming the key SOURCE and the
+  # provider slot it was written to (the key itself never appears).
+  def test_startup_logs_the_key_source_and_the_slot_it_is_written_to
+    config = YAML.safe_load_file(HIVE_TEST_CONFIG)
+    group = config['providers'].values.first
+    group['provider'] = 'deepseek'
+    group['api_key'] = 'yaml-key'
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'config-hivemind.yaml')
+      File.write(path, YAML.dump(config))
+      out, = with_env('HIVE_API_KEY' => nil) { capture_io { make_agent(config_file: path) } }
+      assert_includes out, 'api key from config api_key:'
+      assert_includes out, 'set as deepseek_api_key', 'and the slot RubyLLM will read it from'
+      refute_match(/yaml-key/, out, 'the key itself is never logged')
+    end
+  end
+
   # The file must exist (named once, with the example to copy); the keys are
   # not validated up front — they raise where they are read.
   def test_config_is_required

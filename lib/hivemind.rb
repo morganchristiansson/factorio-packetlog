@@ -185,12 +185,58 @@ class HivemindAgent
     model_settings(model)[:api_base]
   end
 
+
   # Env wins (ops/CI injects it without editing the file), then the
   # provider group's `api_key:` (config-hivemind.yaml is gitignored), then
   # HIVE_API_KEY as the shared fallback.
-  def api_key_for(model)
+  #
+  # An EMPTY value counts as absent at every step. `ENV['HIVE_API_KEY']` is
+  # `""` — not nil — when a shell profile, systemd unit or container env sets
+  # the variable to nothing, and `"" || fallback` short-circuits: the agent
+  # started, raised nothing, and every request went out with an empty
+  # credential, which the gateway reports as "authentication header missing".
+  def self.resolve_api_key(settings)
+    settings = (settings || {}).transform_keys(&:to_sym)
+    # Same precedence as before, but the first NON-EMPTY value wins: the
+    # named env var, then the provider group's `api_key:`, then the bare
+    # HIVE_API_KEY fallback.
+    [ENV[settings[:api_key_env] || 'HIVE_API_KEY'], settings[:api_key], ENV['HIVE_API_KEY']]
+      .find { |v| !v.to_s.empty? }
+  end
+
+  def api_key_for(model) = HivemindAgent.resolve_api_key(model_settings(model))
+
+  # WHERE the key came from — env var name, or the config's own `api_key:`.
+  # The key itself is never logged; this is the one line that answers "is my
+  # config key actually being read?" and "which provider slot got it",
+  # which is otherwise guesswork when a gateway answers
+  # "authentication header missing".
+  def api_key_source(model)
     settings = model_settings(model)
-    ENV[settings[:api_key_env] || 'HIVE_API_KEY'] || settings[:api_key] || ENV['HIVE_API_KEY']
+    name = settings[:api_key_env] || 'HIVE_API_KEY'
+    return "env #{name}" unless ENV[name].to_s.empty?
+    return 'config api_key:' unless settings[:api_key].to_s.empty?
+    return 'env HIVE_API_KEY' unless ENV['HIVE_API_KEY'].to_s.empty?
+    'none'
+  end
+
+  # Flatten provider groups into per-model settings (group fields, overridden
+  # by the model entry; `provider` always from the group). Order — providers,
+  # then models within a provider — IS the /model + fallback order.
+  def self.model_configs(config)
+    config.fetch('providers').flat_map do |group_name, fields|
+      group = (fields || {}).transform_keys(&:to_sym)
+      missing = %i[provider api_base models] - group.keys
+      raise ArgumentError, "provider #{group_name.inspect} is missing #{missing.join(', ')}" unless missing.empty?
+
+      Array(group[:models]).map do |entry|
+        model = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
+        name = model[:name].to_s
+        next if name.empty?
+
+        group.merge(model).merge(name: name, provider: group[:provider])
+      end
+    end.uniq { |model| model[:name] }
   end
 
   # Implicit on/off: the sniffer builds the agent in server mode iff the
@@ -198,11 +244,9 @@ class HivemindAgent
   # agent (a config without a key must stay silent, not raise).
   def self.key_configured?(path = CONFIG_FILE)
     config = load_config(path)
-    group = config['providers'].values.find do |fields|
-      Array(fields['models']).any? { |m| (m.is_a?(Hash) ? m['name'] : m).to_s == config['model'].to_s }
-    end
-    return false unless group
-    [group['api_key'], ENV[group['api_key_env'] || 'HIVE_API_KEY'], ENV['HIVE_API_KEY']].any? { |v| !v.to_s.empty? }
+    model = model_configs(config).find { |m| m[:name] == config['model'].to_s }
+    return false unless model
+    !resolve_api_key(model).nil?
   rescue StandardError
     false
   end
@@ -299,19 +343,7 @@ class HivemindAgent
     # (providers, then models within a provider) IS the /model + fallback
     # order. api_key_env + api_key are the optional key fields (env wins,
     # api_key_env defaults to HIVE_API_KEY).
-    @model_configs = hive_config.fetch('providers').flat_map do |group_name, fields|
-      group = (fields || {}).transform_keys(&:to_sym)
-      missing = %i[provider api_base models] - group.keys
-      raise ArgumentError, "provider #{group_name.inspect} is missing #{missing.join(', ')}" unless missing.empty?
-
-      Array(group[:models]).map do |entry|
-        config = entry.is_a?(Hash) ? entry.transform_keys(&:to_sym) : { name: entry }
-        name = config[:name].to_s
-        next if name.empty?
-
-        group.merge(config).merge(name: name, provider: group[:provider])
-      end
-    end.uniq { |config| config[:name] }
+    @model_configs = self.class.model_configs(hive_config)
     raise ArgumentError, 'no models configured' if @model_configs.empty?
     @models = @model_configs.map { |config| config[:name] }
     @model = hive_config.fetch('model')
@@ -327,11 +359,12 @@ class HivemindAgent
     @min_interval = hive_config.fetch('min_interval').to_f
     @greet_interval = hive_config.fetch('greet_interval').to_f
 
-    raise ArgumentError, "no API key configured for #{@model}" if llm_api_key.nil?
+    raise ArgumentError, "no API key configured for #{@model} — put api_key: under its " \
+                         'provider group in config-hivemind.yaml, or set HIVE_API_KEY in the env' if llm_api_key.nil?
 
+    slot = nil
     RubyLLM.configure do |config|
-      config.openai_api_base = api_base_for(@model)
-      config.openai_api_key = llm_api_key
+      slot = apply_endpoint!(config, @model, llm_api_key)
       config.default_model = @model
       # Read timeout ceiling for EVERY request (faraday). Raised from 60s
       # because memory compaction sends the WHOLE conversation (hundreds of
@@ -371,6 +404,9 @@ class HivemindAgent
     register_tools
 
     hook_chat_observers if @chat
+    # One line that makes an auth failure self-diagnosing: which key source
+    # won, and WHICH provider slot RubyLLM will read it from.
+    log "model #{@model} via #{@provider}/#{api_base_for(@model)} — api key from #{api_key_source(@model)}, set as #{slot}_api_key"
     plugins[:persistence]&.load!
     plugins[:followups]&.ensure_followup_scheduler
     initialize_events
@@ -645,9 +681,25 @@ class HivemindAgent
     raise ArgumentError, "no API key configured for #{model}" if key.nil?
     RubyLLM.configure do |config|
       config.default_model = model if config.respond_to?(:default_model=)
-      config.openai_api_base = api_base_for(model)
-      config.openai_api_key = key
+      apply_endpoint!(config, model, key)
     end
+  end
+
+  # Set the endpoint and the key on THIS model's provider slot. RubyLLM reads
+  # `<provider>_api_key` / `<provider>_api_base` (openai_api_key,
+  # deepseek_api_key, anthropic_api_key, …), so writing them into the openai
+  # slot whatever the provider — as this used to — leaves every other
+  # provider unauthenticated: the request goes out with no Authorization
+  # header and the gateway answers "authentication header missing" even
+  # though `api_key:` sits right there in the config. A provider RubyLLM has
+  # no slot for (an OpenAI-compatible api_base under a custom name) falls
+  # back to openai's.
+  def apply_endpoint!(config, model, key)
+    provider = model_provider(model).to_s
+    provider = 'openai' unless config.respond_to?("#{provider}_api_key=")
+    config.send("#{provider}_api_base=", api_base_for(model))
+    config.send("#{provider}_api_key=", key)
+    provider
   end
 
   def activate_model!(new_model)

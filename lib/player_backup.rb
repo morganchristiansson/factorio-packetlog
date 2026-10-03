@@ -50,9 +50,17 @@ class PlayerBackup
   # `host` is the sniffer (Plugins hands every feature its owner): the two
   # things this one needs are on it, and either may be nil — no RCON, no
   # backup.
-  def initialize(host)
+  #
+  # `path:` is the same dependency injection every other file-backed class
+  # here takes (PlayerDatabase.new(path), MemoryStore.new(dir)): the file to
+  # keep is a CONSTRUCTOR argument, not a baked-in constant, so a caller (a
+  # test, or two features with two files) names its own instead of the whole
+  # process chdir'ing into a scratch directory to get out of the way.
+  def initialize(host, path: FILENAME, legacy_path: LEGACY_FILENAME)
     @rcon = host.rcon
     @player_db = host.player_db
+    @path = path
+    @legacy_path = legacy_path
     @mutex = Mutex.new # one join at a time + the file write (see #persist)
   end
 
@@ -215,7 +223,7 @@ class PlayerBackup
   # keeps every saved bar.
   def load_records
     out = {}
-    [FILENAME, LEGACY_FILENAME].each do |file|
+    [@path, @legacy_path].each do |file|
       next unless File.exist?(file)
       JSON.parse(File.read(file)).each do |name, rec|
         next unless rec.is_a?(Array) || rec.is_a?(Hash)
@@ -233,11 +241,11 @@ class PlayerBackup
   # players-cache.json: a crash mid-write must not leave a file that would
   # then be read back as "this player's bar is empty".
   def persist
-    path = FILENAME
+    path = @path
     tmp = "#{path}.tmp"
     File.write(tmp, JSON.pretty_generate(records))
     File.rename(tmp, path)
   rescue StandardError => e
-    warn "#{FILENAME} save failed: #{e.class}: #{e.message}"
+    warn "#{@path} save failed: #{e.class}: #{e.message}"
   end
 end

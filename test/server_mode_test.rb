@@ -17,6 +17,7 @@ require 'minitest/autorun'
 require 'tmpdir'
 require_relative '../factorio-packettools'
 require_relative 'fixtures/packets'
+require 'player_backup' # the feature under test here; the plugin set requires it too
 
 class TestServerMode < Minitest::Test
   SERVER_IP = '192.168.1.10'
@@ -856,11 +857,16 @@ class TestServerMode < Minitest::Test
   #
   # Built the way the sniffer builds it — from the list, with an owner — so
   # the registration path is what is under test, not the constructor alone.
-  def build_backup(rcon: nil, player_db: nil)
+  # `path:` names the feature's own file (Plugins hands constructor kwargs to
+  # the feature) so the test never has to chdir into the tmpdir to point it
+  # somewhere harmless.
+  def build_backup(rcon: nil, player_db: nil, path: PlayerBackup::FILENAME,
+                   legacy: PlayerBackup::LEGACY_FILENAME)
     host = Object.new
     host.define_singleton_method(:rcon) { rcon }
     host.define_singleton_method(:player_db) { player_db }
-    built = Plugins::PluginSet.new(%w[player_backup], host).features
+    built = Plugins::PluginSet.new(%w[player_backup], host,
+                                   args: { 'player_backup' => { path: path, legacy_path: legacy } }).features
     assert_equal 1, built.size, 'the feature is there'
     built.first
   end
@@ -887,55 +893,55 @@ class TestServerMode < Minitest::Test
 
   def test_player_backup_snapshots_and_restores
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        rcon, calls = fake_backup_rcon
-        db = recording_db
-        backup = build_backup(rcon: rcon, player_db: db)
-        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
+      path = File.join(dir, PlayerBackup::FILENAME)
+      legacy = File.join(dir, PlayerBackup::LEGACY_FILENAME)
+      rcon, calls = fake_backup_rcon
+      db = recording_db
+      backup = build_backup(rcon: rcon, player_db: db, path: path, legacy: legacy)
+      bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32, '30' => 33)
 
-        # a bar in game is the truth: snapshot it, write nothing to the server
-        backup.on_join_enriched('alice', 1, quickbar: bar)
-        assert_empty calls, 'nothing is written when the bar is already there'
-        saved = JSON.parse(File.read(PlayerBackup::FILENAME))
-        assert_equal 30, saved['alice']['quickbar'][0][0], 'persisted by NAME, indexed by page/slot'
-        assert_equal bar, backup['alice']['quickbar'], 'and readable back'
+      # a bar in game is the truth: snapshot it, write nothing to the server
+      backup.on_join_enriched('alice', 1, quickbar: bar)
+      assert_empty calls, 'nothing is written when the bar is already there'
+      saved = JSON.parse(File.read(path))
+      assert_equal 30, saved['alice']['quickbar'][0][0], 'persisted by NAME, indexed by page/slot'
+      assert_equal bar, backup['alice']['quickbar'], 'and readable back'
 
-        # a new save: a fresh instance (restart) reads the same file, and she
-        # joins with an empty bar → put the saved one back
-        fresh = build_backup(rcon: rcon, player_db: db)
-        fresh.on_join_enriched('alice', 7, quickbar: nil)
-        assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }]], calls,
-                     'restored by name, with the flat cell indices the setter takes'
-        assert_equal [7, bar], db.replaced, 'the in-memory cache follows the game'
+      # a new save: a fresh instance (restart) reads the same file, and she
+      # joins with an empty bar → put the saved one back
+      fresh = build_backup(rcon: rcon, player_db: db, path: path, legacy: legacy)
+      fresh.on_join_enriched('alice', 7, quickbar: nil)
+      assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }]], calls,
+                   'restored by name, with the flat cell indices the setter takes'
+      assert_equal [7, bar], db.replaced, 'the in-memory cache follows the game'
 
-        # someone we have never seen, joining empty, is left alone
-        before = db.replaced
-        fresh.on_join_enriched('bob', 8, quickbar: nil)
-        assert_equal 1, calls.size, 'no restore without a saved bar'
-        assert_equal before, db.replaced, 'and the cache untouched'
+      # someone we have never seen, joining empty, is left alone
+      before = db.replaced
+      fresh.on_join_enriched('bob', 8, quickbar: nil)
+      assert_equal 1, calls.size, 'no restore without a saved bar'
+      assert_equal before, db.replaced, 'and the cache untouched'
 
-        # a failed Lua read is not an empty bar: leave it alone
-        fresh.on_join_enriched('alice', 7, quickbar: :failed)
-        assert_equal 1, calls.size, ':failed is not "empty", so no restore'
-      end
+      # a failed Lua read is not an empty bar: leave it alone
+      fresh.on_join_enriched('alice', 7, quickbar: :failed)
+      assert_equal 1, calls.size, ':failed is not "empty", so no restore'
     end
   end
 
   def test_player_backup_needs_rcon_and_survives_a_corrupt_file
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        rcon, = fake_backup_rcon
-        backup = build_backup(rcon: rcon)  # the build requires the feature file
-        File.write(PlayerBackup::FILENAME, '{broken')
-        backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30))
-        assert_equal 30, JSON.parse(File.read(PlayerBackup::FILENAME))['alice']['quickbar'][0][0],
-                     'a corrupt file reads as empty and the next join rewrites it'
+      path = File.join(dir, PlayerBackup::FILENAME)
+      legacy = File.join(dir, PlayerBackup::LEGACY_FILENAME)
+      rcon, = fake_backup_rcon
+      backup = build_backup(rcon: rcon, path: path, legacy: legacy)  # the build requires the feature file
+      File.write(path, '{broken')
+      backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30))
+      assert_equal 30, JSON.parse(File.read(path))['alice']['quickbar'][0][0],
+                   'a corrupt file reads as empty and the next join rewrites it'
 
-        # no RCON (client mode, or RCON down): the event is a no-op
-        before = File.read(PlayerBackup::FILENAME)
-        build_backup.on_join_enriched('alice', 1, quickbar: nil)
-        assert_equal before, File.read(PlayerBackup::FILENAME), 'no restore without a client to ask'
-      end
+      # no RCON (client mode, or RCON down): the event is a no-op
+      before = File.read(path)
+      build_backup.on_join_enriched('alice', 1, quickbar: nil)
+      assert_equal before, File.read(path), 'no restore without a client to ask'
     end
   end
 
@@ -947,28 +953,28 @@ class TestServerMode < Minitest::Test
   # game's 0.5 truncated, hence 0.498 here).
   def test_set_player_color_decodes_into_the_player_db
     Dir.mktmpdir do |dir|
+      # No Dir.chdir: PlayerDatabase takes its path, like every other
+      # file-backed class here (and PlayerBackup now does too).
       db_path = File.join(dir, 'players-cache.json')
-      Dir.chdir(dir) do
-        sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP], player_db: db_path)
-        db = PlayerDatabase.new(db_path)
-        sniffer.instance_variable_set(:@player_db, db)
-        db[3] = { name: 'karada' }
-        # 2.0 wire 296 = set_player_color; the name comes from the game index
-        act = { name: 'set_player_color', type: 296, game_player: 3,
-                data: [255, 255, 255, 127].pack('C4') }
-        capture_io { sniffer.send(:log_action, 0, act, false) }
-        assert_equal [1.0, 1.0, 1.0, 0.498], db[3][:color],
-                     '4 UNORM bytes → [r,g,b,a] 0..1 on the cache record'
-        assert_equal [1.0, 1.0, 1.0, 0.498],
-                     JSON.parse(File.read(db_path))['3']['color'],
-                     'and persisted to players-cache.json'
+      sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP], player_db: db_path)
+      db = PlayerDatabase.new(db_path)
+      sniffer.instance_variable_set(:@player_db, db)
+      db[3] = { name: 'karada' }
+      # 2.0 wire 296 = set_player_color; the name comes from the game index
+      act = { name: 'set_player_color', type: 296, game_player: 3,
+              data: [255, 255, 255, 127].pack('C4') }
+      capture_io { sniffer.send(:log_action, 0, act, false) }
+      assert_equal [1.0, 1.0, 1.0, 0.498], db[3][:color],
+                   '4 UNORM bytes → [r,g,b,a] 0..1 on the cache record'
+      assert_equal [1.0, 1.0, 1.0, 0.498],
+                   JSON.parse(File.read(db_path))['3']['color'],
+                   'and persisted to players-cache.json'
 
-        # An unknown player (no name bound to that index) is left alone: a
-        # colour with no owner would poison somebody else's record.
-        other = { name: 'set_player_color', type: 296, game_player: 9, data: "\x00\x00\x00\x7F".b }
-        capture_io { sniffer.send(:log_action, 0, other, false) }
-        assert_nil db[9], 'no name, no write — the packet path never invents a record'
-      end
+      # An unknown player (no name bound to that index) is left alone: a
+      # colour with no owner would poison whoever takes that slot later.
+      other = { name: 'set_player_color', type: 296, game_player: 9, data: "\x00\x00\x00\x7F".b }
+      capture_io { sniffer.send(:log_action, 0, other, false) }
+      assert_nil db[9], 'no name, no write — the packet path never invents a record'
     end
   end
 
@@ -976,50 +982,50 @@ class TestServerMode < Minitest::Test
   # who never join while we run, which is the whole reason the query exists.
   def test_player_backup_snapshots_the_whole_roster_at_startup
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
-        roster = [
-          { name: 'alice', connected: true, color: [0.815, 0.024, 0.0, 0.5], quickbar: bar },
-          { name: 'bob', connected: false, color: [0.1, 0.2, 0.3, 1.0], quickbar: bar },
-          # an offline player whose getter raised: :failed is NOT an empty bar
-          { name: 'carol', connected: false, color: nil, quickbar: :failed },
-          { name: 'dave', connected: false, color: nil, quickbar: nil } # empty bar: nothing to learn
-        ]
-        rcon, calls = fake_backup_rcon(roster: roster)
-        backup = build_backup(rcon: rcon)
-        out, = capture_io { backup.on_start }
-        saved = JSON.parse(File.read(PlayerBackup::FILENAME))
-        assert_equal 4, saved.size, 'every player in the dump gets a record'
-        assert_equal bar, backup['bob']['quickbar'], 'a player who never joins us is still snapshotted'
-        assert_equal [0.1, 0.2, 0.3, 1.0], saved['bob']['color'], 'and their colour with it'
-        assert_nil saved['carol']['quickbar'], ':failed saves nothing'
-        assert_nil saved['dave']['quickbar'], 'an empty bar teaches us nothing'
-        assert_empty calls, 'a snapshot never writes to the server'
-        assert_includes out, 'roster snapshot: 4 players', 'the operator sees what was captured'
+      path = File.join(dir, PlayerBackup::FILENAME)
+      legacy = File.join(dir, PlayerBackup::LEGACY_FILENAME)
+      bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
+      roster = [
+        { name: 'alice', connected: true, color: [0.815, 0.024, 0.0, 0.5], quickbar: bar },
+        { name: 'bob', connected: false, color: [0.1, 0.2, 0.3, 1.0], quickbar: bar },
+        # an offline player whose getter raised: :failed is NOT an empty bar
+        { name: 'carol', connected: false, color: nil, quickbar: :failed },
+        { name: 'dave', connected: false, color: nil, quickbar: nil } # empty bar: nothing to learn
+      ]
+      rcon, calls = fake_backup_rcon(roster: roster)
+      backup = build_backup(rcon: rcon, path: path, legacy: legacy)
+      out, = capture_io { backup.on_start }
+      saved = JSON.parse(File.read(path))
+      assert_equal 4, saved.size, 'every player in the dump gets a record'
+      assert_equal bar, backup['bob']['quickbar'], 'a player who never joins us is still snapshotted'
+      assert_equal [0.1, 0.2, 0.3, 1.0], saved['bob']['color'], 'and their colour with it'
+      assert_nil saved['carol']['quickbar'], ':failed saves nothing'
+      assert_nil saved['dave']['quickbar'], 'an empty bar teaches us nothing'
+      assert_empty calls, 'a snapshot never writes to the server'
+      assert_includes out, 'roster snapshot: 4 players', 'the operator sees what was captured'
 
-        # A second startup changes nothing and rewrites nothing.
-        before = File.mtime(PlayerBackup::FILENAME)
-        capture_io { backup.on_start }
-        assert_equal before, File.mtime(PlayerBackup::FILENAME), 'unchanged roster = no rewrite'
+      # A second startup changes nothing and rewrites nothing.
+      before = File.mtime(path)
+      capture_io { backup.on_start }
+      assert_equal before, File.mtime(path), 'unchanged roster = no rewrite'
 
-        # No RCON (client mode): a no-op, like every other event here.
-        assert_empty capture_io { build_backup.on_start }.first,
-                     'without RCON there is no roster and nothing to say'
-      end
+      # No RCON (client mode): a no-op, like every other event here.
+      assert_empty capture_io { build_backup.on_start }.first,
+                   'without RCON there is no roster and nothing to say'
     end
   end
 
   def test_player_backup_reports_a_partial_restore
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        rcon, = fake_backup_rcon(version: '2.1.11', written: 1) # 2 asked, 1 written
-        backup = build_backup(rcon: rcon)
-        backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30, '4' => 32))
+      path = File.join(dir, PlayerBackup::FILENAME)
+      legacy = File.join(dir, PlayerBackup::LEGACY_FILENAME)
+      rcon, = fake_backup_rcon(version: '2.1.11', written: 1) # 2 asked, 1 written
+      backup = build_backup(rcon: rcon, path: path, legacy: legacy)
+      backup.on_join_enriched('alice', 1, quickbar: PlayerDatabase.parse_quickbar('1' => 30, '4' => 32))
 
-        _, err = capture_io { backup.on_join_enriched('alice', 1, quickbar: nil) }
-        assert_includes err, 'restored 1/2 slot(s)', 'a partial restore is reported, not swallowed'
-        assert_includes err, '2.1.11', 'and names the version, which decides the setter shape'
-      end
+      _, err = capture_io { backup.on_join_enriched('alice', 1, quickbar: nil) }
+      assert_includes err, 'restored 1/2 slot(s)', 'a partial restore is reported, not swallowed'
+      assert_includes err, '2.1.11', 'and names the version, which decides the setter shape'
     end
   end
 
@@ -1027,33 +1033,33 @@ class TestServerMode < Minitest::Test
   # save keeps the game's own copy), stored beside the bar under one name.
   def test_player_backup_snapshots_the_colour_beside_the_bar
     Dir.mktmpdir do |dir|
-      Dir.chdir(dir) do
-        rcon, calls = fake_backup_rcon
-        backup = build_backup(rcon: rcon)
-        bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
-        backup.on_join_enriched('alice', 1, quickbar: bar, color: [0.815, 0.024, 0.0, 0.5])
-        saved = JSON.parse(File.read(PlayerBackup::FILENAME))['alice']
-        assert_equal bar, saved['quickbar']
-        assert_equal [0.815, 0.024, 0.0, 0.5], saved['color']
+      path = File.join(dir, PlayerBackup::FILENAME)
+      legacy = File.join(dir, PlayerBackup::LEGACY_FILENAME)
+      rcon, calls = fake_backup_rcon
+      backup = build_backup(rcon: rcon, path: path, legacy: legacy)
+      bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
+      backup.on_join_enriched('alice', 1, quickbar: bar, color: [0.815, 0.024, 0.0, 0.5])
+      saved = JSON.parse(File.read(path))['alice']
+      assert_equal bar, saved['quickbar']
+      assert_equal [0.815, 0.024, 0.0, 0.5], saved['color']
 
-        assert_empty calls, 'the colour is never restored — the save has it'
+      assert_empty calls, 'the colour is never restored — the save has it'
 
-        # the quickbar-only file this feature used to be is still read
-        File.delete(PlayerBackup::FILENAME)
-        File.write(PlayerBackup::LEGACY_FILENAME, JSON.generate('bob' => bar))
-        fresh = build_backup(rcon: rcon)
-        assert_equal bar, fresh['bob']['quickbar'], 'a rename does not lose saved bars'
-        fresh.on_join_enriched('bob', 2, quickbar: nil)
-        assert_equal 1, calls.size, 'and the legacy bar restores as before'
+      # the quickbar-only file this feature used to be is still read
+      File.delete(path)
+      File.write(legacy, JSON.generate('bob' => bar))
+      fresh = build_backup(rcon: rcon, path: path, legacy: legacy)
+      assert_equal bar, fresh['bob']['quickbar'], 'a rename does not lose saved bars'
+      fresh.on_join_enriched('bob', 2, quickbar: nil)
+      assert_equal 1, calls.size, 'and the legacy bar restores as before'
 
-        # an unchanged colour does not rewrite the file. A join with a bar
-        # re-snapshots it by design, so probe with an empty bar.
-        build_backup(rcon: rcon).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
-        before = File.mtime(PlayerBackup::FILENAME)
-        sleep 0.02 # mtime resolution
-        build_backup(rcon: rcon).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
-        assert_equal before, File.mtime(PlayerBackup::FILENAME)
-      end
+      # an unchanged colour does not rewrite the file. A join with a bar
+      # re-snapshots it by design, so probe with an empty bar.
+      build_backup(rcon: rcon, path: path, legacy: legacy).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
+      before = File.mtime(path)
+      sleep 0.02 # mtime resolution
+      build_backup(rcon: rcon, path: path, legacy: legacy).on_join_enriched('bob', 2, quickbar: nil, color: [0.815, 0.024, 0.0, 0.5])
+      assert_equal before, File.mtime(path)
     end
   end
 

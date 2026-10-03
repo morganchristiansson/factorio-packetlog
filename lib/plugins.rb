@@ -31,12 +31,17 @@ module Plugins
     #   rcon, player_db) through the interface its owner publishes.
     # owner: optional group name. `owner: 'hivemind'` means
     #   lib/hivemind_<name>.rb defining Hivemind<Name>.
-    def initialize(names, host, dir: __dir__, owner: nil)
+    # args: optional `{name => kwargs}` handed to that feature's constructor
+    #   (`new(owner, **kwargs)`) — a feature's own options, without the owner
+    #   growing a config knob or a test chdir'ing into a scratch directory to
+    #   redirect a file it does not care about.
+    def initialize(names, host, dir: __dir__, owner: nil, args: {})
       @names = Array(names).map(&:to_s).uniq
       @host = host
       @dir = dir
       @prefix = owner ? "#{owner}_" : ''
       @namespace = owner ? camel(owner) : ''
+      @args = args || {}
       @features = nil
     end
 
@@ -123,7 +128,11 @@ module Plugins
         warn "[plugin] #{name}: no feature class (expected #{File.basename(file)} to define #{constant_name(name)})"
         return nil
       end
-      klass.new(@host)
+      # Every feature is built as `new(owner, **args[name])`: the owner is
+      # the argument that matters, and `args` is how a caller (a test, or an
+      # owner with something to say at construction time) passes a feature's
+      # own options without a config file growing a knob for them.
+      klass.new(@host, **(@args[name] || {}))
     rescue LoadError, StandardError => e
       warn "[plugin] #{name} disabled: #{e.class}: #{e.message}"
       nil

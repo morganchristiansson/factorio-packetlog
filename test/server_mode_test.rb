@@ -306,6 +306,40 @@ class TestServerMode < Minitest::Test
     end
   end
 
+  # A packet the decoder cannot handle must cost ONE packet: the frame goes
+  # to unknown.packets and the run continues. Before, a raise inside
+  # parse_action escaped process_packet, escaped the pcap reader and ended
+  # the capture file — one malformed action silently lost every packet after
+  # it (36k packets on one 22MB capture).
+  def test_a_packet_that_raises_is_saved_to_unknown_packets_and_the_run_continues
+    sniffer = make_test_sniffer(server: true, host_ips: [SERVER_IP])
+    sniffer.instance_variable_set(:@player_db, PlayerDatabase.new(nil))
+    sniffer.instance_variable_set(:@attrs, PlayerAttrs.new)
+    saved = []
+    writer = Object.new
+    writer.define_singleton_method(:write_frame) { |frame, _time| saved << frame }
+    writer.define_singleton_method(:path) { 'unknown.packets (test)' }
+    writer.define_singleton_method(:close) { nil }
+    sniffer.instance_variable_set(:@unknown_writer, writer)
+
+    good = fixture_packet('client_chat_message_0x0b')
+    calls = 0
+    crashing = ->(_data) { calls += 1; raise TypeError, 'nil cannot be coerced into Integer' if calls == 1; { header: {} } }
+    _, err = capture_io do
+      FactorioProtocol.stub(:parse_udp_payload, crashing) do
+        sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-1')
+        sniffer.send(:process_packet, 2, 1_700_000_001.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-2')
+      end
+    end
+
+    stats = sniffer.instance_variable_get(:@stats)
+    assert_equal 2, stats[:packets], 'both packets were processed'
+    assert_equal 1, stats[:decode_error], 'exactly one of them crashed'
+    assert_equal 1, stats[:factorio_packets], 'the second packet still decoded'
+    assert_equal ['frame-1'], saved, 'the failed frame went to unknown.packets'
+    assert_includes err, 'raised TypeError', 'and the failure is reported, not swallowed'
+  end
+
   # ── Test 7: hot reload — in-place, same objects ───────────────────────
 
   def test_hot_reload_preserves_state

@@ -359,7 +359,10 @@ malformed action cost the rest of the capture.
 
 Fixed by reading the length before using it, and by flagging the action
 `hit_unknown` when the count is not satisfied — a payload we cannot lay out
-stops that closure instead of raising out of the process.
+stops that closure instead of raising out of the process. The belt to that
+braces: `process_packet` rescues any decode error, counts it, and saves the
+frame to `unknown.packets-*.pcap` like the other failure paths, so a raise
+costs the ONE packet it happened on instead of the rest of the file.
 
 ## `set_player_color` (2.0 wire 296, 2.1 311): FOUR UNORM bytes R,G,B,A
 

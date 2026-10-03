@@ -80,7 +80,8 @@ class FactorioPacketTools
       %w[normal full save].include?(@capture_mode)
     @options = options
     @player_db = PlayerDatabase.new(options[:player_db])
-    @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0, bad_string: 0, unknown: 0, desync: 0 }
+    @stats = { packets: 0, factorio_packets: 0, actions: 0, outgoing_skipped: 0, capture_skipped: 0,
+               bad_string: 0, unknown: 0, desync: 0, decode_error: 0 }
     @unknown_names = {} # undecoded action type -> how often we saw it
     # Capture is ALWAYS on for live capture (auto-named + rotated); pcap-read
     # analysis (-r) doesn't re-capture. Auto-naming writes timestamped files
@@ -770,9 +771,31 @@ class FactorioPacketTools
       end
     end
     @unknown_writer&.write_frame(raw_frame, Time.at(ts)) if qb_desync && raw_frame
+  rescue StandardError => e
+    # ONE malformed packet costs ONE packet. The decoder reads lengths off
+    # the wire and trusts them, so a length can point past the end of a
+    # payload; the frame goes to unknown.packets-*.pcap (the same file the
+    # hit_unknown / bad-string paths use) and the run continues. Without
+    # this the exception escaped process_packet, escaped the pcap reader,
+    # and ended the rest of the capture file ("stopped reading this file") —
+    # on one 22MB capture that silently cost 36k packets and 43k actions.
+    @stats[:decode_error] += 1
+    @unknown_writer&.write_frame(raw_frame, Time.at(ts))
+    warn_decode_error(e)
   ensure
     # Check AFTER this packet refreshes liveness, including sender-index binding.
     check_timeouts_if_due
+  end
+
+  # Report a decode crash without flooding the console: the first few name
+  # the error, then every 1000th. The frames themselves are all in
+  # unknown.packets-*.pcap; the count is in the summary line.
+  DECODE_ERROR_REPORT_EVERY = 1000
+  def warn_decode_error(e)
+    n = @stats[:decode_error]
+    return unless n <= 5 || (n % DECODE_ERROR_REPORT_EVERY).zero?
+    warn "[decode] packet #{@stats[:packets]} raised #{e.class}: #{e.message} " \
+         "(#{n} so far, frame saved to unknown.packets)"
   end
 
   def format_action_data(act)
@@ -1468,6 +1491,7 @@ class FactorioPacketTools
     puts "[summary] packets not captured (keepalives/outgoing/transfer)=#{@stats[:capture_skipped]}" if @stats[:capture_skipped]&.positive?
     puts "[summary] outgoing broadcasts skipped (server mode)=#{@stats[:outgoing_skipped]}" if @options[:server]
     puts "[summary] packets kept for a failed string decode=#{@stats[:bad_string]}" if @stats[:bad_string]&.positive?
+    puts "[summary] packets whose decode RAISED (saved to unknown.packets)=#{@stats[:decode_error]}" if @stats[:decode_error]&.positive?
     return if @unknown_names.empty?
     puts "[summary] packets with a suspected desync: #{@stats[:desync]}" if @stats[:desync]&.positive?
     puts "[summary] undecoded actions: #{@stats[:unknown]}/#{@stats[:actions]} " \

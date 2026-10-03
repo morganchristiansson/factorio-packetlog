@@ -122,4 +122,19 @@ class TestPlugins < Minitest::Test
     assert Plugins.enabled?(%w[hivemind translation], 'translation')
     refute Plugins.enabled?(%w[hivemind], 'translation')
   end
+
+  # The sniffer's `hivemind`/`translation` entries name files whose CLASSES it
+  # constructs itself, so the entry point loads those files before it asks the
+  # classes anything. Two bugs hid in that gap: a case-mangled constant
+  # (HiveMindAgent) and a missing require — both invisible in `-r` mode,
+  # because the agent check sits behind the pcap short-circuit, and fatal the
+  # moment a live server run started. This reads the entry point's own class
+  # references and resolves each one.
+  def test_entry_point_class_references_resolve
+    Plugins.load_files(%w[hivemind translation])
+    entry = File.read(File.expand_path('../factorio-packettools.rb', __dir__))
+    refs = entry.scan(/\b([A-Z][A-Za-z0-9_]*Agent)\b/).flatten.uniq
+    refute_empty refs, 'the entry point references agent classes'
+    refs.each { |c| assert Object.const_defined?(c), "#{c} is referenced by the entry point but never defined" }
+  end
 end

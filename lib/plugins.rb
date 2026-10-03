@@ -149,6 +149,16 @@ module Plugins
       Array(names).map(&:to_s).uniq
     end
 
+    # Require the file each name names, building NOTHING. A name that IS a
+    # feature gets the same require as a side effect of building it — but the
+    # sniffer's `hivemind` and `translation` entries are NOT features (it
+    # constructs those two objects itself), and the class has to exist before
+    # the first line that asks it anything. Entry point calls this first,
+    # right after list!.
+    def load_files(names, dir: __dir__)
+      Array(names).map(&:to_s).uniq.each { |name| require File.expand_path("#{name}.rb", dir) }
+    end
+
     # Whether a name is in a list, before there is a Plugins object (the
     # entry point's ai_agent check).
     def enabled?(list, name) = Array(list).map(&:to_s).include?(name.to_s)

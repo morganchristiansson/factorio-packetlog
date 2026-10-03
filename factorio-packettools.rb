@@ -211,12 +211,18 @@ if __FILE__ == $PROGRAM_NAME
   # are listed in config-hivemind.yaml and loaded by hivemind itself.
   options[:plugins] = Plugins.list!(options[:plugins])   # absent = startup error
   puts "Plugins: #{options[:plugins].join(', ')}" unless options[:plugins].empty?
+  # Load the files the list names. Features build their own (and would warn
+  # about a name whose class is not there), but `hivemind` and `translation`
+  # are OBJECTS this sniffer constructs, so their classes must exist before
+  # the first line below asks one anything — a missing require here only
+  # showed up in live server mode, behind the -r short-circuit.
+  Plugins.load_files(options[:plugins])
 
   # The AI agent still needs a key for its startup model (and server mode
   # for RCON/game.print), so listing the plugin isn't enough: client/pcap
   # mode never starts it, and a config without a key stays silent.
   options[:ai_agent] = true if options[:server] && !options[:pcap] &&
-                               Plugins.enabled?(options[:plugins], 'hivemind') && HiveMindAgent.key_configured?
+                               Plugins.enabled?(options[:plugins], 'hivemind') && HivemindAgent.key_configured?
 
   # Server mode: auto-detect the running Factorio server's configuration
   # (game port, server IP, capture interface, RCON) instead of requiring

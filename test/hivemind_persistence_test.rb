@@ -20,9 +20,10 @@ class TestHivemindPersistence < Minitest::Test
     Dir.mktmpdir do |dir|
       sess = File.join(dir, 'session.json')
       a1 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
-      a1.define_singleton_method(:greet_join) { |*args, **kwargs| }
-      a1.on_chat('alice', 'goals: build the bus first')
-      a1.on_player_event(:joined, 'bob')
+      a1.stub(:greet_join, ->(*_args, **_kwargs) {}) do
+        a1.on_chat('alice', 'goals: build the bus first')
+        a1.on_player_event(:joined, 'bob')
+      end
       a1.instance_variable_get(:@chat).add_message(role: :user, content: 'turn: what is the bus?')
       a1.instance_variable_get(:@chat).add_message(role: :assistant, content: 'the bus is at 1k spm')
       a1.send(:persist!)

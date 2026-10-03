@@ -73,7 +73,12 @@ end
 
 module HivemindSpecHelpers
   # A standard offline agent: no session file, no memory dir, empty
-  # rosters, LLM calls stubbed so tests never hit the network.
+  # rosters, LLM calls silenced so tests never hit the network.
+  #
+  # define_singleton_method, not stub: the agent is RETURNED, so the silent
+  # model has to outlive this method's block. (A block turned into a method
+  # runs with self = the receiver, so this body could call the agent's own
+  # privates — a lambda passed to #stub could not.)
   def make_agent(**overrides)
     agent = new_hive_agent(session_path: false, memory_dir: false, **overrides)
     agent.define_singleton_method(:complete) { |_prompt| '' }
@@ -81,11 +86,10 @@ module HivemindSpecHelpers
   end
 
   # Capture the per-turn prompt an ask/greet/follow-up builds, without
-  # hitting the network.
+  # hitting the network. Scoped: the agent keeps its real #complete after.
   def capture_prompt(agent, &block)
     seen = nil
-    agent.define_singleton_method(:complete) { |p| seen = p; '' }
-    block.call
+    agent.stub(:complete, ->(p) { seen = p; '' }) { block.call }
     seen
   end
 end

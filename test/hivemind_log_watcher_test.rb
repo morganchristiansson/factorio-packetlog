@@ -111,11 +111,13 @@ class TestHivemindLogWatcher < Minitest::Test
     # Real compact_memory! would hit the network — stub a SUCCESSFUL pass
     # but mirror its side effect (recording how much it saw) so the real
     # trim that run_log_event_turn performs drops the compacted range.
-    @agent.define_singleton_method(:compact_memory!) do |_reason = nil|
-      @compaction_included_count = @chat.messages.size
+    chat = @agent.instance_variable_get(:@chat)
+    @agent.stub(:compact_memory!, ->(_reason = nil) {
+      @agent.instance_variable_set(:@compaction_included_count, chat.messages.size)
       true
+    }) do
+      @logwatcher.handle_log_line(RESET_44, async: false)
     end
-    @logwatcher.handle_log_line(RESET_44, async: false)
     refute @agent.send(:auto_compaction_worthwhile?), 'trimmed session must fall below the auto-compaction gate so a repeated reset skips'
   end
 
@@ -134,6 +136,9 @@ class TestHivemindLogWatcher < Minitest::Test
   end
 
   # Collect prompts the handler builds instead of hitting the network.
+  # define_singleton_method, not stub: the handler's turn runs on its OWN
+  # thread and may call in after this helper returns, so the override has to
+  # live for the rest of the test (a block-scoped stub would be gone).
   def collect_completions
     @agent.define_singleton_method(:complete) do |p|
       ivars = instance_variables.include?(:@captured_prompts) ? @captured_prompts : []
@@ -146,6 +151,7 @@ class TestHivemindLogWatcher < Minitest::Test
     @agent.instance_variable_get(:@captured_prompts) || []
   end
 
+  # same: the turn thread may fire the compaction after we hand back
   def collect_compactions
     seen = []
     @agent.define_singleton_method(:compact_memory!) { |reason = nil| seen << reason; true }

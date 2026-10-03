@@ -76,21 +76,24 @@ class TestHivemindFollowUps < Minitest::Test
     @agent.send(:append_history, 'bob', 'biters at the wall!')  # queued since last prompt
     entry = pending.first
     prompts = []
-    @agent.define_singleton_method(:complete) { |p| prompts << p; 'hold the line' }
-    followups.send(:fire_followup, entry)
-    assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
-    assert_includes prompts.first, 'remind spawn defense'
-    assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
-    assert_includes @agent.instance_variable_get(:@rcon).sent.last, 'hold the line', 'model reply is broadcast'
+    @agent.stub(:complete, ->(p) { prompts << p; 'hold the line' }) do
+      followups.send(:fire_followup, entry)
+      assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
+      assert_includes prompts.first, 'remind spawn defense'
+      assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
+      assert_includes @agent.instance_variable_get(:@rcon).sent.last, 'hold the line', 'model reply is broadcast'
+    end
   end
 
 
   def test_fire_followup_stays_silent_when_model_returns_nothing
     @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'check')
     entry = pending.first
-    @agent.define_singleton_method(:complete) { |_p| '' }  # model decides nothing needs doing
-    followups.send(:fire_followup, entry)
-    assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
+    # the model decides nothing needs doing
+    @agent.stub(:complete, ->(_p) { '' }) do
+      followups.send(:fire_followup, entry)
+      assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
+    end
   end
 
 
@@ -104,8 +107,7 @@ class TestHivemindFollowUps < Minitest::Test
       assert_equal 1, data['followups'].size, 'follow-up persisted with its deadline'
 
       a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
-      a2.define_singleton_method(:complete) { |_p| '' }
-      fups = a2.plugins[:followups].pending
+      fups = a2.plugins[:followups].pending # 60s out: no turn, no model call
       assert_equal 1, fups.size
       assert_equal 'remind spawn defense', fups.first[:task]
       assert_equal 'spawn', fups.first[:name], 'name preserved across restart'
@@ -126,7 +128,7 @@ class TestHivemindFollowUps < Minitest::Test
       File.write(sess, JSON.generate(data))
 
       a2 = new_hive_agent(rcon: FakeRcon.new, session_path: sess, memory_dir: false)
-      a2.define_singleton_method(:complete) { |_p| '' }
+      a2.define_singleton_method(:complete) { |_p| '' } # the scheduler's thread fires it later
       deadline = Time.now + 3
       fups = a2.plugins[:followups]
       sleep 0.05 until fups.pending.empty? || Time.now > deadline

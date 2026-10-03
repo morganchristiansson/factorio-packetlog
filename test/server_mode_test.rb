@@ -105,6 +105,16 @@ class TestServerMode < Minitest::Test
     [output, sniffer]
   end
 
+  # The join-time query's Lua for a given server version, built with no
+  # server: an allocated client with #server_version stubbed (the getter
+  # shape is the only thing that varies).
+  def join_query_lua(player, version)
+    client = RconClient.allocate
+    lua = nil
+    client.stub(:server_version, version) { lua = client.player_attrs_for_lua(player) }
+    lua
+  end
+
   # Build a sniffer for tests with the auto-named capture replaced by an
   # in-memory FakePcapWriter — no test ever touches the repo's captures/ or
   # spawns a real flusher thread.
@@ -364,11 +374,11 @@ class TestServerMode < Minitest::Test
     # player. Plus: it walks game.players (not connected_players), so the
     # backup covers players who never join while the sniffer runs.
     rcon = RconClient.allocate
-    rcon.define_singleton_method(:server_version) { '2.0.77' }
-    rcon.define_singleton_method(:execute) { |cmd| (@lua = cmd) and '' }
     rcon.instance_variable_set(:@script_output_dir, '/nonexistent') # execute the write, read nothing
-    rcon.roster_backup
-    roster_lua = rcon.instance_variable_get(:@lua).to_s
+    roster_lua = nil
+    rcon.stub(:server_version, '2.0.77') do
+      rcon.stub(:execute, ->(cmd) { roster_lua = cmd; '' }) { rcon.roster_backup }
+    end
     assert_includes roster_lua, 'pairs(game.players)', 'the roster dump is the WHOLE roster, offline players included'
     assert_includes roster_lua, 'get_quick_bar_slot', 'and it reads each bar whole'
     calls = roster_lua.scan(/helpers\.write_file\((?:[^()]|\([^()]*\))*\)/)
@@ -383,20 +393,14 @@ class TestServerMode < Minitest::Test
     # split select_version uses for the action tables. Both normalise to the
     # flat key, so the fold is one Ruby path. Print-only, so there is no
     # write_file for_player to guard.
-    qb_lua = RconClient.allocate.tap { |c|
-      c.define_singleton_method(:server_version) { '2.0.77' }
-    }.player_attrs_for_lua(7)
+    qb_lua = join_query_lua(7, '2.0.77')
     assert_includes qb_lua, 'game.players[7]', 'looked up by index (no name quoting)'
     assert_includes qb_lua, 'for i=1,100', '2.0: the flat 1..100 slot space'
     refute_includes qb_lua, 'p.get_quick_bar_slot(pg,sl)', '2.0: not the two-argument form'
-    v21_lua = RconClient.allocate.tap { |c|
-      c.define_singleton_method(:server_version) { '2.1.11' }
-    }.player_attrs_for_lua(7)
+    v21_lua = join_query_lua(7, '2.1.11')
     assert_includes v21_lua, 'p.get_quick_bar_slot(pg,sl)', '2.1: the two-argument form'
     assert_includes v21_lua, 'put(pg*10+sl+1,', '2.1: normalised to the same flat key'
-    unknown_lua = RconClient.allocate.tap { |c|
-      c.define_singleton_method(:server_version) { nil }
-    }.player_attrs_for_lua(7)
+    unknown_lua = join_query_lua(7, nil)
     assert_includes unknown_lua, 'for i=1,100', 'unknown version → the verifiable 2.0 shape'
     [qb_lua, v21_lua].each do |lua|
       assert_includes lua, 'q[tostring(i)]', 'keyed by the flat index (the page/slot fold is in Ruby)'
@@ -405,9 +409,7 @@ class TestServerMode < Minitest::Test
       refute_includes lua, 'helpers.write_file', 'print-only, so there is no write_file for_player to guard'
     end
     assert_equal 1, qb_lua.lines.size, '/sc only applies the first line'
-    name_lua = RconClient.allocate.tap { |c|
-      c.define_singleton_method(:server_version) { '2.0.77' }
-    }.player_attrs_for_lua('ali"ce')
+    name_lua = join_query_lua('ali"ce', '2.0.77')
     assert_includes name_lua, 'game.players["ali\\"ce"]', 'a name lookup is still Lua-quoted'
 
     # refresh_roster → load_roster: initial load only (new players come from
@@ -1068,24 +1070,25 @@ class TestServerMode < Minitest::Test
   def test_restore_quickbar_command
     calls = []
     rcon = RconClient.allocate
-    rcon.define_singleton_method(:server_version) { @v }
-    rcon.define_singleton_method(:execute) { |cmd| calls << cmd; '2' }
-    rcon.instance_variable_set(:@v, '2.0.77')
-    rcon.instance_variable_set(:@v, '2.0.77')
-    assert_equal 2, rcon.restore_quickbar('alice', { 1 => 30, 30 => 33 })
-    flat = calls.last
-    assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
-    assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
-    assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
-    assert_equal 0, rcon.restore_quickbar('alice', {}), 'nothing to write, no command sent'
-    assert_equal 1, calls.size
+    version = '2.0.77'
+    rcon.stub(:server_version, -> { version }) do
+      rcon.stub(:execute, ->(cmd) { calls << cmd; '2' }) do
+        assert_equal 2, rcon.restore_quickbar('alice', { 1 => 30, 30 => 33 })
+        flat = calls.last
+        assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
+        assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
+        assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
+        assert_equal 0, rcon.restore_quickbar('alice', {}), 'nothing to write, no command sent'
+        assert_equal 1, calls.size
 
-    rcon.instance_variable_set(:@v, '2.1.11')
-    rcon.restore_quickbar('bo"b', { 4 => 32 })
-    two = calls.last
-    assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
-    assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
-    assert_includes two, 'game.players["bo\\"ce"]'.sub('ce', 'b'), 'the name is Lua-quoted'
+        version = '2.1.11'
+        rcon.restore_quickbar('bo"b', { 4 => 32 })
+        two = calls.last
+        assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
+        assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
+        assert_includes two, 'game.players["bo\\"ce"]'.sub('ce', 'b'), 'the name is Lua-quoted'
+      end
+    end
   end
 
   # ── Quickbar: the RCON grid parses into the 10×10 shape ────────────────

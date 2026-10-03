@@ -159,6 +159,9 @@ class TestHivemindCompaction < Minitest::Test
       agent.send(:append_history, 'alice', 'hi hivemind')   # marks alice seen
       asked = []
       forks = []
+      # define_singleton_method, NOT stub: this body calls super(), which only
+      # works in a block that became a method — a lambda passed to #stub is
+      # simply called, with no method to super from.
       agent.define_singleton_method(:build_compaction_chat) do
         fork = super()
         forks << fork

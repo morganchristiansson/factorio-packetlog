@@ -37,17 +37,19 @@ plugins:
 ```
 
 Same manager, over a prefixed file set (`prefix: 'hivemind_'`,
-`owner: 'hivemind'`), so the config names stay short while the files
-say who owns them: `persistence` is `lib/hivemind_persistence.rb` and its
-module `HivemindPersistence`, mixed into `HivemindAgent` in the class body
-— only if it is listed. A plugin that is off is never `require`d and its
-methods never reach the agent. Call sites ask first
-(`agent.plugin?('compaction')`) instead of calling a method that may not
-exist — e.g. `/compact` refuses, `run_log_event_turn` skips the post-event
+`owner: 'hivemind'`), so the config names stay short while the files say
+who owns them: `persistence` is `lib/hivemind_persistence.rb` and its class
+`HivemindPersistence`, built with the agent as its owner — only if it is
+listed. A plugin that is off is never `require`d and never built.
+
+Call sites are nil-safe (`plugins[:followups]&.schedule(…)`,
+`plugins[:persistence]&.persist!`), so a missing feature is a no-op rather
+than a guard: `/compact` refuses, `run_log_event_turn` skips the post-event
 distillation, `register_tools` leaves the timer tools out, the sniffer skips
 `ensure_log_watcher`, and without `persistence` the session file is simply
-never written (`@session_path` stays nil, and every persist call site is
-already guarded by it).
+never written. `compaction` is the last feature still MIXED IN rather than
+built (`HivemindAgent.still_modules`), which is why it still asks
+`agent.plugin?('compaction')` first.
 
 Each plugin also **owns its config keys**, read from the agent's stored
 config hash with `Hash#fetch` at the point of use — `min_followup_delay` /
@@ -236,7 +238,9 @@ player chat ──► write_to_console action (C→S packet)
   long an entry lives. You can only infer the window indirectly: a long
   gap between triggers where `cached` drops to 0 means the prior prefix
   expired.
-- **Restart persistence (default `hivemind-session.json`, no flag)**: the console history (queued + recent lines) and the LLM conversation (plus which players' memories it already carries) are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; `session_path: false` is available to tests only.
+- **Restart persistence** (the `persistence` plugin, `hivemind-session.json`
+  next to the process — the feature owns the file, its path and its write
+  lock; the agent publishes only `#session_snapshot` / `#restore_session_state`): the console history (queued + recent lines) and the LLM conversation (plus which players' memories it already carries) are saved to disk after every completion and every console line, so a full process RESTART resumes the session — queued console lines re-enter the next prompt, and prior Q&A stays in the conversation. **Pending scheduled follow-ups are persisted too** (with absolute unix deadlines — wall clock, so they survive reboots) and re-armed on load; one that came due during downtime fires on startup. (Packets while stopped are not captured — that gap is the action-history feature.) A corrupt session file starts fresh; there is no path knob — tests stub `HivemindPersistence.default_path` (nil = no session file at all).
 - **Join briefing**: joining players get a **personal, LLM-generated
   briefing on the run** — they cannot see what happened before they
   arrived, so the model greets them *and* tells them the state of the run

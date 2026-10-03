@@ -273,7 +273,7 @@ class TestHivemindAgent < Minitest::Test
   # Regression: invalid UTF-8 from the wire crashed strip/regex
   # (ArgumentError / Encoding::CompatibilityError). Must be scrubbed.
   def test_invalid_utf8_chat_does_not_crash
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stub(:handle, ->(*_args, **_kwargs) { false }) do
       agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
       agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
@@ -389,7 +389,7 @@ class TestHivemindAgent < Minitest::Test
     rcon = FakeRcon.new
     rows = [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     rcon.stub(:player_attributes, -> { rows }) do
-      agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+      agent = new_hive_agent(rcon: rcon, memory_dir: false)
       agent.stub(:greet_join, ->(*_args, **_kwargs) {}) do
         agent.on_player_event(:joined, 'alice')
         assert_equal [nil, 'alice joined the game (2d3h played)'],
@@ -402,7 +402,7 @@ class TestHivemindAgent < Minitest::Test
   # No RCON attrs for the player (fresh server / query miss): no playtime
   # is known, so the join line carries no "(... played)" suffix.
   def test_on_player_event_playtime_absent_without_rcon_attrs
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stub(:greet_join, ->(*_args, **_kwargs) {}) do
       agent.on_player_event(:joined, 'bob')
       assert_equal [nil, 'bob joined the game'],
@@ -513,7 +513,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_join_greeting_uses_llm_and_sends
     rcon = FakeRcon.new
-    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome, alice. The belts are quiet without you.' }) do
       agent.on_player_event(:joined, 'alice')
@@ -531,7 +531,7 @@ class TestHivemindAgent < Minitest::Test
     rcon = FakeRcon.new
     rows = [{ index: 2, name: 'alice', connected: true, admin: false, online_time: 11_016_000, afk_time: 0 }]
     rcon.stub(:player_attributes, -> { rows }) do
-      agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+      agent = new_hive_agent(rcon: rcon, memory_dir: false)
       seen_prompt = nil
       agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome, alice.' }) do
         agent.on_player_event(:joined, 'alice')
@@ -548,7 +548,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_join_greeting_prompt_omits_playtime_when_unknown
     rcon = FakeRcon.new
-    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome, alice.' }) do
       agent.on_player_event(:joined, 'alice')
@@ -559,7 +559,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_join_greeting_recorded_in_history
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stub(:complete, ->(_prompt) { 'Welcome, alice. The factory is watching.' }) do
       agent.on_player_event(:joined, 'alice')
       sleep 0.2
@@ -571,7 +571,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_join_greeting_respects_greet_interval
     rcon = FakeRcon.new
-    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, memory_dir: false)
     agent.stub(:complete, ->(_p) { 'hi' }) do
       agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
       agent.on_player_event(:joined, 'alice')
@@ -583,7 +583,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_leave_does_not_greet
     rcon = FakeRcon.new
-    agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: rcon, memory_dir: false)
     agent.on_player_event(:left, 'alice')
     assert_empty rcon.sent
   end
@@ -595,7 +595,7 @@ class TestHivemindAgent < Minitest::Test
   # stub the model and assert the trigger reaches the LLM with the message.
 
   def test_good_bot_triggers_reply
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asked = nil
     agent.stub(:complete, ->(p) { asked = p; '' }) do
       agent.on_chat('alice', 'good bot')
@@ -607,7 +607,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_good_bot_variants_are_triggers
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asks = 0
     agent.stub(:complete, ->(_p) { asks += 1; '' }) do
       ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
@@ -621,7 +621,7 @@ class TestHivemindAgent < Minitest::Test
     # a reply must get their own turn (queued on the complete mutex, so
     # sequential and seeing the prior Q&A) — never dropped just because
     # someone else asked recently.
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asked = []
     # The slow-LLM stub sleeps INSIDE the stub block: the worker threads
     # must still see it when they call in.
@@ -657,7 +657,7 @@ class TestHivemindAgent < Minitest::Test
   # @rate_mutex, so on_chat must return promptly while a completion is
   # stuck.
   def test_hung_llm_call_does_not_block_packet_thread
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     mutex = agent.instance_variable_get(:@mutex)
     gate = Queue.new
     # Emulate production complete(): the ENTIRE LLM call (incl. retry
@@ -690,7 +690,7 @@ class TestHivemindAgent < Minitest::Test
   # bot" (it would page on "shmoose"), so it fires only as a standalone
   # word, case-insensitively: "hm, hello", "HM: hello", "wdyt? hm".
   def test_hm_word_trigger_matches_standalone_word
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     ['hm', 'hm, hello', 'HM, hello', 'HM: hello', 'wdyt? hm', 'hi hm here',
      'hello-hm', 'hm!', 'say hm.', "[hm]"].each do |m|
       assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
@@ -699,7 +699,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_hm_does_not_trigger_on_substrings
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     ['shmoose', 'shmoo', 'hmm', 'hmm, hello', 'ahm', 'hmx', 's-h-m-oose'].each do |m|
       refute agent.send(:trigger_match?, m), "expected #{m.inspect} NOT to trigger"
     end
@@ -708,7 +708,7 @@ class TestHivemindAgent < Minitest::Test
 
   # ── Word-boundary trigger: "hive" ─────────────────────────────
   def test_hive_trigger_matches_standalone_word_only
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     ['hive', 'hey hive', 'hive?', 'HIVE, hello'].each do |m|
       assert agent.send(:trigger_match?, m), "expected #{m.inspect} to trigger"
     end
@@ -721,7 +721,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_hm_trigger_reaches_llm
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asked = nil
     agent.stub(:complete, ->(p) { asked = p; '' }) do
       agent.on_chat('alice', 'wdyt? hm')
@@ -732,7 +732,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_shmoose_does_not_trigger
-    agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: false)
+    agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     called = false
     agent.stub(:complete, ->(_p) { called = true; '' }) do
       agent.on_chat('alice', 'shmoose is back')
@@ -744,7 +744,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_join_greeting_includes_player_memory
     Dir.mktmpdir do |dir|
-      agent = new_hive_agent(rcon: FakeRcon.new, session_path: false, memory_dir: dir)
+      agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: dir)
       agent.instance_variable_get(:@memory_store).write_key('alice', 'alice once nuked the bus on purpose')
       seen_prompt = nil
       agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome.' }) do
@@ -762,7 +762,7 @@ class TestHivemindAgent < Minitest::Test
     rcon = FakeRcon.new
     rows = [{ index: 2, name: 'alice', connected: true, admin: true, online_time: 11_016_000, afk_time: 0 }]
     rcon.stub(:player_attributes, -> { rows }) do
-      agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+      agent = new_hive_agent(rcon: rcon, memory_dir: false)
       seen_prompt = nil
       agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome.' }) do
         agent.on_player_event(:joined, 'alice')
@@ -777,7 +777,7 @@ class TestHivemindAgent < Minitest::Test
     rcon = FakeRcon.new
     rows = [{ index: 3, name: 'bob', connected: true, admin: false, online_time: 7_200, afk_time: 0 }]
     rcon.stub(:player_attributes, -> { rows }) do
-      agent = new_hive_agent(rcon: rcon, session_path: false, memory_dir: false)
+      agent = new_hive_agent(rcon: rcon, memory_dir: false)
       seen_prompt = nil
       agent.stub(:complete, ->(prompt) { seen_prompt = prompt; 'Welcome.' }) do
         agent.on_player_event(:joined, 'bob')

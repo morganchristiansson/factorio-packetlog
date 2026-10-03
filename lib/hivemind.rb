@@ -65,7 +65,7 @@ class HivemindAgent
   # can't be un-mixed, so restarting is the clean switch.
   def self.own_plugins = (@own_plugins ||= config_plugins)
   # Features still mixed in rather than built (see the constructor).
-  def self.still_modules = %w[persistence compaction].freeze
+  def self.still_modules = %w[compaction].freeze
 
   def self.plugin_set
     @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__, owner: PLUGIN_OWNER)
@@ -141,14 +141,11 @@ class HivemindAgent
     plugins[:followups]&.cancel_followup(name: name)
   end
 
-  # Persist pending follow-ups. The session FILE is persistence's business —
-  # the followups feature owns the entries, not the file, so it asks here.
-  # INTERIM: persistence is still a mixin, so its persist! is right here; its
-  # conversion makes this `plugins[:persistence]&.persist!`.
-  def persist_followups!
-    return false unless @session_path
-
-    persist!
+  # Write the session file. The FILE is the persistence feature's business —
+  # every other feature (and the agent itself) asks it through here, and
+  # without the `persistence` plugin this is a no-op.
+  def persist!
+    plugins[:persistence]&.persist!
   end
 
   # The features this agent was built with (config-hivemind.yaml `plugins:`),
@@ -169,7 +166,6 @@ class HivemindAgent
   # it is put back instead of piling on (PLAYER PRIORITY, see the feature).
   attr_reader :mutex
 
-  def persist_mutex = (@persist_mutex ||= Mutex.new)
   def max_reply_len = @max_reply_len
   def auto_compaction_min_chars = @auto_compaction_min_chars
 
@@ -220,7 +216,7 @@ class HivemindAgent
   # consults it for the features it hooks (translation gates the
   # set_player_languages tool). Its OWN list is config-hivemind.yaml.
   def initialize(rcon:, attrs:, current_tick:, player_db:, sniffer_plugins: [],
-                 session_path: nil, memory_dir: nil, config_file: CONFIG_FILE)
+                 memory_dir: nil, config_file: CONFIG_FILE)
     @sniffer_plugins = sniffer_plugins.map(&:to_s) # the SNIFFER's list — see above
     @attrs = attrs
     @current_tick = current_tick
@@ -242,9 +238,6 @@ class HivemindAgent
     @mutex = Mutex.new
     # Separate rate-limit state from completions and log-watcher callbacks.
     @rate_mutex = Mutex.new
-    # Serializes session-file writes across persist!/persist_queue!
-    # (event worker, scheduler and log watcher share one .tmp path).
-    @persist_mutex = Mutex.new
     @chat = nil
     # Pending scheduled follow-ups (schedule_followup tool) belong to the
     # followups FEATURE now: its entries are NAME-keyed (the model picks a
@@ -264,14 +257,10 @@ class HivemindAgent
     # persists in state).
     @console_queue = []
     @console_mutex = Mutex.new
-    # Session persistence: console history + LLM conversation are saved to
-    # disk so a full RESTART (not just Ctrl-C) can resume — packets while
-    # stopped are lost, but the context carries over. Default file
-    # hivemind-session.json; pass session_path: false to disable in tests.
-    # No path without the `persistence` plugin: every persist call site is
-    # already guarded by @session_path, so the file is simply never written.
-    @session_path = session_path == false ? nil : (session_path || 'hivemind-session.json')
-    @session_path = nil unless plugin?('persistence')
+    # Session persistence (console history + LLM conversation saved so a full
+    # RESTART resumes) is the `persistence` FEATURE: it owns the file, its
+    # path and its write lock — nothing here, so nothing here knows the
+    # session file exists beyond #persist!.
 
     # Long-term memory (keyed blobs: soul / knowledge / <player>) — the
     # compaction layer that lets a NEW session carry over what Hivemind
@@ -382,7 +371,7 @@ class HivemindAgent
     register_tools
 
     hook_chat_observers if @chat
-    load_session if @session_path
+    plugins[:persistence]&.load!
     plugins[:followups]&.ensure_followup_scheduler
     initialize_events
   end
@@ -642,7 +631,7 @@ class HivemindAgent
       clean_reply(text)
     end
   ensure
-    persist! if @session_path  # conversation changed — save for restart
+    persist!  # conversation changed — save for restart
   end
 
   def next_model
@@ -864,6 +853,60 @@ class HivemindAgent
     text.to_s.dup.force_encoding('UTF-8').scrub('?').strip
   end
 
+  # ── Session state ↔ the persistence feature ───────────────────────
+  #
+  # The session FILE belongs to lib/hivemind_persistence.rb; these two
+  # methods are the whole interface between it and the state it snapshots.
+  # Nothing else on the agent (compaction, followups, the log watcher) knows
+  # the file exists — they call #persist! / #persist_queue! and are done.
+
+  # The conversation object (messages, tools, observers). Features read it;
+  # only the persistence feature adds messages back on restore.
+  attr_reader :chat
+
+  # The queued console lines (a copy — the queue is drained per prompt).
+  def console_queue = @console_mutex.synchronize { @console_queue.dup }
+
+  def clear_console_queue = @console_mutex.synchronize { @console_queue = [] }
+
+  # Everything of the session that is not the conversation itself: the
+  # OpenCode session id (routing/prompt-cache identity), the console queue,
+  # the players this LLM session has met (compaction targets) and the ones
+  # whose long-term memory it already carries. The console queue is copied
+  # under its lock, so JSON.generate in the caller cannot race an append.
+  def session_snapshot
+    {
+      'opencode_session' => opencode_session_id,
+      'console_queue' => console_queue,
+      'session_players' => @session_players_mutex.synchronize { @session_players.to_a },
+      'memories_sent' => memories_sent.to_a,
+    }
+  end
+
+  # Replace that state from a loaded session file. `memories_sent` is
+  # RESTORED, not cleared: the conversation we resume still contains those
+  # injections, so re-sending them would duplicate a block the model has
+  # read. An older file without the key re-seeds them (one harmless
+  # duplicate). Missing/invalid keys keep the current value.
+  def restore_session_state(data)
+    reset_memories_sent(data['memories_sent'])
+    @console_mutex.synchronize { @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] } } if data['console_queue'].is_a?(Array)
+    # Resume the OpenCode session id so the restored conversation keeps its
+    # routing/caching identity; a missing key (older file) mints fresh.
+    id = data['opencode_session']
+    @opencode_session_id = id if id.is_a?(String) && !id.empty?
+    return unless data['session_players'].is_a?(Array)
+    @session_players_mutex.synchronize do
+      @session_players = Set.new(data['session_players'].map(&:to_s))
+      @session_players.delete(HivemindAgent::AGENT_NAME)
+    end
+  end
+  # Both seams, plus the three accessors above, are the persistence feature's
+  # whole surface on this object — explicit publicity, because the middle of
+  # this file is a private section.
+  public :chat, :console_queue, :clear_console_queue, :session_snapshot, :restore_session_state,
+         :apply_request_headers
+
   # Enqueue a chat/console line. player is nil for bare console lines
   # (join/leave events); chat and replies carry the speaker name. When the
   # queue exceeds the configured history limit (no hivemind trigger in a long while), the
@@ -888,7 +931,7 @@ class HivemindAgent
         end
       end
     end
-    persist_queue! if @session_path
+    plugins[:persistence]&.persist_queue!
   end
 
   # Names of players currently in-game from packet-derived tracking.
@@ -1046,7 +1089,7 @@ class HivemindAgent
     return "Model already #{@model}." if cleaned == @model
     begin
       @mutex.synchronize { activate_model!(cleaned) }
-      persist! if @session_path
+      persist!
       log "model switched to #{@model}"
       "Model switched to #{@model}. Future replies will use it (persists until restart; reverts to config-hivemind.yaml on restart)."
     rescue StandardError => e

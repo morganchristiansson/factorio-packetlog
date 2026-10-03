@@ -1,13 +1,47 @@
 # frozen_string_literal: true
 
-# Hivemind plugin `persistence` — the file is lib/hivemind_persistence.rb
-# (the manager's `hivemind_` prefix), the module takes its CamelCase name.
-# Listed in config-hivemind.yaml `plugins:`; mixed into HivemindAgent by
-# Plugins.apply_mixins. Restart-safe session persistence: console queue +
-# LLM conversation + pending follow-ups serialized to a JSON session file
-# (atomic tmp+rename).
-module HivemindPersistence
-  # ── Session persistence (restart-safe) ──────────────────────────
+# Hivemind feature `persistence` — the file is lib/hivemind_persistence.rb
+# (the plugin set's `hivemind_` prefix), the class takes its CamelCase name.
+# Listed in config-hivemind.yaml `plugins:` and built by the agent's own
+# Plugins::PluginSet with the agent as its owner. Restart-safe session
+# persistence: console queue + LLM conversation + pending follow-ups
+# serialized to a JSON session file (atomic tmp+rename).
+#
+# This feature OWNS the file: its path, the write lock, the serialized-
+# message cache, and every read/write of it. The agent owns the state the
+# file is built from and publishes two seams — #session_snapshot (what to
+# write) and #restore_session_state (what a loaded file replaces) — so
+# nothing outside this file knows a session file exists. Compaction trims
+# the conversation, so it calls #messages_changed! to drop the cached
+# serialization; the agent and the followups feature just call #persist!.
+class HivemindPersistence
+  # Where the session file lives: next to the process (cwd), like
+  # players-cache.json. NOT a constructor argument — the agent has no
+  # session-path knob; tests stub this class method instead
+  # (HivemindPersistence.stub(:default_path, tmp) { new_hive_agent(...) }),
+  # and a nil stub is the "no session file" case. Captured in the
+  # constructor, so the path survives a hot reload of this file.
+  def self.default_path = 'hivemind-session.json'
+
+  # The agent, as its owner: this feature reaches the session state through
+  # the two published seams, and the log/chat interface, and nothing else.
+  def initialize(host)
+    @host = host
+    @path = self.class.default_path
+    @mutex = Mutex.new      # serializes writes (all paths share one .tmp)
+    @messages = nil         # serialized conversation cache (see #messages_changed!)
+  end
+
+  attr_reader :host, :path
+
+  # No path = no session file (a `persistence` plugin that is switched off
+  # is simply never built; this covers a nil default too). Every call below
+  # is a no-op then, so no call site needs a guard.
+  def enabled? = !@path.nil?
+
+  # The conversation changed under us (a compaction trim): the cached
+  # serialization is stale and the next write must rebuild it.
+  def messages_changed! = (@messages = nil)
 
   # Restore console history + LLM conversation from the session file so a
   # RESTART (not just Ctrl-C) can resume. A corrupt/missing file starts
@@ -17,38 +51,19 @@ module HivemindPersistence
   # by the provider ("missing field tool_call_id"). Tool results whose
   # call was dropped (old/corrupt file) are skipped so the conversation
   # never dangles.
-  private
-  def load_session
-    return unless @session_path && File.exist?(@session_path)
-    data = JSON.parse(File.read(@session_path))
-    # Players whose long-term memory this session already handed the model.
-    # RESTORED, not cleared: the conversation we are about to resume still
-    # contains those injections, so re-sending them would duplicate a block
-    # the model has read. An older file without the key re-seeds them (one
-    # duplicate, harmless).
-    reset_memories_sent(data['memories_sent'])
-    if data['console_queue'].is_a?(Array)
-      @console_queue = data['console_queue'].map { |e| [e[0], e[1].to_s] }
-    end
-    # Resume the OpenCode session id so the restored conversation keeps
-    # its routing/caching identity; a missing key (older file) mints fresh.
-    id = data['opencode_session']
-    @opencode_session_id = id if id.is_a?(String) && !id.empty?
-    apply_request_headers(@chat)
-    # Players encountered this LLM session — drives compaction targets;
-    # must survive restarts or targets drift from the conversation.
-    @session_players = Set.new
-    if data['session_players'].is_a?(Array)
-      @session_players = Set.new(data['session_players'].map { |n| n.to_s })
-      @session_players.delete(HivemindAgent::AGENT_NAME)
-    end
+  def load!
+    return false unless enabled? && File.exist?(@path)
+    data = JSON.parse(File.read(@path))
+    host.restore_session_state(data)
+    chat = host.chat
+    host.apply_request_headers(chat)
     # Re-arm pending follow-ups from their absolute unix deadlines. Format:
     #   { "prowl" => { "due_at" => ..., "task" => ... } }
     # An entry that came DUE during downtime gets a past-due monotonic time
     # and the scheduler fires it on its first tick (correct: the task was
     # already due). Anything else (older formats, bad data, empty task) is
     # simply DISCARDED — no legacy fallbacks.
-    n_rearmed = plugins[:followups]&.restore(data['followups']) || 0
+    n_rearmed = host.plugins[:followups]&.restore(data['followups']) || 0
     messages = data['messages'] || []
     # Keep tool results linked to the current session's assistant calls.
     call_ids = messages.select { |m| m['role'] == 'assistant' && m['tool_calls'].is_a?(Array) }
@@ -57,7 +72,7 @@ module HivemindPersistence
       case m['role']
       when 'tool'
         next unless call_ids.include?(m['tool_call_id']) && m['content']
-        @chat.add_message(role: :tool, content: m['content'], tool_call_id: m['tool_call_id'])
+        chat.add_message(role: :tool, content: m['content'], tool_call_id: m['tool_call_id'])
       when 'assistant'
         if m['tool_calls'].is_a?(Array) && !m['tool_calls'].empty?
           calls = m['tool_calls'].filter_map do |tc|
@@ -66,21 +81,23 @@ module HivemindPersistence
                                              arguments: parse_tool_arguments(tc['arguments']))]
           end.to_h
           next if calls.empty?
-          @chat.add_message(role: :assistant, content: m['content'], tool_calls: calls)
+          chat.add_message(role: :assistant, content: m['content'], tool_calls: calls)
         elsif m['content']
-          @chat.add_message(role: :assistant, content: m['content'])
+          chat.add_message(role: :assistant, content: m['content'])
         end
       when 'user'
         next unless m['content']
-        @chat.add_message(role: :user, content: m['content'])
+        chat.add_message(role: :user, content: m['content'])
       end
     end
-    puts "[hivemind] session resumed: #{@console_queue.size} queued console lines, " \
+    puts "[hivemind] session resumed: #{host.console_queue.size} queued console lines, " \
          "#{messages.size} conversation messages" \
          "#{n_rearmed.positive? ? ", #{n_rearmed} follow-ups re-armed" : ''}"
+    true
   rescue JSON::ParserError, StandardError => e
-    log_error('session load failed — starting fresh', e)
-    @console_queue = []
+    host.log_error('session load failed — starting fresh', e)
+    host.clear_console_queue
+    false
   end
 
   # Tool arguments are stored JSON-encoded (see serialize_messages); parse
@@ -93,29 +110,21 @@ module HivemindPersistence
     {}
   end
 
-  # Full session snapshot: console queue + recent + pending follow-ups +
-  # conversation messages. BOTH persist paths must write ALL keys — a
-  # partial rewrite (queue-only) used to clobber the persisted conversation
-  # whenever a chat line arrived after an ask, losing the session on
-  # restart (nothing left for /compact to distill).
+  # The full snapshot: the agent's session state plus what only this file
+  # knows (the serialized conversation) and what the followups feature owns.
+  # BOTH persist paths must write ALL keys — a partial rewrite (queue-only)
+  # used to clobber the persisted conversation whenever a chat line arrived
+  # after an ask, losing the session on restart (nothing left for /compact
+  # to distill).
   def session_data
-    {
+    host.session_snapshot.merge(
       'version' => 1,
-      # Stable OpenCode session id — restored on restart so the resumed
-      # conversation keeps its routing/caching identity (rotated only by
-      # compaction, which starts a genuinely new conversation).
-      'opencode_session' => opencode_session_id,
-      'console_queue' => @console_queue,
-      'session_players' => @session_players.to_a,
-      # Players whose memory block this conversation already carries — see
-      # HivemindAgent#memories_sent.
-      'memories_sent' => memories_sent.to_a,
       # JSON object keyed by timer name — the followups feature owns the
       # entries and hands them over in this shape (the file is ours).
-      'followups' => (plugins[:followups]&.pending || [])
+      'followups' => (host.plugins[:followups]&.pending || [])
         .to_h { |f| [f[:name], { 'due_at' => f[:due_at], 'task' => f[:task] }] },
-      'messages' => (@persisted_messages ||= serialize_messages),
-    }
+      'messages' => (@messages ||= serialize_messages)
+    )
   end
 
   # Full persist: called after each completion (conversation changed) and
@@ -123,10 +132,10 @@ module HivemindPersistence
   # timer. Re-serializes the conversation into the cache reused by
   # persist_queue! (the cheap path must never fall back to stale messages).
   def persist!
-    @console_mutex.synchronize do
-      @persisted_messages = serialize_messages
-      write_session(session_data)
-    end
+    return false unless enabled?
+    @messages = serialize_messages
+    write_session(session_data)
+    true
   end
 
   # Cheap persist — called from append_history on the packet thread so a
@@ -140,22 +149,23 @@ module HivemindPersistence
   # thread and still serializes actual file ops across persist!/persist_queue!
   # (they share one .tmp path — interleaved writers would corrupt it).
   def persist_queue!
-    data = @console_mutex.synchronize do
-      d = session_data
-      d['console_queue'] = d['console_queue'].dup
-      d
-    end
-    write_session(data)
+    return false unless enabled?
+    # session_data already dups the console queue under its lock (see
+    # HivemindAgent#session_snapshot), so there is nothing to unwrap here:
+    # the disk write happens OUTSIDE that lock, keeping the packet thread's
+    # hold down to a microsecond.
+    write_session(session_data)
+    true
   end
 
   def write_session(data)
-    persist_mutex.synchronize do
-      tmp = "#{@session_path}.tmp"
+    @mutex.synchronize do
+      tmp = "#{@path}.tmp"
       File.write(tmp, JSON.generate(data))
-      File.rename(tmp, @session_path)
+      File.rename(tmp, @path)
     end
   rescue StandardError => e
-    log_error('session persist failed', e)
+    host.log_error('session persist failed', e)
   end
 
   # Conversation as role/content pairs plus the data needed to rebuild a
@@ -167,8 +177,9 @@ module HivemindPersistence
   # them orphans the assistant's tool_calls message, and the Responses API
   # rejects the next request ("No tool output found for function call").
   def serialize_messages
-    return [] unless @chat
-    @chat.messages.filter_map do |m|
+    chat = host.chat
+    return [] unless chat
+    chat.messages.filter_map do |m|
       next if m.role == :system
       case m.role
       when :tool

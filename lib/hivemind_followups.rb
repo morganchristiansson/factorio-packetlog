@@ -180,10 +180,11 @@ class HivemindFollowups
     host.log_error("follow-up '#{entry[:name]}' failed", e)
   end
 
-  # Persist the session if the owner has one (a run without a session file
+  # Persist the session: the entries live here, the FILE belongs to the
+  # persistence feature, so the owner writes it (a run without a session file
   # has nothing to write, and the follow-up is already in memory).
   def persist!
-    host.persist_followups!
+    host.persist!
   end
 
   # PLAYER PRIORITY: a follow-up that comes due while a conversation turn

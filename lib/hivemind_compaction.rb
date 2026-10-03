@@ -168,9 +168,9 @@ module HivemindCompaction
       reset_memories_sent            # the trimmed thread lost the injections
       @session_players_mutex.synchronize { @session_players.clear } # fresh session; post-compact lines re-populate
       @chat.with_instructions(system_prompt_with_memories)
-      @persisted_messages = nil   # force re-serialization of the trimmed thread
+      plugins[:persistence]&.messages_changed! # the cached serialization is stale
     end
-    persist! if @session_path
+    persist!
     true
   end
 

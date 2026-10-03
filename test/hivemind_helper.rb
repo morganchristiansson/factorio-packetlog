@@ -25,6 +25,7 @@ Dir.mktmpdir('hivemind-test') do |dir|
 end
 require 'player_attrs'
 require 'player_db'
+require 'hivemind_persistence' # the feature whose default_path tests stub
 ENV['HIVE_API_KEY'] ||= 'sk-test'
 
 class FakeRcon
@@ -50,8 +51,13 @@ end
 
 # Production always supplies packet-derived context. Tests do the same,
 # seeded from their fake RCON data, and load the checked-in example config.
+# `session:` is where the persistence feature should keep its file — nil
+# (the default here) means NO session file, the way most tests want it. The
+# agent has no session-path argument: the feature reads its own
+# `default_path`, and this stubs it around the construction (the feature
+# captures the path once, so later persists keep writing there).
 def new_hive_agent(rcon: FakeRcon.new, attrs: nil, current_tick: -> { 0 },
-                   player_db: nil, **kwargs)
+                   player_db: nil, session: nil, **kwargs)
   if !attrs.is_a?(PlayerAttrs)
     rows = attrs || rcon.player_attributes
     rows = rcon.connected.map { |name| { name: name } } if rows.empty? && rcon.connected.any?
@@ -67,8 +73,10 @@ def new_hive_agent(rcon: FakeRcon.new, attrs: nil, current_tick: -> { 0 },
   Array(rows).each_with_index do |row, i|
     player_db[row[:index] || i + 1] = { name: row[:name], admin: row[:admin] }
   end
-  HivemindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
-                    player_db: player_db, config_file: HIVE_TEST_CONFIG, **kwargs)
+  HivemindPersistence.stub(:default_path, session) do
+    HivemindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
+                      player_db: player_db, config_file: HIVE_TEST_CONFIG, **kwargs)
+  end
 end
 
 module HivemindSpecHelpers
@@ -80,7 +88,7 @@ module HivemindSpecHelpers
   # runs with self = the receiver, so this body could call the agent's own
   # privates — a lambda passed to #stub could not.)
   def make_agent(**overrides)
-    agent = new_hive_agent(session_path: false, memory_dir: false, **overrides)
+    agent = new_hive_agent(memory_dir: false, **overrides)
     agent.define_singleton_method(:complete) { |_prompt| '' }
     agent
   end

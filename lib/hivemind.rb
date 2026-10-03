@@ -679,10 +679,17 @@ class HivemindAgent
   def configure_model!(model)
     key = api_key_for(model)
     raise ArgumentError, "no API key configured for #{model}" if key.nil?
+    slot = nil
     RubyLLM.configure do |config|
       config.default_model = model if config.respond_to?(:default_model=)
-      apply_endpoint!(config, model, key)
+      slot = apply_endpoint!(config, model, key)
     end
+    # The same line the startup logs, on every switch: a /model command or a
+    # fallback to another model can move the endpoint and the key slot, and a
+    # 401 from THAT request is otherwise indistinguishable from the first one.
+    log "model #{model} via #{model_provider(model)}/#{api_base_for(model)} — " \
+        "api key from #{api_key_source(model)}, set as #{slot}_api_key"
+    slot
   end
 
   # Set the endpoint and the key on THIS model's provider slot. RubyLLM reads

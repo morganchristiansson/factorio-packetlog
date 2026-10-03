@@ -77,7 +77,7 @@ class TestHivemindTags < Minitest::Test
   # The switch is the plugin list: with `tags` in it the plugin builds and
   # the tool is offered...
   def test_tag_tool_is_offered_when_the_plugin_is_listed
-    assert @agent.plugin?('tags')
+    assert @agent.plugin?(:tags)
     assert_kind_of HivemindTags, @agent.plugins[:tags]
     assert @agent.instance_variable_get(:@chat).tools.key?(:set_player_tag)
   end

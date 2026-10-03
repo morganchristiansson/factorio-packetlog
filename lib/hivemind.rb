@@ -47,7 +47,7 @@ class HivemindAgent
   # lib/hivemind_compaction.rb, lib/hivemind_followups.rb,
   # lib/hivemind_logwatcher.rb, whose modules are mixed into this class. A
   # plugin that is not listed is never required and never lands on the agent,
-  # so a call site asks #plugin?('compaction') before touching one.
+  # so a call site asks #plugin?(:compaction) before touching one.
   #
   # The list is read where it is USED: here, in the class body, because that is
   # where the mixins are decided. A file without the key raises
@@ -57,7 +57,7 @@ class HivemindAgent
   def self.config_plugins(path = CONFIG_FILE)
     return [] unless File.file?(path)
 
-    Array(YAML.safe_load_file(path).fetch('plugins')).map(&:to_s)
+    Array(YAML.safe_load_file(path).fetch('plugins')).map { |n| n.to_s.to_sym }
   end
   PLUGIN_OWNER = 'hivemind'
   # The list, read ONCE per load of this file: a hot reload re-reads the config
@@ -65,7 +65,7 @@ class HivemindAgent
   # can't be un-mixed, so restarting is the clean switch.
   def self.own_plugins = (@own_plugins ||= config_plugins)
   # Features still mixed in rather than built (see the constructor).
-  def self.still_modules = %w[compaction].freeze
+  def self.still_modules = %i[compaction].freeze
 
   def self.plugin_set
     @plugin_set ||= Plugins::PluginSet.new(own_plugins, nil, dir: __dir__, owner: PLUGIN_OWNER)
@@ -217,7 +217,7 @@ class HivemindAgent
   # set_player_languages tool). Its OWN list is config-hivemind.yaml.
   def initialize(rcon:, attrs:, current_tick:, player_db:, sniffer_plugins: [],
                  memory_dir: nil, config_file: CONFIG_FILE)
-    @sniffer_plugins = sniffer_plugins.map(&:to_s) # the SNIFFER's list — see above
+    @sniffer_plugins = sniffer_plugins.map { |n| n.to_s.to_sym } # the SNIFFER's list — see above
     @attrs = attrs
     @current_tick = current_tick
     @player_db = player_db
@@ -577,12 +577,12 @@ class HivemindAgent
     # config-hivemind.yaml's list the file is never required and the model is
     # never offered the write (no guard needed here — nil plugin, nil call).
     plugins[:tags]&.register(chat, @rcon)
-    chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp) && plugin?('followups')
-    chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp) && plugin?('followups')
+    chat.with_tool(ScheduleFollowUp.new(agent: self)) if defined?(ScheduleFollowUp) && plugin?(:followups)
+    chat.with_tool(CancelFollowUp.new(agent: self)) if defined?(CancelFollowUp) && plugin?(:followups)
     # The language tool edits the per-player language overrides the
     # TRANSLATION plugin relays chat for, so it is only useful (and only
     # offered) while that plugin is loaded.
-    chat.with_tool(SetPlayerLanguages.new(player_db: @player_db)) if Plugins.enabled?(@sniffer_plugins, 'translation')
+    chat.with_tool(SetPlayerLanguages.new(player_db: @player_db)) if Plugins.enabled?(@sniffer_plugins, :translation)
   end
 
   def ask_llm(player, message)

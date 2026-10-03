@@ -868,7 +868,7 @@ class TestServerMode < Minitest::Test
     host.define_singleton_method(:rcon) { rcon }
     host.define_singleton_method(:player_db) { player_db }
     built = Plugins::PluginSet.new(%w[player_backup], host,
-                                   args: { 'player_backup' => { path: path, legacy_path: legacy } }).features
+                                   args: { player_backup: { path: path, legacy_path: legacy } }).features
     assert_equal 1, built.size, 'the feature is there'
     built.first
   end

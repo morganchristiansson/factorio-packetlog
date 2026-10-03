@@ -129,15 +129,15 @@ class TestHivemindAgent < Minitest::Test
       path = File.join(dir, 'config-hivemind.yaml')
       File.write(path, "plugins:\n  - compaction\n  - followups\n")
 
-      assert_equal %w[compaction followups], HivemindAgent.config_plugins(path)
+      assert_equal %i[compaction followups], HivemindAgent.config_plugins(path)
     end
     # the shipped example enables every feature
-    assert_equal %w[persistence compaction followups logwatcher tags],
+    assert_equal %i[persistence compaction followups logwatcher tags],
                  HivemindAgent.config_plugins(HIVE_TEST_CONFIG)
     assert_equal HivemindAgent.config_plugins(HIVE_TEST_CONFIG), HivemindAgent.own_plugins
-    assert @agent.plugin?('compaction')
-    assert @agent.plugin?('logwatcher')
-    refute @agent.plugin?('nope')
+    assert @agent.plugin?(:compaction)
+    assert @agent.plugin?(:logwatcher)
+    refute @agent.plugin?(:nope)
     # every listed plugin's module is actually mixed in
     assert_equal HivemindCompaction, HivemindAgent.instance_method(:compact_memory!).owner
     assert_kind_of HivemindLogwatcher, @agent.plugins[:logwatcher],

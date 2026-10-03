@@ -49,6 +49,11 @@ class FactorioPacketTools
     factorio_protocol/packets/connection_packets
   ].freeze
 
+  # The plugin names whose objects this sniffer builds itself rather than
+  # receiving events (lib/hivemind.rb, lib/translation.rb). They stay in the
+  # list for their files (hot reload), not as features.
+  HOST_OBJECTS = %i[hivemind translation].freeze
+
   # Seconds between two Ctrl-C/SIGHUP presses that count as "quit".
   # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
   QUIT_WINDOW = 5
@@ -158,7 +163,12 @@ class FactorioPacketTools
     # this host drives, not features it emits to. MODE-INDEPENDENT and
     # outside any mode block: the packet path emits on_player_color in
     # every mode (pcap replay included), so @plugins must always exist.
-    @plugins = Plugins::PluginSet.new(options[:plugins], self)
+    # `hivemind` and `translation` are in the list so their CODE is hot-
+    # reloaded, but they are OBJECTS this sniffer constructs (see below), not
+    # features it dispatches events to — building them would warn "no feature
+    # class" for each on the first emit.
+    listed = Array(options[:plugins]).map { |n| n.to_s.to_sym }
+    @plugins = Plugins::PluginSet.new(listed, self, dispatch: listed - HOST_OBJECTS)
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -228,7 +238,7 @@ class FactorioPacketTools
       # packets); online players and stats are cached. Player admin is
       # stored in PlayerDatabase (players-cache.json); targeted RCON
       # attrs lookups happen once for newly joined players only.
-      if @plugins.enabled?('hivemind') && options[:ai_agent]
+      if @plugins.enabled?(:hivemind) && options[:ai_agent]
         if @rcon
           begin
             @agent = HivemindAgent.new(rcon: @rcon, attrs: @attrs,
@@ -251,7 +261,7 @@ class FactorioPacketTools
       # the `translation` plugin; no API key required.
       # Backend and Google API key come from config-translation.yaml
       # (`google_api_key:`) with the env overriding it.
-      if @plugins.enabled?('translation') && @rcon
+      if @plugins.enabled?(:translation) && @rcon
         begin
           @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
           backend = @translation_agent.backend
@@ -1377,7 +1387,7 @@ class FactorioPacketTools
       # `plugins:`); the only other way in is no running agent. Past that
       # compact_memory! itself returns false for a disabled memory store, so
       # the session is kept and nothing is cleared.
-      unless @agent&.plugin?('compaction')
+      unless @agent&.plugin?(:compaction)
         puts 'memory compaction unavailable (no agent, or the compaction plugin is off in config-hivemind.yaml) — session NOT cleared'
         return
       end

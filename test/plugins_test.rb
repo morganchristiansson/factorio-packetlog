@@ -34,7 +34,7 @@ class TestPlugins < Minitest::Test
   def test_the_config_list_is_the_list
     set = set_for(%w[seamy])
 
-    assert_equal %w[seamy], set.names
+    assert_equal %i[seamy], set.names, 'names are symbols inside the set (YAML strings normalized at the boundary)'
     assert set.enabled?('seamy')
     refute set.enabled?('nope')
   end
@@ -53,7 +53,7 @@ class TestPlugins < Minitest::Test
   def test_missing_list_is_rejected
     error = assert_raises(ArgumentError) { Plugins.list!(nil) }
     assert_match(/`plugins:` is required/, error.message)
-    assert_equal %w[a b], Plugins.list!(%w[a b a]), 'and it comes back normalized'
+    assert_equal %i[a b], Plugins.list!(%w[a b a]), 'and it comes back normalized to symbols'
     assert_empty set_for([]).features, 'an empty list runs none'
   end
 
@@ -121,6 +121,18 @@ class TestPlugins < Minitest::Test
   def test_a_list_says_nothing_about_another
     assert Plugins.enabled?(%w[hivemind translation], 'translation')
     refute Plugins.enabled?(%w[hivemind], 'translation')
+  end
+
+  # A name can be in the list for its FILE alone: the sniffer lists hivemind
+  # and translation so their code reloads, but it constructs those objects
+  # itself and dispatches no events to them — so they must not be built as
+  # features ("no feature class"), while still showing up in `files`.
+  def test_dispatch_subset_excludes_from_building_not_from_files
+    set = Plugins::PluginSet.new(%w[alpha beta], Owner.new, dir: FIXTURES, dispatch: %w[alpha])
+    out, err = capture_io { assert_equal %w[Alpha], set.features.map { |f| f.class.name } }
+    assert_empty err, 'no "no feature class" warning for a name nobody dispatches to'
+    assert_equal %w[alpha alpha_extra beta], set.files.map { |f| File.basename(f, '.rb') },
+                 'every listed file (and its family) still reloads'
   end
 
   # The sniffer's `hivemind`/`translation` entries name files whose CLASSES it

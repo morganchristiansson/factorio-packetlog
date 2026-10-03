@@ -35,8 +35,15 @@ module Plugins
     #   (`new(owner, **kwargs)`) — a feature's own options, without the owner
     #   growing a config knob or a test chdir'ing into a scratch directory to
     #   redirect a file it does not care about.
-    def initialize(names, host, dir: __dir__, owner: nil, args: {})
-      @names = Array(names).map(&:to_s).uniq
+    # dispatch: the subset of names EVENTS are sent to. A name can be in the
+    #   list for its FILE alone — the sniffer lists `hivemind` and
+    #   `translation` so their code reloads, but it constructs those two
+    #   objects itself and has no events for them, so building them as
+    #   features would warn "no feature class" on the first emit. Anything not
+    #   named here dispatches to everything.
+    def initialize(names, host, dir: __dir__, owner: nil, args: {}, dispatch: nil)
+      @names = Array(names).map { |n| n.to_s.to_sym }.uniq
+      @dispatch = (dispatch || @names).map { |n| n.to_s.to_sym } & @names
       @host = host
       @dir = dir
       @prefix = owner ? "#{owner}_" : ''
@@ -47,7 +54,7 @@ module Plugins
 
     attr_reader :names
 
-    def enabled?(name) = @names.include?(name.to_s)
+    def enabled?(name) = @names.include?(name.to_sym)
 
     # The owner's feature objects, built on first use: the named files are
     # required, then the class each contributes is instantiated with the
@@ -55,7 +62,7 @@ module Plugins
     # reported and left out — a feature is never half-alive. This is also what
     # the hot-reload list is read from, so a reload re-reads the files.
     def features
-      @features ||= @names.filter_map { |name| build(name) }
+      @features ||= @dispatch.filter_map { |name| build(name) }
     end
 
     # Every file the features own (their own plus their family), for the
@@ -108,6 +115,9 @@ module Plugins
     # The class a name contributes is called this (namespace + CamelCase).
     def constant_name(name) = "#{@namespace}#{camel(name)}"
 
+    # Names are SYMBOLS inside the plugin set (a closed vocabulary: typos are
+    # NameErrors, not silent misses); YAML gives strings, so the boundary is
+    # where they are normalized. A name reaches the filesystem as its text.
     def camel(name)
       File.basename(name.to_s, '.rb').split('_').map { |w| w[0].upcase + w[1..] }.join
     end
@@ -132,7 +142,7 @@ module Plugins
       # the argument that matters, and `args` is how a caller (a test, or an
       # owner with something to say at construction time) passes a feature's
       # own options without a config file growing a knob for them.
-      klass.new(@host, **(@args[name] || {}))
+      klass.new(@host, **(@args[name.to_s] || @args[name] || {}))
     rescue LoadError, StandardError => e
       warn "[plugin] #{name} disabled: #{e.class}: #{e.message}"
       nil
@@ -146,7 +156,7 @@ module Plugins
     def list!(names)
       raise ArgumentError, '`plugins:` is required — list the features to load; an empty list (`plugins: []`) runs none' if names.nil?
 
-      Array(names).map(&:to_s).uniq
+      Array(names).map { |n| n.to_s.to_sym }.uniq
     end
 
     # Require the file each name names, building NOTHING. A name that IS a
@@ -161,6 +171,6 @@ module Plugins
 
     # Whether a name is in a list, before there is a Plugins object (the
     # entry point's ai_agent check).
-    def enabled?(list, name) = Array(list).map(&:to_s).include?(name.to_s)
+    def enabled?(list, name) = Array(list).map { |n| n.to_s.to_sym }.include?(name.to_sym)
   end
 end

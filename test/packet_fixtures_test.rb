@@ -222,4 +222,23 @@ class TestPacketFixtures < Minitest::Test
     assert_equal 240, acts[0][:type]
     refute acts[0][:hit_unknown], 'translate_string must consume exactly count entries + 9-byte argument block'
   end
+
+  # A translate_string whose entries run past the end of the payload used to
+  # raise out of the decode (the key length was added to 3 BEFORE the nil
+  # check), which killed the whole packet on the capture thread — the
+  # operator saw a backtrace and a dead sniffer, not a flagged packet. A
+  # truncated one is simply unknown from there on.
+  def test_truncated_translate_string_does_not_raise
+    FactorioProtocol.select_version('2.0')
+    entry = [3].pack('C') + 'key' + [0x01, 0x00].pack('C2') + [2].pack('C') + 'hi' + ("\x00" * 9)
+    # count says 2 entries, only one is there — the second read is off the end
+    payload = [2].pack('C') + entry
+    data = [0x26, 0x06, 0, 0, 0, 0].pack('C*') + [0].pack('Q<') + [0x02].pack('C') +
+           [240, 0x00].pack('C2') + payload
+    result = nil
+    assert_silent { result = FactorioProtocol.parse_udp_payload(data) }
+    acts = result.dig(:heartbeat, :tick_closures).first[:actions]
+    assert acts.any? { |a| a[:type] == 240 }, 'the action is still seen'
+    assert acts.any? { |a| a[:hit_unknown] }, 'and flagged unknown instead of crashing the sniffer'
+  end
 end

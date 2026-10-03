@@ -401,13 +401,27 @@ module FactorioProtocol
         if n
           o += 1
           alen = 1
+          complete = true
           n.times do
             kl = data.getbyte(o)
+            # Fewer entries than `count` claims (or an entry cut short) means
+            # the layout disagrees with us: the length below cannot be
+            # trusted, so the action is unknown and parsing stops there. Read
+            # kl BEFORE using it — adding 3 to a nil (past the end of the
+            # payload) raised out of the decode and killed the packet.
+            if kl.nil?
+              complete = false
+              break
+            end
             tl = data.getbyte(o + kl + 3)
-            break unless kl && tl
+            unless tl
+              complete = false
+              break
+            end
             alen += 1 + kl + 2 + 1 + tl + 9
             o += 1 + kl + 2 + 1 + tl + 9
           end
+          alen = nil unless complete && alen == o - offset
         end
         alen = nil unless n && alen == o - offset
       end

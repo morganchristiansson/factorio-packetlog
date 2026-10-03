@@ -341,6 +341,26 @@ Correlating those names with the packet capture's wire IDs by
 Flags OK (table matches), MISMATCH (different name for the ID), and
 NOT IN TABLE entries.
 
+## translate_string (2.0: 240) — a truncated entry ended the capture read
+
+`[u8 count]` then `count` localised strings, each
+`[u8v key][01][00][u8v translation][9-byte argument block]`. The key length
+was added to 3 **before** the nil check that guards it, so a payload whose
+entries ran past the end raised `TypeError: nil can't be coerced into
+Integer` out of the decoder.
+
+That exception escaped `process_packet`, escaped the pcap reader, and the
+run reported "stopped reading this file" — silently, mid-capture. On
+`server-34197-20260925-144037.pcap` (22MB) it happened after 267,315
+packets: the remaining 36,277 packets and 43,496 actions in the file were
+never decoded at all, which is most of why the undecoded-action list looked
+short. The reader aborts on a raise (it has no per-packet rescue), so ONE
+malformed action cost the rest of the capture.
+
+Fixed by reading the length before using it, and by flagging the action
+`hit_unknown` when the count is not satisfied — a payload we cannot lay out
+stops that closure instead of raising out of the process.
+
 ## `set_player_color` (2.0 wire 296, 2.1 311): FOUR UNORM bytes R,G,B,A
 
 Table length 4, and it holds: 2313 occurrences over the whole rolling set,

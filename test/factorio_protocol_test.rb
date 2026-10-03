@@ -16,6 +16,12 @@ class TestFactorioProtocol < Minitest::Test
     # switches version must not leak into the next one. reset_version is the
     # single place that clears all of them.
     FactorioProtocol.reset_version
+    # …and it clears them to 2.0, the only RELEASED version and the default
+    # since 2026-10-03. The synthetic packets below are hand-written with
+    # 2.1 numbers (build 68, zoom 128, deconstruct 131, start_walking 69,
+    # selected_entity_changed_very_close 266), so this file runs against the
+    # 2.1 tables; the tests that are about 2.0 select it themselves.
+    FactorioProtocol.select_version('2.1')
   end
 
   # ── TilePos / TileRect ─────────────────────────────────────────
@@ -240,18 +246,20 @@ class TestFactorioProtocol < Minitest::Test
   end
 
   def test_chat_long_message_split
-    # First segment: [0x05][total_len=163][first 98 bytes]
-    # meta is the TOTAL message length; text runs to end of payload.
+    # A split message: segment 0 carries [player][total_len][text...],
+    # continuation segments raw text. The sniffer merges them before
+    # decoding (chat_action_data), so decode_chat sees the MERGED payload —
+    # the declared total_len then equals the remaining bytes exactly.
     first = 'I was also thinking of mod to unlock all qualities from start so there is more focus on quality. an'
     second = "d there's mods that add additional quality tiers after legendary."
     total_len = first.bytesize + second.bytesize
     assert_equal 164, total_len
 
-    data = [0x05, total_len] + first.bytes.to_a
-    msg = FactorioProtocol.decode_chat(data.pack('C*'))
-    assert_equal first, msg
+    merged = ([5, total_len] + first.bytes.to_a + second.bytes.to_a).pack('C*')
+    msg = FactorioProtocol.decode_chat(merged)
+    assert_equal first + second, msg
 
-    # Second segment: raw continuation text (no prefix)
+    # A lone continuation segment, decoded standalone, is raw text (no prefix).
     msg2 = FactorioProtocol.decode_chat(second.bytes.to_a.pack('C*'))
     assert_equal second, msg2
   end

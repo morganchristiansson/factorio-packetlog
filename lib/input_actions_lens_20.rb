@@ -130,4 +130,22 @@ C2S_LENS_20 = {
   264 => 1, # fast_entity_transfer (9484 closures)
   265 => 1, # rotate_entity (69 closures)
   289 => 1, # set_splitter_priority (23 closures)
+
+  # ── measured from captures/ (7 server captures, 2026-10-03) ──────────
+  # The worst remaining desync sources: types with no measured length at all
+  # (112/248) desync EVERY closure they appear in, and types whose
+  # by-name-inherited 2.1 guess is wrong (70: 2 vs 9) desync most of theirs.
+  # Counts from `measure_action_lens.rb --decide captures/server-*.pcap.gz`
+  # (winner, closures, runner-up). Unidentified types are deliberately NOT
+  # here: with no length they hit_unknown, which keeps the frame in
+  # unknown.packets for the name to be identified with /toggle-action-logging.
+  22 => 0,   # toggle_show_entity_info (12 closures, ru 2; guess was 1)
+  70 => 9,   # change_heading_riding_state (81 closures, ru 4; guess was 2)
+  78 => 17,  # stack_transfer (44 closures, ru 2; guess was 5)
+  100 => 9,  # swap_logistic_filter_items (10 closures, ru 2; guess was 1)
+  109 => 10, # change_active_character_tab (35 closures, ru 7; guess was 1)
+  112 => 9,  # gui_selection_state_changed (96 closures, ru 5; no length at all)
+  156 => 9,  # cancel_upgrade (9 closures, ru 0; guess was 5)
+  213 => 9,  # drag_train_schedule (13 closures, ru 2; guess was 1)
+  248 => 9,  # instantly_create_space_platform (16 closures, ru 4; no length)
 }.freeze

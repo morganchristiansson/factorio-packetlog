@@ -16,8 +16,11 @@
 # ACTIONS_20 — main action types for 2.0: the defines map plus internal
 # wire actions not exposed in defines (nothing, stop_walking,
 # zoom_around_point, the selected_entity_changed family, close_gui, …).
-# Data lengths are inherited from the 2.1 ACTIONS table BY NAME (payload
-# shapes are version-stable).
+# This is the DEFAULT table set (2.0 is the only released version);
+# 2.1's experimental table is ACTIONS. Data lengths here are inherited
+# from ACTIONS BY NAME (payload shapes are version-stable) — they are
+# guesses, and C2S_LENS_20 (measured, by wire ID) overrides them on
+# client→server.
 #
 # SEGMENT_TYPES_20 — input-action segment types for 2.0 (chat arrives via
 # a segment with type 104 = write_to_console; 2.1 uses 106).

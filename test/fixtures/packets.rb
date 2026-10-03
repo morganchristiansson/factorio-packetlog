@@ -438,6 +438,113 @@ REAL_PACKET_FIXTURES = [
         data: 'cc3b7f669ea0e63fcc3b7f669ea0e6bf' },
     ],
   },
+  # ── C→S payloads whose measured length fixed a desync (2026-10-03) ──
+  #
+  # Each of these types desynced the rest of its tick closure: 112/248 had no
+  # length at all, the rest inherited a wrong guess from the 2.1 table by name.
+  # The lengths are measured (tools/measure_action_lens.rb --decide over
+  # captures/server-*.pcap.gz) and pinned here by a real packet each.
+  {
+    name: 'client_change_heading_riding_state',
+    description: 'captures/server-34197-20261003-184758.pcap.gz: player 140 — wire type 70: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '0606e957ec68780433080000000004428c8046000080ff0100080101804600008000020000100a007504330800000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 140, data: '8046000080ff010008010180' },
+      { type: 70, name: 'change_heading_riding_state', game_player: 140, data: '008000020000100a00' },
+    ],
+  },
+  {
+    name: 'client_stack_transfer',
+    description: 'captures/server-34197-20261003-165845.pcap.gz: player 186 — wire type 78: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '060617eb7d4c3fc62c0800000000024eba050001000000000000000000010100040030c62c0800000000',
+    actions: [
+      { type: 78, name: 'stack_transfer', game_player: 186, data: '0500010000000000000000000101000400' },
+    ],
+  },
+  {
+    name: 'client_swap_logistic_filter_items',
+    description: 'captures/server-34197-20261003-170056.pcap.gz: player 186 — wire type 100: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '060613027e4c63dd2c08000000000477bacc640000e2f8fffffb009d54dd2c0800000000',
+    actions: [
+      { type: 119, name: 'use_item', game_player: 186, data: 'cc' },
+      { type: 100, name: 'swap_logistic_filter_items', game_player: 186, data: '00e2f8fffffb009d54' },
+    ],
+  },
+  {
+    name: 'client_change_active_character_tab',
+    description: 'captures/server-34197-20261003-170056.pcap.gz: player 1 — wire type 109: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '0606c60c7b6293942e0800000000044201806e000080090000040101806d00008009000001100a0090942e0800000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 1, data: '806e00008009000004010180' },
+      { type: 109, name: 'change_active_character_tab', game_player: 1, data: '008009000001100a0090' },
+    ],
+  },
+  {
+    name: 'client_gui_selection_state_changed',
+    description: 'captures/server-34197-20261003-184758.pcap.gz: player 140 — wire type 112: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '2606281aec68b7c632080000000004428c806f0000805d02000c010180700000805d020000100a00b4c6320800000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 140, data: '806f0000805d02000c010180' },
+      { type: 112, name: 'gui_selection_state_changed', game_player: 140, data: '00805d020000100a00' },
+    ],
+  },
+  {
+    name: 'client_cancel_upgrade',
+    description: 'captures/server-34197-20261003-180056.pcap.gz: player 46 — wire type 156: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '0606e428ea6bdcac2f080000000004422e809b0000805302000c0101809c00008053020000100a00d8ac2f0800000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 46, data: '809b0000805302000c010180' },
+      { type: 156, name: 'cancel_upgrade', game_player: 46, data: '008053020000100a00' },
+    ],
+  },
+  {
+    name: 'client_drag_train_schedule',
+    description: 'captures/server-34197-20261003-170056.pcap.gz: player 46 — wire type 213: the payload length tools/measure_action_lens.rb --decide measured against the by-name-inherited 2.1 guess, which desynced every closure it appeared in.',
+    version: '2.0.77',
+    hex: '2606fe1f89327a042e080000000004422e80d60000800a020004010180d50000800a020000100a0077042e0800000000',
+    actions: [
+      { type: 66, name: 'build', game_player: 46, data: '80d60000800a020004010180' },
+      { type: 213, name: 'drag_train_schedule', game_player: 46, data: '00800a020000100a00' },
+    ],
+  },
+
+  # ── C→S chat from a player past 254: the ESCAPED player index (2026-10-03) ──
+  #
+  # The payload header is [uint16v player][uint32v len][text]. Above player
+  # 254 the index is 0xff-escaped ([ff][u16 LE]), so every chat message on a
+  # busy server starts 0xff — and the decoder read that as the 5-byte uint32v
+  # length escape, printing "?d\u0001$mod bug or are we talking actual bug".
+  {
+    name: 'client_chat_player_356_escaped_index',
+    description: 'captures/server-34197-20261003-164448.pcap.gz pkt 656: player 357, payload [ff 64 01 (=356)][0x34=52][text]',
+    version: '2.0.77',
+    hex: '2606e45ede2704fc2b08000000000101680d000000ff6401010038ff640134616e642069747320736f206261642074686174206920646f6e74206665656c20692063616e206275696c6420616e797468696e6702fc2b0800000000',
+    actions: [
+      { type: 104, name: 'write_to_console', game_player: 357,
+        total_segs: 1, seg_no: 0,
+        data: 'ff640134616e642069747320736f206261642074686174206920646f6e74206665656c20692063616e206275696c6420616e797468696e67',
+        chat: 'and its so bad that i dont feel i can build anything' },
+    ],
+  },
+  {
+    name: 'client_chat_player_356_escaped_index_2',
+    description: 'captures/server-34197-20261003-170056.pcap.gz pkt 413385: same shape, different closure flags',
+    version: '2.0.77',
+    hex: '060672af262473322d080000000001016801000000ff6401010028ff6401246d6f6420627567206f72206172652077652074616c6b696e672061637475616c2062756770322d0800000000',
+    actions: [
+      { type: 104, name: 'write_to_console', game_player: 357,
+        total_segs: 1, seg_no: 0,
+        data: 'ff6401246d6f6420627567206f72206172652077652074616c6b696e672061637475616c20627567',
+        chat: 'mod bug or are we talking actual bug' },
+    ],
+  },
+
   # ── C→S split-chat reassembly regression fixtures (2026-08-16, 2.0.77) ──
   #
   # Long chat messages are split across MULTIPLE input-action segments, each

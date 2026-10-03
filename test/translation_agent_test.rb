@@ -43,8 +43,18 @@ class TestTranslationAgent < Minitest::Test
     agent
   end
 
+  # The unknown-packets writer is injected as a null double: the default is
+  # a REAL PcapWriter, which leaves an empty captures/unknown.packets-<ts>.pcap
+  # in the repo on every run.
+  class NullWriter
+    def path = 'unknown.packets (test)'
+    def write_frame(*) = nil
+    def close = nil
+  end
+
   def make_sniffer
-    FactorioPacketTools.new({ server: false, pcap: nil, interface: nil })
+    FactorioPacketTools.new({ server: false, pcap: nil, interface: nil },
+                            unknown_pcap_writer: NullWriter.new)
   end
 
   def command_recorder

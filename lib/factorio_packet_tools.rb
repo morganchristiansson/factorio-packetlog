@@ -58,6 +58,16 @@ class FactorioPacketTools
   # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
   QUIT_WINDOW = 5
 
+  # How far past the known roster a player index may sit before it counts as
+  # a desync rather than a player we have no name for. The DISTANCE decides,
+  # not membership: on the 2026-10-03 set, 10,036 packets were flagged for
+  # index 357 and 736 for 360 — both real players (both chatting under their
+  # Player_N placeholders), just past the last index this cache names. That
+  # made `packets with a suspected desync` a false-positive machine (11 196
+  # of 11 265 flags) and buried the corpus under 1.4 MB of nothing. A real
+  # desync throws the index thousands of places away (33024, 53354).
+  UNKNOWN_PLAYER_WINDOW = 100
+
   # Always-on capture rotation defaults (hardcoded — config.yaml can
   # override). Without ANY bound the active capture grows forever (observed:
   # a 511 MB server-34197.pcap plus 2.9 GB of never-pruned restarts) and
@@ -68,7 +78,7 @@ class FactorioPacketTools
   DEFAULT_ROTATE_SIZE_MB = 256
   DEFAULT_MAX_SIZE_MB = 512
 
-  def initialize(options, pcap_writer: nil)
+  def initialize(options, pcap_writer: nil, unknown_pcap_writer: nil)
     # What lands in the pcap is ONE axis (was two half-overlapping flags):
     #   normal — filtered (drop keepalive-only heartbeats, server-mode
     #            outgoing broadcasts, msg 13 map-download blocks)
@@ -106,8 +116,13 @@ class FactorioPacketTools
     # Protocol-development capture is always on. Keep this separate from the
     # normal rolling capture so decoder failures can be replayed later.
     unknown_path = File.join(default_capture_dir, 'unknown.packets.pcap')
-    @unknown_writer = PcapWriter.new(unknown_path, keep: effective_keep,
-                                     rotate_size: effective_rotate_size, max_size: effective_max_size, timestamped: true)
+    # Tests inject a fake here too (same kwarg pattern as pcap_writer):
+    # a real writer means one empty unknown.packets-<ts>.pcap per test run,
+    # dropped in the repo's captures/ and never closed.
+    @unknown_writer = unknown_pcap_writer ||
+                      PcapWriter.new(unknown_path, keep: effective_keep,
+                                     rotate_size: effective_rotate_size, max_size: effective_max_size,
+                                     timestamped: true)
     puts "saving unknown packets to #{@unknown_writer.path}"
     @item_db = nil
     if options[:item_db] && File.exist?(options[:item_db])
@@ -489,10 +504,10 @@ class FactorioPacketTools
     ensure_pcap_writer(src_ip, dst_ip) if @pending_capture
 
     # Protocol version from the connection request a client sends when it
-    # joins (msg 2 carries it). Without this, pcap mode and client mode have
-    # no RCON to ask and decode 2.0 traffic with the 2.1 tables: 9% of the
-    # actions came out as Unknown(66) — 66 being 2.0's `build`, which 2.1
-    # numbers 68 — with the wrong data lengths behind them.
+    # joins (msg 2 carries it). Nothing announces 2.0, so the tables already
+    # default to 2.0 — this exists to notice a server that says otherwise
+    # (an experimental 2.1 build), and to reject a capture from a version
+    # whose numbering the tables cannot serve.
     detect_protocol_version(udp_data) if (udp_data.getbyte(0) & 0x1F) == 2 && @protocol_version.nil?
 
     # RequestForHeartbeatWhenDisconnecting (msg 14) — documented as a C→S
@@ -731,17 +746,21 @@ class FactorioPacketTools
     @ghost_mode = hb[:next_receive] ? (hb[:next_receive] & 1) == 1 : false
     
     # Keep protocol-development packets that expose a decoder failure. Besides
-    # hit_unknown, an action attributed to a player absent from the authoritative
-    # roster is evidence that an earlier action length desynchronized the stream.
+    # hit_unknown, an action attributed to a player far outside the
+    # authoritative roster is evidence that an earlier action length
+    # desynchronized the stream.
+    #
     known_players = @player_db.players.keys
     known_players.concat(@attrs.roster_pairs.map { |p| p[:index] })
+    roster_ceiling = known_players.max.to_i + UNKNOWN_PLAYER_WINDOW
     invalid_players = if known_players.empty?
                         []
                       else
                         hb[:tick_closures]&.filter_map do |tc|
                           tc[:actions]&.map { |a| a[:game_player] }&.uniq
-                        end&.flatten&.reject { |pid| known_players.include?(pid) } || []
+                        end&.flatten&.reject { |pid| known_players.include?(pid) || pid <= roster_ceiling } || []
                       end
+    @desync_before = @stats[:desync]
     if hb[:hit_unknown] || invalid_players.any?
       # A desync: an action type with no length (or one before it desynced),
       # so the rest of this packet's actions were misread. Counted for the
@@ -752,25 +771,35 @@ class FactorioPacketTools
       if @options[:validate] && hb[:hit_unknown] && last_act
         warn "[WARN] type #{last_act[:type]}(#{last_act[:name]}) triggered hit_unknown — previous action may have wrong data length"
       end
-      @unknown_writer&.write_frame(raw_frame, Time.at(ts))
     end
-    
-    qb_desync = false
+
+    # Keep a frame when anything about this packet is undecoded or misread:
+    # a suspected desync (above), an action type we have no name/layout for,
+    # or a quickbar action whose payload implies a desync. One frame per
+    # packet, no matter how many actions in it are affected.
+    keep_frame = false
     hb[:tick_closures]&.each do |tc|
       tc[:actions]&.each do |act|
         @stats[:actions] += 1
         # Decoder coverage: an action type we have no name/layout for. Counted
         # always (it is the answer to "what is still undecoded?"), not only
-        # under --validate.
+        # under --validate. The packet is kept too: an Unknown action in the
+        # main list carries its MEASURED length, so the rest of the packet
+        # still parses and hit_unknown never fires — without this the frame
+        # holding the action we cannot decode was thrown away.
         if act[:name].to_s.start_with?('Unknown')
           @stats[:unknown] += 1
           @unknown_names[act[:name]] = @unknown_names.fetch(act[:name], 0) + 1
+          keep_frame = true
         end
-        qb_desync = true if track_quickbar(act)
+        # NOT `keep_frame ||= track_quickbar(act)`: that would short-circuit
+        # and skip the tracking itself on every action after the first hit.
+        keep_frame = true if track_quickbar(act)
         log_action(ts, act, hdr[:msg_type] == 7, ghost: @ghost_mode, raw_frame: raw_frame)
       end
     end
-    @unknown_writer&.write_frame(raw_frame, Time.at(ts)) if qb_desync && raw_frame
+    keep_frame ||= @stats[:desync] > @desync_before
+    @unknown_writer&.write_frame(raw_frame, Time.at(ts)) if keep_frame && raw_frame
   rescue StandardError => e
     # ONE malformed packet costs ONE packet. The decoder reads lengths off
     # the wire and trusts them, so a length can point past the end of a
@@ -1177,6 +1206,7 @@ class FactorioPacketTools
   def read_pcaps
     paths = Array(@options[:pcaps])
     paths = [@options[:pcap]] if paths.empty?
+    prescan_pcap_version(paths.first)
     paths.each_with_index do |path, i|
       puts "[pcap] #{i + 1}/#{paths.size} #{path}" if paths.size > 1
       begin
@@ -1185,6 +1215,27 @@ class FactorioPacketTools
         warn "[pcap] #{path}: #{e.class}: #{e.message} — stopped reading this file"
       end
     end
+  end
+
+  # Which tables a replay gets. The default is 2.0 (the only released
+  # version), so the connection request (msg 2) in a capture is only needed
+  # to spot an EXPERIMENTAL 2.1 server — and it arrives at the client's JOIN,
+  # thousands of packets in, so everything before it would decode with the
+  # 2.0 tables. Cheap fix: read the first capture once more, up to that
+  # request, and pick the tables before decoding starts. Stops at the
+  # request, so it reads a fraction of one file.
+  def prescan_pcap_version(path)
+    return unless path && @options[:protocol_version].nil?
+    PcapReader.new(path).each_packet do |_n, _ts, _src, _dst, _sp, _dp, udp, _frame|
+      next unless udp.getbyte(0) && (udp.getbyte(0) & 0x1F) == 2
+      version = FactorioProtocol.detect_version(udp)
+      next unless version
+      @protocol_version = version
+      puts "[protocol] factorio #{version} — action tables: #{FactorioProtocol.select_version(version)} (pre-scanned from #{path})"
+      break
+    end
+  rescue StandardError => e
+    warn "[pcap] version pre-scan of #{path}: #{e.class}: #{e.message} — decoding with the default tables"
   end
 
   # The messages that carry strings (username, game name, mod list, peer

@@ -413,15 +413,25 @@ ACTIONS = {
   # session — start_walking=67, write_to_console=104 — vs the 2.1 table's
   # 69 / 106). ACTIONS (below) is the 2.1 mapping; ACTIONS_20 is 2.0.
   #
+  # **2.0 is the DEFAULT, on purpose** (2026-10-03, asked for explicitly):
+  # it is the only RELEASED version and the one every server runs, so an
+  # undetectable version must decode as 2.0 — not as a table built from an
+  # experimental build's `defines.input_action` dump. ACTIONS (below) is that
+  # 2.1 dump and stays reachable: `select_version` picks it when the wire (or
+  # `protocol_version:` in config.yaml) actually says 2.1. The measured
+  # C→S lengths ride along with the 2.0 tables, so the default decode is
+  # also the measured one.
+  #
   # Main action types and input-action SEGMENT types BOTH follow the
-  # server version's enum. select_version picks both maps; defaults to 2.1
-  # (ACTIONS). Survives hot reloads: the sniffer re-applies #select_version
-  # after reloading (its @protocol_version ivar outlives the `load`).
+  # server version's enum. select_version picks both maps. Survives hot
+  # reloads: the sniffer re-applies #select_version after reloading (its
+  # @protocol_version ivar outlives the `load`).
   class << self
     attr_accessor :actions, :segment_types, :c2s_lens
   end
-  self.actions = ACTIONS
-  self.segment_types = ACTIONS
+  self.actions = ACTIONS_20
+  self.segment_types = SEGMENT_TYPES_20
+  self.c2s_lens = C2S_LENS_20
 
   # Name for an input-action segment type under the selected protocol
   # version. Values in SEGMENT_TYPES_20 are bare strings; ACTIONS entries
@@ -434,7 +444,9 @@ ACTIONS = {
 
   # Pick the main-action + segment-type mapping for a server version
   # string ("2.0.77", "2.1", or a bare "2.0"). Anything 2.0.x uses the
-  # defines dump; 2.1+ (and unknown) keep the main ACTIONS table. Returns
+  # defines dump; 2.1+ (and unknown) keep the main ACTIONS table — that
+  # branch is only reached when something really says 2.1, since the
+  # default is 2.0 (see the note above). Returns
   # the chosen label ("2.0" / "2.1+") for logging.
   # Inspect one UDP payload for a ConnectionRequest (msg 2) and return the
   # advertised Factorio version. Returns nil when the payload is not a
@@ -464,16 +476,17 @@ ACTIONS = {
   end
 
   # MEASURED client→server payload lengths for the selected version, or nil
-  # when none were measured (2.1 — see C2S_LENS_20). Where present they win
+  # when none were measured (only the 2.1 tables, which have none — see
+  # C2S_LENS_20). Where present they win
   # over the table's guessed length: they come from the wire, not from a
   # same-name lookup in another version's table.
 
-  # Restore the default (2.1+) mappings. Exposed for tests so version-
+  # Restore the default (2.0) mappings. Exposed for tests so version-
   # dependent fixtures don't leak their tables into later cases.
   def self.reset_version
-    self.actions = ACTIONS
-    self.segment_types = ACTIONS
-    self.c2s_lens = nil
+    self.actions = ACTIONS_20
+    self.segment_types = SEGMENT_TYPES_20
+    self.c2s_lens = C2S_LENS_20
   end
 
   # ── Network Header ─────────────────────────────────────────────────
@@ -685,35 +698,34 @@ ACTIONS = {
   # Decode a write_to_console message payload into a plain string.
   # Returns nil when the data is empty or not decodable.
   #
-  # Wire shapes (byte 0 is the sender's player SLOT, not a message type —
-  # earlier code enumerated observed slots 0x05/0x0b/0x24/… here and every
-  # new player broke decoding, so structure wins over slot values now):
-  #   [0x04][text...]                    non-segment message, text to end
-  #   [slot][wc-total_len][text...]      first/only segment; total_len is the
-  #                                      FULL message length (Factorio uint32v:
-  #                                      1 byte, or [0xff][u32 LE] past 0xfe)
-  #   continuation segments              raw text, no header (the sniffer
-  #                                      merges them before decoding)
-  #   localized string                   protobuf-like [key][mode][params...]
-  #   [uint32v len][text]                main-action-list form
-  #   raw text                           no prefix at all
+  # Wire shape (2.0.77, measured over every chat message in captures/):
+  # the payload is the ACTION's own serialization — the surrounding
+  # input-action segment header carries the player as well:
+  #   [uint16v player][uint32v len][text...]
+  # `player` is the sender's 0-based index and is 0xff-escaped past 254
+  # ([ff][u16 LE]) — a server with players past 255 sends the 3-byte form,
+  # which is every message on a busy server. `len` is the FULL message
+  # length, so it equals the remaining bytes for a complete message only.
+  # Continuation segments of a split message are raw text, no header (the
+  # sniffer merges them — chat_action_data — before decoding).
+  #
+  # Structure wins over byte values here: earlier code enumerated observed
+  # player slots (0x05/0x0b/0x24/0x29/0x2d/0x30) as special prefixes and
+  # every new player (or a player past 255) decoded as garbage — the 0xff
+  # escape was read as a 5-byte uint32v length, so 82/255 captured messages
+  # printed as "?d\u0001$mod bug or are we talking actual bug".
   def self.decode_chat(data)
     return nil unless data && data.bytesize > 0
     d = data.dup.force_encoding('BINARY')
 
-    # [0x04][text...] — non-segment format, text runs to end of payload
-    if d.getbyte(0) == 0x04 && d.bytesize > 1
-      return d[1..-1].force_encoding('UTF-8').scrub('?')
-    end
-
-    # [slot][wc-total_len][text...] — complete message, ANY slot. Strict:
-    # total must equal the remaining bytes, so a slot byte is never misread
-    # as a length (that truncated long messages mid-word: "...feelings
-    # toward" instead of the full text). Covers the 0xff long form too.
-    first = d.getbyte(0)
-    len_off, total_len, len_bytes = decode_wc_length(d, 1)
-    if total_len && total_len > 0 && total_len == d.bytesize - 1 - len_bytes
-      return d[1 + len_bytes..-1].force_encoding('UTF-8').scrub('?')
+    # Strict: the declared length must equal the remaining bytes, so a text
+    # byte is never misread as a length (that truncated long messages
+    # mid-word: "...feelings toward" instead of the full text).
+    p_off, = decode_uint16v(d, 0)
+    l_off, len = decode_uint32v(d, p_off)
+    if len && l_off + len == d.bytesize
+      return nil if len.zero? # [player][0x00] — an empty message, not text
+      return d[l_off..-1].force_encoding('UTF-8').scrub('?')
     end
 
     # Localized string format: [key_uint32v][mode(1)][params_count(1)][params...]
@@ -729,41 +741,8 @@ ACTIONS = {
       return d[off, slen].force_encoding('UTF-8').scrub('?')
     end
 
-    # Anything still carrying a [slot][wc-len] header is a lone first
-    # segment (split message decoded standalone — production reassembles via
-    # chat_action_data first) or an empty [slot][0x00]: strip the header so it
-    # yields text (or nil) instead of uint32v garbage. Control slots (< 0x20 —
-    # never raw text) plus the observed printable slots; new player slots need
-    # NOT be added — their complete messages decode via the strict branch.
-    if len_off
-      rest = d[1 + len_bytes..-1]
-      if first < 0x20 || first == 0x24 || first == 0x29
-        return nil if rest.nil? || rest.empty?
-        return rest.force_encoding('UTF-8').scrub('?')
-      end
-      # 0x2d ('-') / 0x30 ('0') collide with raw-text initials: strip only on
-      # a plausible length, and an empty header with trailing text stays raw
-      # ("0\x00raw" is raw; "0\x00" alone is nil).
-      if first == 0x2d || first == 0x30
-        return nil if total_len == 0 && d.bytesize == 1 + len_bytes
-        return rest.force_encoding('UTF-8').scrub('?') if total_len > 0 && total_len <= rest.bytesize
-      end
-    end
-
-    # Raw text (no prefix)
+    # Raw text (no prefix) — a lone continuation segment, decoded standalone
     d.force_encoding('UTF-8').scrub('?')
-  end
-
-  # Decode a Factorio variable-length integer (the same uint32v the
-  # dissector uses) at +offset+ in +data+: a single byte when < 0xff, or
-  # [0xff][uint32 LE] (5 bytes) for values >= 0xff. Returns
-  # [offset_after, value, byte_count] or [nil, nil, 0] when out of bounds.
-  def self.decode_wc_length(data, offset)
-    b = data.getbyte(offset)
-    return [nil, nil, 0] if b.nil?
-    return [offset + 1, b, 1] unless b == 0xff
-    return [nil, nil, 0] if offset + 5 > data.bytesize
-    [offset + 5, data.unpack1('V', offset: offset + 1), 5]
   end
 
   # Recursively decode a localized string (Factorio's protobuf-like format).

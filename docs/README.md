@@ -86,9 +86,13 @@ tick closure.
 
 > **Version note**: input-action IDs are version-dependent (2.0 vs 2.1
 > differ — start_walking 67 vs 69, write_to_console 104 vs 106, etc.).
-> `FactorioProtocol.select_version` picks both the main and segment maps;
-> the sniffer auto-detects via RCON `helpers.game_version` (or
-> `--protocol-version`). Verified with `tools/validate_actions.rb`.
+> **2.0 is the default** and the only released version; the 2.1 table is an
+> experimental build's dump, selected only when the wire says 2.1.
+> `FactorioProtocol.select_version` picks both the main and segment maps
+> (and the measured C→S lengths, which exist for 2.0 only); the sniffer
+> auto-detects via RCON `helpers.game_version`, the connection request, or
+> `protocol_version:` in config.yaml. Verified with
+> `tools/validate_actions.rb`.
 > See [protocol-notes.md](protocol-notes.md) and
 > [lib/input_actions_20.rb](../lib/input_actions_20.rb).
 

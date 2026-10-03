@@ -145,19 +145,29 @@ a join whose in-game bar is empty, writes it back with
 feature is a module mixed in by the plugin manager — see
 `lib/player_backup.rb` and the `on_join_enriched` seam.
 
-**Protocol version comes from the connection request.** `msg 2`
-(ConnectionRequest, C→S, 14 bytes) carries the version the client
-advertises — `FactorioProtocol.detect_version(udp)` returns e.g.
-`"2.0.77 (build 19003)"` straight off the wire, no RCON needed. The sniffer
-reads it on the first msg 2 and selects the matching action tables
-(`select_version`: 2.0 → `ACTIONS_20` + `SEGMENT_TYPES_20` + `C2S_LENS_20`,
-2.1+ → `ACTIONS`), so **pcap mode and client mode decode correctly** — the
-IDs are version-dependent (2.0 `build`=66, 2.1 `build`=68). Precedence:
-`--protocol-version` > RCON `helpers.game_version` > the connection request.
-Do NOT decode a 2.0 capture with the default tables: it names 9.4% of the
-actions `Unknown(n)` and, worse, mis-reads their payload lengths (68k
-phantom actions in one sweep). The summary's `undecoded actions:` line is
-the standing measure of how much of the action space is still unidentified.
+**The tables DEFAULT to 2.0** (`ACTIONS_20` + `SEGMENT_TYPES_20` +
+`C2S_LENS_20`; the measured C→S lengths ride along). 2.0 is the only
+RELEASED version and the only one any server runs — the 2.1 table
+(`ACTIONS`) came off an experimental build's `defines.input_action` dump
+this project started on, and is selected only when the wire says 2.1.
+Nothing announces 2.0, so there is nothing to detect: with the old 2.1
+default a 2.0 capture named 9.4% of its actions `Unknown(n)` and, worse,
+mis-read their payload lengths (68k phantom actions in one sweep). The
+version-aware paths therefore all only exist to notice something that is
+NOT 2.0:
+
+- `msg 2` (ConnectionRequest, C→S, 14 bytes) carries the version the client
+  advertises — `FactorioProtocol.detect_version(udp)` returns e.g.
+  `"2.0.77 (build 19003)"` straight off the wire, no RCON needed.
+- Precedence: `config.yaml protocol_version:` > RCON
+  `helpers.game_version` > the connection request > the 2.0 default.
+- The IDs really are version-dependent (2.0 `build`=66, 2.1 `build`=68);
+  `select_version('2.1')` remains for an experimental server.
+- `-r` pre-scans the first capture for that msg 2 (`prescan_pcap_version`)
+  so an experimental-server capture gets its tables from packet 1.
+
+The summary's `undecoded actions:` line is the standing measure of how much
+of the action space is still unidentified.
 
 **A truncated varint read must not return a nil offset** (found on a real
 380-byte heartbeat, flags 0x26): the heartbeat parser does `offset = v_off`
@@ -364,6 +374,41 @@ braces: `process_packet` rescues any decode error, counts it, and saves the
 frame to `unknown.packets-*.pcap` like the other failure paths, so a raise
 costs the ONE packet it happened on instead of the rest of the file.
 
+## What lands in `captures/unknown.packets-*.pcap`
+
+The corpus of packets the decoder could not read, kept raw so a fix can be
+built against them. One frame per packet, whatever the reason:
+
+| Cause | Signal |
+|-------|--------|
+| A raise anywhere in the decode | `process_packet` rescues it (a raise used to end the rest of the capture file) |
+| A string field that would not decode | a scrubbed username would silently become a different player |
+| A suspected desync | `hit_unknown`, or an action attributed to a player index more than `UNKNOWN_PLAYER_WINDOW` (100) past the highest index the roster knows — a length ran the stream off |
+| An **unknown action type** (`Unknown(n)`) | the one that used to slip through: an unknown type in the main list carries its MEASURED length, so the rest of the packet still parses and `hit_unknown` never fires — 484 such packets on the 2026-10-03 set were being thrown away |
+| A quickbar action whose payload implies a desync | the bar would be written from misparsed bytes |
+| Chat whose payload is not valid UTF-8 | the message text was cut mid-character |
+
+Unidentified action types are deliberately left that way: with no length
+they hit `hit_unknown`, so their frames are collected here and can be named
+with `/toggle-action-logging` (`tools/validate_actions.rb --capture 60
+--toggle --table 20 --suggest`). Pinning a measured length for an
+UNIDENTIFIED type would decode its closures but stop flagging them.
+
+**Distance, not membership.** "An action attributed to a player outside the
+roster" sounds like a desync signal and is not one: on the 2026-10-03 set it
+fired on 11,196 packets, of which 10,036 were player index **357** and 736
+were **360** — both real players, both chatting under their `Player_N`
+placeholders, just past the last index this cache has a name for. It made
+`packets with a suspected desync` a false-positive machine and buried the
+corpus under 1.4 MB of nothing. A real desync throws the index thousands of
+places away (33024, 53354), so `UNKNOWN_PLAYER_WINDOW` (100 above the known
+maximum) is what separates them.
+
+Reviewing a corpus: the tables default to 2.0, so a plain replay is right;
+tally the action names — the `Unknown(n)` types are the to-do list,
+everything else is the damage they did. For scale: decoding capture 192159
+with the 2.1 tables produced 1,070 flags and 143 with 2.0.
+
 ## `set_player_color` (2.0 wire 296, 2.1 311): FOUR UNORM bytes R,G,B,A
 
 Table length 4, and it holds: 2313 occurrences over the whole rolling set,
@@ -389,24 +434,40 @@ the 8-bit wire's own quantisation, and RCON still overwrites with 0.5 at
 startup and on the next join. A colour whose game index has no name yet is
 dropped rather than written under a `Player_N` placeholder.
 
-## Chat Message Formats (`write_to_console`, type 106)
+## Chat Message Formats (`write_to_console`): `[uint16v player][uint32v len][text]`
 
-Prefix formats (first byte is a message-type marker):
-- `[0x05][meta(1)][text...]` — segment format (outgoing). `meta` = TOTAL
-  message length (may span segments). Text runs from offset 2 to end of
-  payload (NOT `meta` bytes — truncating to meta cuts long messages).
-  Split messages: first segment `[0x05][total_len][first_part]`, subsequent
-  segments raw `[continuation]` (no prefix).
-- `[0x0b][meta(1)][text...]` — same layout as 0x05 (observed live:
-  `[0x0b][0x2c]` + 44-byte message). Was truncated to 11 bytes before.
-- `[0x24][meta(1)][text...]` — same layout as 0x05 (observed: `[0x24][0x18]`).
-- `[0x29][meta(1)][text...]` — same layout as 0x05 (observed: `[0x29][0x30]`).
-- `[0x3d][meta(1)][text...]` — server echo with `=` marker.
-- `[0x01][meta(1)][text...]` — server echo alternate format.
-- `[0x04][text...]` — non-segment format.
-- `[0x00][meta(1)][text...]` — server echo format (legacy).
-- `[0x05][0x00]` (2 bytes) — zero-length message (server echo of empty chat
-  submission). Decodes to nil; not a truncation case.
+The payload is the ACTION's own serialization (the surrounding input-action
+segment header carries the player as well — it is not the payload's first
+byte by accident, it is the same field twice):
+
+- `[uint16v player]` — the sender's 0-based index, **0xff-escaped past 254**
+  (`[0xff][u16 LE]`).
+- `[uint32v len]` — the FULL message length (1 byte, or `[0xff][u32 LE]` at
+  255+), so it equals the remaining bytes for a complete message.
+- `[text]` — the message itself.
+
+**The escape is the bug that was there.** The decoder read that leading
+`0xff` as the 5-byte uint32v length escape, so on a busy server — every
+player past 255 — messages decoded as
+`"?d\u0001$mod bug or are we talking actual bug"`: 82 of the 255 chat
+messages in the 2026-10-03 capture set, every one of them from players 267,
+296, 319, 357 or 360. The index matches the sender exactly in all five
+(`index = game_player - 1`), which is what settled the layout.
+
+Earlier code enumerated observed index bytes (0x05/0x0b/0x24/0x29/0x2d/0x30)
+as special prefixes; every new player broke it. Structure wins: one strict
+branch (the declared length must equal the remaining bytes) covers every
+index, escaped or not, and the observed-slot branches are gone.
+
+Split messages: segment 0 carries the header, continuation segments are raw
+text with no header (`chat_action_data` merges them by seg_no first).
+`[0x05][0x00]`-style 2-byte payloads (a zero-length message, from older
+captures and server echoes) are simply `[player][0x00]` — the same shape,
+`len` 0, decoding to nil.
+
+Pinned by `test/fixtures/chat_variations.rb` (real payloads from
+captures/, one per shape) and by two whole packets in
+`test/fixtures/packets.rb`.
 
 ## Network Header Random Flag
 

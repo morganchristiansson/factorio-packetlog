@@ -31,9 +31,13 @@ class TestServerMode < Minitest::Test
     FactorioProtocol.reset_version
   end
 
+  # A fixture packet, with the action tables its own version needs: the
+  # fixtures predate the 2.0 default and are numbered per their `version:`
+  # (2.1 unless stated), so the tables follow the packet.
   def fixture_packet(name)
     fx = REAL_PACKET_FIXTURES.find { |f| f[:name] == name }
     raise "no fixture #{name}" unless fx
+    FactorioProtocol.select_version(fx[:version] || '2.1')
     [fx[:hex]].pack('H*')
   end
 
@@ -94,7 +98,12 @@ class TestServerMode < Minitest::Test
              elsif opts[:autoname]
                {}
              else
-               { pcap_writer: FakePcapWriter.new }
+               # The unknown-packets writer gets the same treatment: a real
+               # one leaves an empty captures/unknown.packets-<ts>.pcap per
+               # test (25 of them per suite run). Tests that assert on what
+               # it wrote pass real_unknown_writer: true (inside a tmpdir).
+               { pcap_writer: FakePcapWriter.new,
+                 unknown_pcap_writer: opts[:real_unknown_writer] ? nil : FakePcapWriter.new }
              end
     sniffer = FactorioPacketTools.new(opts, **kwargs)
     begin
@@ -122,7 +131,7 @@ class TestServerMode < Minitest::Test
     # pcap_writer is a KEYWORD param of new — inside the opts hash it is
     # inert, and swapping the ivar post-hoc orphans the real writer (banner +
     # flusher thread + real files). Pass it as the keyword it is.
-    FactorioPacketTools.new(opts, pcap_writer: FakePcapWriter.new)
+    FactorioPacketTools.new(opts, pcap_writer: FakePcapWriter.new, unknown_pcap_writer: FakePcapWriter.new)
   end
 
   def capture_records(sniffer)
@@ -529,27 +538,42 @@ class TestServerMode < Minitest::Test
     assert_equal [msg13_packet], records, "`capture: save` records only the msg 13 TransferBlock"
   end
 
+  # A packet whose player index sits FAR past the roster is kept for review;
+  # one merely past it is a player we have no name for, not a desync.
   def test_unknown_player_packet_is_saved_for_followup
     Dir.mktmpdir do |dir|
       Dir.chdir(dir) do
-        path = File.join('captures', 'unknown.packets.pcap')
         packet = fixture_packet('client_chat_message_0x0b')
-        feature = Class.new do
-      def on_join_enriched(*args) = @seen = args
-      def seen = @seen
-    end.new
-    _, sniffer = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |s|
+        _, near = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil,
+                              real_unknown_writer: true) do |s|
           s.instance_variable_get(:@player_db)[1] = {name: 'known'}
           s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34_197, 34_197,
                    packet, "\x00" * 14 + packet)
         end
-        writer = sniffer.instance_variable_get(:@unknown_writer)
+        near_writer = near.instance_variable_get(:@unknown_writer)
+        near_writer.close
+        # player 12, one roster entry known (1): inside UNKNOWN_PLAYER_WINDOW,
+        # so nothing is kept — the corpus is for desyncs, not for nameless
+        # players. A writer that got no frames deletes its empty file.
+        refute File.exist?(near_writer.path), 'a nameless player is not a desync'
+
+        FactorioProtocol.select_version('2.0')
+        far_packet = fixture_packet('client_chat_player_356_escaped_index')
+        _, far = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil,
+                             real_unknown_writer: true) do |s|
+          s.instance_variable_get(:@player_db)[1] = {name: 'known'}
+          s.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34_197, 34_197,
+                   far_packet, "\x00" * 14 + far_packet)
+        end
+        writer = far.instance_variable_get(:@unknown_writer)
         writer.close
         bytes = File.binread(writer.path)
         assert_operator bytes.bytesize, :>, 24
-        assert_includes bytes, packet
+        assert_includes bytes, far_packet
       end
     end
+  ensure
+    FactorioProtocol.reset_version
   end
 
   # ── Test 9: C→S join/leave detection feeds the agent ──────────────────

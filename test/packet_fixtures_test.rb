@@ -102,7 +102,7 @@ class TestPacketFixtures < Minitest::Test
   # Each chat payload variation must decode to the expected text.
   CHAT_DECODE_FIXTURES.each do |fx|
     define_method("test_chat_variation_#{fx[:name]}") do
-      data = fx[:data].pack('C*')
+      data = [fx[:data]].pack('H*')
       msg = FactorioProtocol.decode_chat(data)
       if fx[:expected].nil?
         assert_nil msg, "decode_chat for #{fx[:name]} should be nil"
@@ -135,7 +135,6 @@ class TestPacketFixtures < Minitest::Test
     101 => 'set_circuit_mode_of_operation: 19 closures',
     107 => 'change_active_item_group_for_crafting: content-dependent',
     108 => 'change_active_item_group_for_filters: 163 closures, no single-action packet',
-    119 => 'use_item: 5 closures',
     120 => 'send_spidertron: 5 closures',
     133 => 'blueprint-record family: 1-16 closures each, no single-action packet',
     134 => 'copy_opened_blueprint: blueprint-record family, 5 closures',
@@ -160,6 +159,7 @@ class TestPacketFixtures < Minitest::Test
     232 => 'quick_bar_set_selected_page: 79 closures, no single-action packet',
     231 => 'quick_bar_pick_slot: 4 bytes ([item][slot][op][pad]) measured by tools/measure_action_lens.rb --type 231 — 1126 single-action closures vs 62 for the runner-up; the 0 this name inherited from 2.1 desynced the rest of every closure containing one',
     239 => 'lua_shortcut: 12 closures',
+    248 => 'instantly_create_space_platform: CONTENT-DEPENDENT — 16 closures measure 9 bytes, 4 measure 7 (and those 4 decode to an absurd player index, so they are caught by the invalid-player check, not silently). No single-action packet: the only clean packets carrying it are the misparsed ones, so there is nothing honest to pin.',
     269 => 'trash_not_requested_items: 2 closures',
     286 => 'change_active_quick_bar: 2 closures',
     304 => 'set_pump_fluid_filter: 1 closure',

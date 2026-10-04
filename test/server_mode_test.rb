@@ -120,9 +120,8 @@ class TestServerMode < Minitest::Test
   # shape is the only thing that varies).
   def join_query_lua(player, version)
     client = RconClient.allocate
-    lua = nil
-    client.stub(:server_version, version) { lua = client.player_attrs_for_lua(player) }
-    lua
+    client.stubs(:server_version).returns(version)
+    client.player_attrs_for_lua(player)
   end
 
   # The version is asked ONCE and memoised: a join-time query builds Lua that
@@ -343,12 +342,12 @@ class TestServerMode < Minitest::Test
 
     good = fixture_packet('client_chat_message_0x0b')
     calls = 0
-    crashing = ->(_data) { calls += 1; raise TypeError, 'nil cannot be coerced into Integer' if calls == 1; { header: {} } }
+    crashing = ->(_data) { calls += 1; raise TypeError, 'nil cannot be coerced into Integer' if calls == 1 }
+    # the matcher raises on the first call; every other one matches and returns
+    FactorioProtocol.stubs(:parse_udp_payload).with { |data| crashing.call(data); true }.returns({ header: {} })
     _, err = capture_io do
-      FactorioProtocol.stub(:parse_udp_payload, crashing) do
-        sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-1')
-        sniffer.send(:process_packet, 2, 1_700_000_001.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-2')
-      end
+      sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-1')
+      sniffer.send(:process_packet, 2, 1_700_000_001.0, CLIENT_IP, SERVER_IP, 34197, 34197, good, 'frame-2')
     end
 
     stats = sniffer.instance_variable_get(:@stats)
@@ -429,9 +428,9 @@ class TestServerMode < Minitest::Test
     rcon = RconClient.allocate
     rcon.instance_variable_set(:@script_output_dir, '/nonexistent') # execute the write, read nothing
     roster_lua = nil
-    rcon.stub(:server_version, '2.0.77') do
-      rcon.stub(:execute, ->(cmd) { roster_lua = cmd; '' }) { rcon.roster_backup }
-    end
+    rcon.stubs(:server_version).returns('2.0.77')
+    rcon.stubs(:execute).with { |cmd| roster_lua = cmd; true }.returns('')
+    rcon.roster_backup
     assert_includes roster_lua, 'pairs(game.players)', 'the roster dump is the WHOLE roster, offline players included'
     assert_includes roster_lua, 'get_quick_bar_slot', 'and it reads each bar whole'
     calls = roster_lua.scan(/helpers\.write_file\((?:[^()]|\([^()]*\))*\)/)

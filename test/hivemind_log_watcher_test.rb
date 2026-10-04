@@ -112,12 +112,11 @@ class TestHivemindLogWatcher < Minitest::Test
     # but mirror its side effect (recording how much it saw) so the real
     # trim that run_log_event_turn performs drops the compacted range.
     chat = @agent.instance_variable_get(:@chat)
-    @agent.stub(:compact_memory!, ->(_reason = nil) {
+    @agent.stubs(:compact_memory!).with do
       @agent.instance_variable_set(:@compaction_included_count, chat.messages.size)
       true
-    }) do
-      @logwatcher.handle_log_line(RESET_44, async: false)
-    end
+    end.returns(true)
+    @logwatcher.handle_log_line(RESET_44, async: false)
     refute @agent.send(:auto_compaction_worthwhile?), 'trimmed session must fall below the auto-compaction gate so a repeated reset skips'
   end
 

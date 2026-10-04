@@ -27,10 +27,9 @@ class TestHivemindTags < Minitest::Test
 
   def test_set_player_tag_tool_unknown_player_errors
     rcon = FakeRcon.new
-    rcon.stub(:set_player_tag, ->(_p, _t) { false }) do
-      result = SetPlayerTag.new(rcon: rcon).call('player' => 'ghost', 'tag' => 'x')
-      assert_match(/unknown player 'ghost'/, result.to_s)
-    end
+    rcon.stubs(:set_player_tag).returns(false)
+    result = SetPlayerTag.new(rcon: rcon).call('player' => 'ghost', 'tag' => 'x')
+    assert_match(/unknown player 'ghost'/, result.to_s)
   end
 
   def test_register_tools_includes_set_player_tag
@@ -54,24 +53,22 @@ class TestHivemindTags < Minitest::Test
     captured = nil
     client = RconClient.allocate
     client.instance_variable_set(:@mutex, Mutex.new)
-    client.stub(:execute, ->(cmd) { captured = cmd; "true\n" }) do
-      assert client.set_player_tag('alice', 'Builder')
-      assert_includes captured, 'game.players["alice"]'
-      assert_includes captured, 'p.tag = "Builder"'
-      assert_includes captured, 'rcon.print(p ~= nil)'
-      # breakout attempts stay inside the Lua string
-      client.set_player_tag('x"]; game.print("PWN', 't')
-      refute_includes captured, 'game.players["x"]'
-      client.set_player_tag('\\"; game.print("PWN', 't')
-      refute_match(/[^\\]"; game/, captured)
-    end
-    # unknown player / failure — a second, SEQUENTIAL stub block: minitest
-    # aliases the original per stub, so the same method cannot be stubbed
-    # twice at once.
-    client.stub(:execute, ->(_cmd) { "false\n" }) do
-      refute client.set_player_tag('ghost', 'x')
-      refute client.set_player_tag('  ', 'x'), 'blank name rejected'
-    end
+    client.stubs(:execute).with { |cmd| captured = cmd; true }.returns("true\n")
+    assert client.set_player_tag('alice', 'Builder')
+    assert_includes captured, 'game.players["alice"]'
+    assert_includes captured, 'p.tag = "Builder"'
+    assert_includes captured, 'rcon.print(p ~= nil)'
+    # breakout attempts stay inside the Lua string
+    client.set_player_tag('x"]; game.print("PWN', 't')
+    refute_includes captured, 'game.players["x"]'
+    client.set_player_tag('\\"; game.print("PWN', 't')
+    refute_match(/[^\\]"; game/, captured)
+
+    # unknown player / failure — a second, SEQUENTIAL stub, which mocha
+    # allows on the same method (the later one replaces the earlier)
+    client.stubs(:execute).returns("false\n")
+    refute client.set_player_tag('ghost', 'x')
+    refute client.set_player_tag('  ', 'x'), 'blank name rejected'
   end
 
   # The switch is the plugin list: with `tags` in it the plugin builds and

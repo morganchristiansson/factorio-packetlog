@@ -74,10 +74,9 @@ def new_hive_agent(rcon: FakeRcon.new, attrs: nil, current_tick: -> { 0 },
   Array(rows).each_with_index do |row, i|
     player_db[row[:index] || i + 1] = { name: row[:name], admin: row[:admin] }
   end
-  HivemindPersistence.stub(:default_path, session) do
-    HivemindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
-                      player_db: player_db, config_file: HIVE_TEST_CONFIG, **kwargs)
-  end
+  HivemindPersistence.stubs(:default_path).returns(session)
+  HivemindAgent.new(rcon: rcon, attrs: attrs, current_tick: current_tick,
+                    player_db: player_db, config_file: HIVE_TEST_CONFIG, **kwargs)
 end
 
 module HivemindSpecHelpers
@@ -98,7 +97,8 @@ module HivemindSpecHelpers
   # hitting the network. Scoped: the agent keeps its real #complete after.
   def capture_prompt(agent, &block)
     seen = nil
-    agent.stub(:complete, ->(p) { seen = p; '' }) { block.call }
+    agent.stubs(:complete).with { |p| seen = p; true }.returns('')
+    block.call
     seen
   end
 end

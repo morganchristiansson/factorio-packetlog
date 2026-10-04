@@ -76,13 +76,12 @@ class TestHivemindFollowUps < Minitest::Test
     @agent.send(:append_history, 'bob', 'biters at the wall!')  # queued since last prompt
     entry = pending.first
     prompts = []
-    @agent.stub(:complete, ->(p) { prompts << p; 'hold the line' }) do
-      followups.send(:fire_followup, entry)
-      assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
-      assert_includes prompts.first, 'remind spawn defense'
-      assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
-      assert_includes @agent.instance_variable_get(:@rcon).sent.last, 'hold the line', 'model reply is broadcast'
-    end
+    @agent.stubs(:complete).with { |p| prompts << p; true }.returns('hold the line')
+    followups.send(:fire_followup, entry)
+    assert_includes prompts.first, 'SCHEDULED FOLLOW-UP'
+    assert_includes prompts.first, 'remind spawn defense'
+    assert_includes prompts.first, 'biters at the wall!', 'follow-up sees console lines queued since the last prompt'
+    assert_includes @agent.instance_variable_get(:@rcon).sent.last, 'hold the line', 'model reply is broadcast'
   end
 
 
@@ -90,10 +89,9 @@ class TestHivemindFollowUps < Minitest::Test
     @agent.schedule_followup(delay_seconds: 60, task: 'check', name: 'check')
     entry = pending.first
     # the model decides nothing needs doing
-    @agent.stub(:complete, ->(_p) { '' }) do
-      followups.send(:fire_followup, entry)
-      assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
-    end
+    @agent.stubs(:complete).returns('')
+    followups.send(:fire_followup, entry)
+    assert_empty @agent.instance_variable_get(:@rcon).sent, 'no chat spam when the model stays silent'
   end
 
 

@@ -14,6 +14,7 @@
 # payloads, so in a two-action closure the second type came from inside the first
 # action's data and the arithmetic was meaningless while looking fine.
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 require_relative 'fixtures/packets'
 require_relative '../tools/action_len_solver'

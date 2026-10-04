@@ -10,6 +10,7 @@
 # Run: ruby -Ilib test/position_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 
 class TestPosition < Minitest::Test

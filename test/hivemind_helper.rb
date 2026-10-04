@@ -9,6 +9,7 @@
 
 require 'fileutils'
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require 'plugins'
 

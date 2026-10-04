@@ -8,6 +8,7 @@
 # Entry first: its bundler/setup must run before any gem activation.
 require_relative '../factorio-packettools'
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'stringio'
 
 class TestOutputTee < Minitest::Test

@@ -11,6 +11,7 @@
 # Run: ruby -Ilib test/fragmented_msg_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 
 class TestFragmentedMessages < Minitest::Test

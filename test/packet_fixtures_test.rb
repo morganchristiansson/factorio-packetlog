@@ -9,6 +9,7 @@
 #  2. Synthetic variations of write_to_console payloads (test/fixtures/chat_variations.rb)
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 require_relative 'fixtures/packets'
 require_relative 'fixtures/chat_variations'

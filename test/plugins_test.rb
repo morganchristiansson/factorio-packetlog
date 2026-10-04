@@ -7,6 +7,7 @@
 # Run: bundle exec ruby -Ilib test/plugins_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'plugins'
 
 class TestPlugins < Minitest::Test

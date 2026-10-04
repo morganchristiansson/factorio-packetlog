@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'json'
 require 'tmpdir'
 require 'open3'

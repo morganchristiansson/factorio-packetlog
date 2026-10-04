@@ -7,6 +7,7 @@
 # The quiet period is what decides "the download is over", so the tests drive
 # it with a tiny one rather than sleeping on the real 5s.
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require 'map_download'
 require 'live_capture'

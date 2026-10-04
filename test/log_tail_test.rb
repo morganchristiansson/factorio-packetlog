@@ -6,6 +6,7 @@
 # Run: ruby -Ilib test/log_tail_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require_relative '../lib/log_tail'
 

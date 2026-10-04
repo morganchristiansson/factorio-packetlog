@@ -10,6 +10,8 @@ gem 'ruby_llm-responses_api', '0.5.4' # Responses API for muse-spark-1.3-contrib
 
 # Test suite
 gem 'minitest', '~> 5.0'
+gem 'mocha', '~> 2.0' # mocking (expects/stubs): minitest/mock's stub can't be
+                      # nested for one method, mocha's can
 
 
 # NOT HERE: vernier, the sampling profiler. `bundle install` should not pull

@@ -11,6 +11,7 @@
 # Run: ruby -Ilib test/translation_agent_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require_relative '../factorio-packettools'
 require_relative '../lib/translation'

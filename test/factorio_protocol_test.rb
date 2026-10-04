@@ -5,6 +5,7 @@
 # Run: ruby -Ilib test/factorio_protocol_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 require 'factorio_types'
 

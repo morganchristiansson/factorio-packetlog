@@ -689,11 +689,10 @@ class TestHivemindAgent < Minitest::Test
 
   def test_good_bot_variants_are_triggers
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
-    asks = 0
-    agent.stub(:complete, ->(_p) { asks += 1; '' }) do
-      ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
-      assert_equal 1, asks, 'each variant pings (rate limiter collapses rapid-fire to one)'
-    end
+    # Each variant pings (rate limiter collapses rapid-fire to one) — the
+    # cardinality IS the assertion, so let mocha verify it at teardown.
+    agent.expects(:complete).once.returns('')
+    ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
   end
 
 
@@ -718,15 +717,10 @@ class TestHivemindAgent < Minitest::Test
 
     # same player again within the window is still collapsed (anti-spam),
     # using a fresh player so the first trigger is outside any old window.
-    # A SECOND stub block, not a nested one: minitest aliases the original
-    # method per stub, so stubbing the same method twice at once breaks.
-    asks2 = 0
-    agent.stub(:complete, ->(_p) { asks2 += 1; '' }) do
-      agent.on_chat('carol', 'hivemind again')
-      agent.on_chat('carol', 'hivemind stop')
-      sleep 0.4
-      assert_equal 1, asks2, 'same-player spam still collapses to one ask'
-    end
+    agent.expects(:complete).once.returns('')
+    agent.on_chat('carol', 'hivemind again')
+    agent.on_chat('carol', 'hivemind stop')
+    sleep 0.4
   end
 
 
@@ -814,12 +808,9 @@ class TestHivemindAgent < Minitest::Test
 
   def test_shmoose_does_not_trigger
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
-    called = false
-    agent.stub(:complete, ->(_p) { called = true; '' }) do
-      agent.on_chat('alice', 'shmoose is back')
-      sleep 0.2
-      refute called, '"shmoose" must not page the agent'
-    end
+    agent.expects(:complete).never # "shmoose" must not page the agent
+    agent.on_chat('alice', 'shmoose is back')
+    sleep 0.2
   end
 
 

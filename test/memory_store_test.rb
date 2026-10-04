@@ -5,6 +5,7 @@
 # Run: ruby -Ilib test/memory_store_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require 'memory_store'
 

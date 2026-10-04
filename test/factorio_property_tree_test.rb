@@ -6,6 +6,7 @@
 # by /factorio-legendary-deathworld/tools/sync-mod-settings) and verified
 # against a real client's join (test/fixtures/frag_confirm_{0..5}.bin).
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_protocol'
 require 'factorio_property_tree'
 

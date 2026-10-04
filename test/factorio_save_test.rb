@@ -4,6 +4,7 @@
 # The save format's string container and the player-record scanner
 # (lib/factorio_save.rb). The CLI over it is test/save_roster_test.rb.
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'factorio_save'
 
 class TestFactorioSave < Minitest::Test

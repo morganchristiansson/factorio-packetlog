@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # Checks for tools/server_rank.rb: ranking/report + msg-17 parser.
 require 'minitest/autorun'
+require 'mocha/minitest'
 require_relative '../tools/server_rank'
 
 def fake_server(name, n, version = '2.0.77')

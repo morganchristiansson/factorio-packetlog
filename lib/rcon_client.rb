@@ -238,19 +238,30 @@ class RconClient
   # the count of successes comes back, so a rejected write (a wrong 2.1
   # filter shape, say) is a number we report rather than a silent no-op.
   # One line, server-side, no response cap to worry about (a short count).
-  def restore_quickbar(player, cells)
-    return 0 if cells.nil? || cells.empty?
+  # Put a player's saved state back over RCON in ONE command: the quickbar
+  # cells (flat slot index => item id) and, optionally, their colour — a new
+  # save hands out the game's DEFAULTS for both (a starting quickbar, a
+  # palette colour), and `LuaPlayer.color` is writable even though
+  # `online_time` is not, so both are recoverable. Cells and colour are
+  # independent: either, both, or neither may be given. Returns the number of
+  # quickbar slots written (the colour has no count).
+  def restore_player(player, cells, color: nil)
+    cells ||= {}
+    color = nil unless color.is_a?(Array) && color.length == 4
+    return 0 if cells.empty? && color.nil? # nothing to say, no command
     version = server_version.to_s
-    cells = cells.map { |i, id| "[#{i.to_i}]=#{id.to_i}" }.join(',')
+    cells = (cells || {}).map { |i, id| "[#{i.to_i}]=#{id.to_i}" }.join(',')
     set = if !version.empty? && !version.match?(/\A2\.0(\.|\z)/)
             "local k=(i-1)//#{PlayerDatabase::QUICKBAR_SLOTS} local l=(i-1)%#{PlayerDatabase::QUICKBAR_SLOTS} " \
             'if pcall(p.set_quick_bar_slot,k,l,r[v]) then ok=ok+1 end'
           else
             'if pcall(p.set_quick_bar_slot,i,r[v]) then ok=ok+1 end'
           end
+    tint = color ? "p.color={#{color.map(&:to_f).join(',')}}" : ''
     lua = 'do local p=game.players["' + lua_quote(player) + '"] local ok=0 ' \
       'local r={} for x in pairs(prototypes.item) do r[#r+1]=x end ' \
-      "if p then local s={#{cells}} for i,v in pairs(s) do #{set} end end " \
+      "if p then local s={#{cells}} for i,v in pairs(s) do #{set} end " \
+      "#{tint} end " \
       'rcon.print(ok) end'
     execute(lua).to_s.strip.to_i
   end

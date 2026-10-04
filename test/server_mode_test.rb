@@ -944,8 +944,8 @@ class TestServerMode < Minitest::Test
   def fake_backup_rcon(version: '2.0.77', written: :all, roster: nil)
     calls = []
     rcon = Object.new
-    rcon.define_singleton_method(:restore_quickbar) do |name, cells|
-      calls << [name, cells]
+    rcon.define_singleton_method(:restore_player) do |name, cells, color: nil|
+      calls << [name, cells, color]
       written == :all ? cells.size : 1
     end
     rcon.define_singleton_method(:server_version) { version }
@@ -957,7 +957,9 @@ class TestServerMode < Minitest::Test
     db = Object.new
     db.instance_variable_set(:@replaced, nil)
     db.define_singleton_method(:replace_quickbar) { |i, b| @replaced = [i, b] }
+    db.define_singleton_method(:[]=) { |i, rec| @color = [i, rec] }
     db.define_singleton_method(:replaced) { @replaced }
+    db.define_singleton_method(:color) { @color }
     db
   end
 
@@ -980,7 +982,7 @@ class TestServerMode < Minitest::Test
       # joins with an empty bar → put the saved one back
       fresh = build_backup(rcon: rcon, player_db: db, path: path)
       fresh.on_join_enriched('alice', 7, quickbar: nil)
-      assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }]], calls,
+      assert_equal [['alice', { 1 => 30, 4 => 32, 30 => 33 }, nil]], calls,
                    'restored by name, with the flat cell indices the setter takes'
       assert_equal [7, bar], db.replaced, 'the in-memory cache follows the game'
 
@@ -1042,6 +1044,51 @@ class TestServerMode < Minitest::Test
       assert_equal 5_300, fresh.base_ticks('alice'), 'the base outlives the process'
       assert_equal 5_300, fresh_attrs.online_time_ticks('alice', nil)
       assert_equal 0, fresh.base_ticks('bob')
+    end
+  end
+
+  # A new save hands a returning player the game's DEFAULTS: a starting
+  # quickbar and a palette colour. Both are perfectly valid state, so neither
+  # the empty-bar rule nor a snapshot can tell them from what the player
+  # chose — snapshotting would overwrite the backup with the defaults, and
+  # "restoring" them later would restore the defaults forever. The play-time
+  # clock is what knows, and it gates both: one command, and the file keeps
+  # what we put back.
+  def test_player_backup_restores_bar_and_colour_on_a_new_save
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, PlayerBackup::FILENAME)
+      rcon, calls = fake_backup_rcon
+      db = recording_db
+      backup = build_backup(rcon: rcon, player_db: db, path: path)
+      bar = PlayerDatabase.parse_quickbar('1' => 30, '4' => 32)
+      mine = [0.815, 0.024, 0.0, 0.5]
+
+      backup.on_join_enriched('alice', 1, quickbar: bar, color: mine, online_time: 5_000)
+      assert_empty calls, 'her own state is only snapshot'
+      saved = JSON.parse(File.read(path))['alice']
+      assert_equal bar, saved['quickbar']
+      assert_equal mine, saved['color']
+
+      # a new save: her clock restarted, and the game handed her the defaults
+      defaults = PlayerDatabase.parse_quickbar('1' => 1, '2' => 2)
+      backup.on_join_enriched('alice', 4, quickbar: defaults, color: [0.0, 0.3, 0.8, 1.0],
+                              online_time: 0)
+      assert_equal 1, calls.size, 'ONE command for both'
+      assert_equal ['alice', { 1 => 30, 4 => 32 }, mine], calls.first,
+                   'with her bar AND her colour'
+      assert_equal [4, bar], db.replaced, 'the cache follows the game'
+      assert_equal [4, { color: mine }], db.color, 'colour included'
+
+      kept = JSON.parse(File.read(path))['alice']
+      assert_equal bar, kept['quickbar'], 'the defaults are NOT snapshotted over her bar'
+      assert_equal mine, kept['color'], 'nor over her colour'
+
+      # next join, same save: her in-game state is the truth again (a colour
+      # she re-picked over the wire lands here)
+      backup.on_join_enriched('alice', 4, quickbar: defaults, color: [1.0, 0.0, 0.0, 1.0],
+                              online_time: 60)
+      assert_equal 1, calls.size, 'no restore without a save change'
+      assert_equal defaults, JSON.parse(File.read(path))['alice']['quickbar']
     end
   end
 
@@ -1170,30 +1217,37 @@ class TestServerMode < Minitest::Test
     end
   end
 
-  # the setter command: ids in, names out, the same version branch as the
-  # getter, and a success count instead of silence
-  def test_restore_quickbar_command
+  # the setter command: ids in, names out, the version branch as the getter,
+  # a success count instead of silence — and the colour in the SAME command
+  def test_restore_player_command
     calls = []
     rcon = RconClient.allocate
-    version = '2.0.77'
-    rcon.stub(:server_version, -> { version }) do
-      rcon.stub(:execute, ->(cmd) { calls << cmd; '2' }) do
-        assert_equal 2, rcon.restore_quickbar('alice', { 1 => 30, 30 => 33 })
-        flat = calls.last
-        assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
-        assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
-        assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
-        assert_equal 0, rcon.restore_quickbar('alice', {}), 'nothing to write, no command sent'
-        assert_equal 1, calls.size
+    rcon.stubs(:server_version).returns('2.0.77')
+    rcon.stubs(:execute).with { |cmd| calls << cmd; true }.returns('2')
 
-        version = '2.1.11'
-        rcon.restore_quickbar('bo"b', { 4 => 32 })
-        two = calls.last
-        assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
-        assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
-        assert_includes two, 'game.players["bo\\"ce"]'.sub('ce', 'b'), 'the name is Lua-quoted'
-      end
-    end
+    assert_equal 2, rcon.restore_player('alice', { 1 => 30, 30 => 33 }, color: [0.8, 0.0, 0.0, 1.0])
+    flat = calls.last
+    assert_includes flat, 'local s={[1]=30,[30]=33}', 'cells as {flat index => id}'
+    assert_includes flat, 'p.set_quick_bar_slot,i,r[v]', '2.0: (index, name)'
+    assert_includes flat, 'r[#r+1]=x', 'ids resolve to names via prototypes.item'
+    assert_includes flat, 'p.color={0.8,0.0,0.0,1.0}', 'the colour rides in the same command'
+
+    assert_equal 0, rcon.restore_player('alice', {}), 'nothing to write, no colour'
+    assert_equal 1, calls.size, 'and no command sent'
+
+    rcon.restore_player('alice', {}, color: [1.0, 0.0, 0.0, 1.0]) # a colour on its own
+    assert_includes calls.last, 'p.color={1.0,0.0,0.0,1.0}', 'is still one command'
+
+    # 2.1: (page, slot, filter), and the name is Lua-quoted
+    calls21 = []
+    rcon21 = RconClient.allocate
+    rcon21.stubs(:server_version).returns('2.1.11')
+    rcon21.stubs(:execute).with { |cmd| calls21 << cmd; true }.returns('1')
+    rcon21.restore_player('bo"b', { 4 => 32 })
+    two = calls21.last
+    assert_includes two, 'p.set_quick_bar_slot,k,l,r[v]', '2.1: (page, slot, filter)'
+    assert_includes two, 'local k=(i-1)//10', 'page from the flat index'
+    assert_includes two, 'game.players["bo\\"b"]', 'the name is Lua-quoted'
   end
 
   # ── Quickbar: the RCON grid parses into the 10×10 shape ────────────────

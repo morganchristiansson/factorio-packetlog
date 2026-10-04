@@ -35,10 +35,13 @@ require 'json'
 #   * they have none but we do → write it back over RCON, then bring the
 #     in-memory cache in line with the game.
 #
-# The COLOUR is snapshot-only. The save does carry it (four f32s in front of
-# the player's name — docs/save/level-dat.md), so the game never loses it and
-# there is nothing to restore; we keep it because it is the one per-player
-# identity that outlives a save and reads in text ("alice, 208,6,0").
+# The COLOUR: the current save carries its own copy (four f32s in front of
+# the player's name — docs/save/level-dat.md), so mid-session it only needs
+# snapshotting (they can re-pick it any time — the set_player_color action,
+# ~25 samples/second while the picker is open, hence the no-op-if-unchanged
+# check). But a NEW save has no copy: the player is handed a palette colour
+# by index. `LuaPlayer.color` is writable, so #restore puts ours back with
+# the bar, in the same one RCON command.
 #
 # No RCON, no backup: the event is simply not acted on (client mode, or RCON
 # down), and the file is only read when there is something to restore. Other
@@ -126,9 +129,19 @@ class PlayerBackup
   def on_join_enriched(name, index, attrs)
     return unless @rcon
     saved = saved_record(name) # read BEFORE we overwrite anything
+    # Play time first, before any :failed return below: it is independent of
+    # the bar. A name in the returned list is a save change (see #sync_times).
+    new_save = sync_times([[name, attrs[:online_time]]]).include?(name.to_s)
+    # A save change hands the player the game's DEFAULTS: a starting
+    # quickbar and a palette colour. Both are perfectly valid values, so
+    # neither the "empty bar" rule below nor a snapshot can tell them apart
+    # from state the player chose — snapshotting here would overwrite the
+    # backup with the defaults, and restoring them later would be restoring
+    # the defaults forever. The play-time clock is the one thing that knows,
+    # so it gates the restore, and the snapshot is skipped: what we put back
+    # is what the game ends up holding, so the file and the game still agree.
+    return if new_save && restore(name, index, saved)
     note_color(name, attrs[:color])
-    sync_times([[name, attrs[:online_time]]]) # before any :failed return: the
-                                              # play time is independent of the bar
     # nil is the join query's "empty bar" (the payload always carries the
     # key); only :failed, the Lua read raising, means we do not know
     return if attrs[:quickbar] == :failed
@@ -136,7 +149,7 @@ class PlayerBackup
     if filled?(bar)
       save_quickbar(name, bar)
     elsif saved && filled?(saved['quickbar'])
-      restore(name, index, saved['quickbar'])
+      restore(name, index, saved)
     end
   end
 
@@ -172,8 +185,12 @@ class PlayerBackup
   # Within one save the mark only rises, so nothing is written on every sync:
   # a roster snapshot of 300 players is one file write, and a re-sync with
   # unchanged numbers is none.
+  # the file carries). Returns the names whose clock RESTARTED at this sync
+  # (empty on a normal one) — a join that sees its own name in the list knows
+  # the game just handed it the defaults of a new save.
   def sync_times(pairs, exact: true)
     bases = {}
+    resets = []
     @mutex.synchronize do
       changed = false
       pairs.each do |name, live|
@@ -185,6 +202,7 @@ class PlayerBackup
         dropped = seen && live < seen.to_i && exact
         base = rec['online_time'].to_i + (dropped ? seen.to_i - live : 0)
         bases[name] = base
+        resets << name if dropped
         next if seen == live || (seen && !exact && live <= seen.to_i)
         rec['online_time'] = base
         rec['online_time_seen'] = live
@@ -193,7 +211,7 @@ class PlayerBackup
       persist if changed # one write for the whole batch, not one per player
     end
     @player_attrs&.set_foreign_bases(bases) unless bases.empty?
-    bases
+    resets
   end
 
   # The base (ticks from earlier saves) alone — what the online_time total is
@@ -257,17 +275,31 @@ class PlayerBackup
 
   # ── restore ──────────────────────────────────────────────────────
 
-  def restore(name, index, bar)
-    return unless filled?(bar)
-    cells = cells_of(bar)
-    done = @rcon.restore_quickbar(name, cells)
-    if done == cells.size
-      puts "[player-backup] #{name}: restored #{done} slot(s) from #{PlayerBackup::FILENAME}"
-    else
-      version = @rcon.server_version || 'unknown version'
-      warn "[player-backup] #{name}: restored #{done}/#{cells.size} slot(s) — #{version} rejected the rest?"
+  # Put back everything we saved, in ONE RCON command (RconClient#
+  # restore_player): the quickbar cells and the colour, each only if we have
+  # it. True when something was written. Called for a player joining a NEW
+  # save (the game's defaults are not what they chose) and for one joining
+  # with an empty bar.
+  def restore(name, index, saved)
+    return false unless saved.is_a?(Hash)
+    bar = filled?(saved['quickbar']) ? saved['quickbar'] : nil
+    color = saved['color'].is_a?(Array) && saved['color'].length == 4 ? saved['color'] : nil
+    return false unless bar || color
+    cells = cells_of(bar || [])
+    done = @rcon.restore_player(name, cells, color: color)
+    if bar
+      if done == cells.size
+        puts "[player-backup] #{name}: restored #{done} slot(s) from #{PlayerBackup::FILENAME}"
+      else
+        version = @rcon.server_version || 'unknown version'
+        warn "[player-backup] #{name}: restored #{done}/#{cells.size} slot(s) — #{version} rejected the rest?"
+      end
     end
-    @player_db&.replace_quickbar(index, bar) # the game now has it; so must the cache
+    puts "[player-backup] #{name}: restored colour #{Array(color).join(',')}" if color
+    # the game now holds it; so must the cache
+    @player_db&.replace_quickbar(index, bar) if bar
+    @player_db[index] = { color: color } if color && @player_db
+    true
   end
 
   # 10×10 grid → {flat slot index (1..100) => item id}, the form the setter

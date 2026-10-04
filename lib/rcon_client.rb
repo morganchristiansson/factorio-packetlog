@@ -142,7 +142,7 @@ class RconClient
   def roster_backup
     lua = 'do ' + ITEM_ID_MAP_LUA +
           'local t={} for _,p in pairs(game.players) do ' + quickbar_read_lua('q') +
-          'local okq=pcall(read) t[#t+1]={i=p.index,n=p.name,c=p.connected,q=okq and q or false,' \
+          'local okq=pcall(read) t[#t+1]={i=p.index,n=p.name,c=p.connected,o=p.online_time,q=okq and q or false,' \
           'y={r=p.color.r,g=p.color.g,b=p.color.b,a=p.color.a}} end ' \
           "helpers.write_file(#{ROSTER_BACKUP_FILENAME.inspect}, helpers.table_to_json(t), false, 0) end"
     # No print fallback: the whole-roster payload is far past any response

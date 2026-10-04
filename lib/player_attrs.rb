@@ -25,6 +25,11 @@
 # the afk_time growth (the seeded delta grows with elapsed ticks until the
 # player's first observed action resets it to 0).
 #
+#   foreign_base  — ticks played on EARLIER saves, which the game cannot be
+#                 told about (LuaPlayer.online_time is read-only), fed in by
+#                 the player_backup feature from players-backup.json. An
+#                 ADDITIVE term on the total above, never a rewrite.
+#
 # Keyed by player NAME (unique in Factorio); game indexes are bound from
 # C→S heartbeats / the roster.
 #
@@ -167,12 +172,22 @@ class PlayerAttrs
   def online_time_ticks(name, current_tick)
     p = @players[name]
     return 0 unless p
-    base = p[:base_ticks] || 0
+    base = (p[:base_ticks] || 0) + (p[:foreign_base] || 0)
     return base unless current_tick
     if p[:connected] && p[:session_start]
       base + [current_tick - p[:session_start], 0].max
     else
       base
+    end
+  end
+
+  # Ticks played on earlier saves, name-keyed ({name => ticks}). Set by the
+  # player_backup feature — one call per roster snapshot, join and leave, so
+  # a save change never shows up as lost play time. The game holds its own
+  # copy of the current save's total, so this only ever ADDS.
+  def set_foreign_bases(bases)
+    @mutex.synchronize do
+      bases.each { |name, ticks| (@players[name.to_s] ||= {})[:foreign_base] = ticks.to_i }
     end
   end
 

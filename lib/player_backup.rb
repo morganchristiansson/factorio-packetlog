@@ -13,6 +13,8 @@ require 'json'
 #
 #   quickbar  the 10×10 grid
 #   color     LuaPlayer.color as [r, g, b, a]
+#   online_time  ticks played on EARLIER saves — the base added to the live
+#                total (see #sync_times)
 #
 # WHY a side file, keyed by name: players-cache.json's per-player state is
 # per-savefile — game indexes are handed out in join order and reset when the
@@ -43,9 +45,9 @@ require 'json'
 # events (Plugins::Feature) are inherited no-ops.
 class PlayerBackup
   FILENAME = 'players-backup.json'
-  # The quickbar-only file this feature started as; read once, so renaming it
-  # on a live server does not throw away everybody's saved bars.
-  LEGACY_FILENAME = 'quickbars.json'
+  # Every key one record may carry. Anything else in the file is dropped on
+  # read, so a typo'd field cannot masquerade as data.
+  FIELDS = %w[quickbar color online_time online_time_seen].freeze
 
   # `host` is the sniffer (Plugins hands every feature its owner): the two
   # things this one needs are on it, and either may be nil — no RCON, no
@@ -56,11 +58,11 @@ class PlayerBackup
   # keep is a CONSTRUCTOR argument, not a baked-in constant, so a caller (a
   # test, or two features with two files) names its own instead of the whole
   # process chdir'ing into a scratch directory to get out of the way.
-  def initialize(host, path: FILENAME, legacy_path: LEGACY_FILENAME)
+  def initialize(host, path: FILENAME)
     @rcon = host.rcon
     @player_db = host.player_db
+    @player_attrs = host.respond_to?(:attrs) ? host.attrs : nil
     @path = path
-    @legacy_path = legacy_path
     @mutex = Mutex.new # one join at a time + the file write (see #persist)
   end
 
@@ -93,10 +95,12 @@ class PlayerBackup
     roster = @rcon.roster_backup
     return if roster.nil? || roster.empty?
     bars = colors = 0
+    times = []
     @mutex.synchronize do
       roster.each do |p|
         name = p[:name].to_s
         next if name.empty?
+        times << [name, p[:online_time]] # o= in the roster Lua — the live total
         rec = (records[name] ||= {})
         color = p[:color]
         if color.is_a?(Array) && color.length == 4 && rec['color'] != color.map(&:to_f)
@@ -111,6 +115,8 @@ class PlayerBackup
       end
       persist if bars + colors > 0 # one write for the whole roster, not one per player
     end
+    # outside the lock (sync_times takes it) — one write for the roster
+    sync_times(times)
     puts "[player-backup] roster snapshot: #{roster.size} players, #{bars} bar(s), #{colors} colour(s) saved"
   end
 
@@ -121,6 +127,8 @@ class PlayerBackup
     return unless @rcon
     saved = saved_record(name) # read BEFORE we overwrite anything
     note_color(name, attrs[:color])
+    sync_times([[name, attrs[:online_time]]]) # before any :failed return: the
+                                              # play time is independent of the bar
     # nil is the join query's "empty bar" (the payload always carries the
     # key); only :failed, the Lua read raising, means we do not know
     return if attrs[:quickbar] == :failed
@@ -130,6 +138,68 @@ class PlayerBackup
     elsif saved && filled?(saved['quickbar'])
       restore(name, index, saved['quickbar'])
     end
+  end
+
+  # Player LEFT the game (clean quit in either direction, or the heartbeat
+  # watchdog) — the live total is already folded into PlayerAttrs, so the
+  # play time is what this save is worth, last chance to record it.
+  def on_player_left(name, online_time_ticks)
+    sync_times([[name, online_time_ticks]], exact: false)
+  end
+
+  # Fold the game's live play times (name → ticks; a whole roster is fine)
+  # into the stored high-water mark. A live total that DROPPED means the
+  # save's own clock restarted — a new save, a new map — and everything the
+  # old save had that this one hasn't yet becomes a base, added to the live
+  # total on read (PlayerAttrs#online_time_ticks). The game cannot be told
+  # about a base: LuaPlayer.online_time is read-only, which is the whole
+  # reason this file exists. Same name-keyed accumulator the Biter Battles
+  # scenario keeps in its `session` global (utils/datastore/session_data.lua)
+  # with their web panel in the middle; we are the panel.
+  #
+  # WHY a drop, and whose: the game's own `p.online_time` cannot fall inside one
+  # save — it only accumulates while the player is connected — so a drop in
+  # an EXACT number (roster snapshot, join query; both read it over RCON)
+  # means the save's clock restarted, and everything the old save had that
+  # this one hasn't yet becomes a base. Our own mirror (PlayerAttrs, what a
+  # leave reports) is NOT exact: a player we never seeded from RCON has a
+  # base of 0 there, so it undercounts, and treating ITS drop as a reset
+  # would invent play time. Hence `exact: false` — a mirror number may push
+  # the mark up (it can only know more, never less) but never lower it, so
+  # every reset is read off the game. Wrong direction by design: a missed
+  # reset loses time, a false one invents it.
+  #
+  # Within one save the mark only rises, so nothing is written on every sync:
+  # a roster snapshot of 300 players is one file write, and a re-sync with
+  # unchanged numbers is none.
+  def sync_times(pairs, exact: true)
+    bases = {}
+    @mutex.synchronize do
+      changed = false
+      pairs.each do |name, live|
+        name = name.to_s
+        next if name.empty?
+        live = live.to_i
+        rec = (records[name] ||= {})
+        seen = rec['online_time_seen']
+        dropped = seen && live < seen.to_i && exact
+        base = rec['online_time'].to_i + (dropped ? seen.to_i - live : 0)
+        bases[name] = base
+        next if seen == live || (seen && !exact && live <= seen.to_i)
+        rec['online_time'] = base
+        rec['online_time_seen'] = live
+        changed = true
+      end
+      persist if changed # one write for the whole batch, not one per player
+    end
+    @player_attrs&.set_foreign_bases(bases) unless bases.empty?
+    bases
+  end
+
+  # The base (ticks from earlier saves) alone — what the online_time total is
+  # this much bigger than the save's own.
+  def base_ticks(name)
+    @mutex.synchronize { (records[name.to_s] || {})['online_time'].to_i }
   end
 
   # Everything we keep for a name, or nil: {"quickbar" => …, "color" => […]}.
@@ -218,23 +288,18 @@ class PlayerBackup
     @records ||= load_records
   end
 
-  # Reads the current file, or — when it does not exist yet — the
-  # quickbar-only file this feature used to be, so a rename on a live server
-  # keeps every saved bar.
+  # Reads the current file. Unreadable or corrupt: start empty, the next join
+  # with a bar refills it. There is NO copy of this file: it is the one
+  # artifact here that cannot be rebuilt from anywhere else, so copy it by
+  # hand (`cp players-backup.json{,.bak}`) when starting a new save.
   def load_records
-    out = {}
-    [@path, @legacy_path].each do |file|
-      next unless File.exist?(file)
-      JSON.parse(File.read(file)).each do |name, rec|
-        next unless rec.is_a?(Array) || rec.is_a?(Hash)
-        rec = { 'quickbar' => rec } if rec.is_a?(Array) # the legacy shape
-        out[name.to_s] = rec.select { |k, _v| k == 'quickbar' || k == 'color' }
-      end
-      break unless out.empty?
+    return {} unless File.exist?(@path)
+    JSON.parse(File.read(@path)).each_with_object({}) do |(name, rec), out|
+      next unless rec.is_a?(Hash)
+      out[name.to_s] = rec.select { |k, _v| FIELDS.include?(k) }
     end
-    out
   rescue JSON::ParserError, SystemCallError
-    {} # corrupt or unreadable: start empty, the next join with a bar refills it
+    {}
   end
 
   # Assumes the mutex is held (called from #save). Same temp+rename as

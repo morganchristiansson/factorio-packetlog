@@ -300,9 +300,12 @@ class FactorioPacketTools
     select_protocol_version
   end
 
-  # What a feature gets as its owner: this host, and these two are the shared
+  # What a feature gets as its owner: this host, and these are the shared
   # things most features want. Nil is a real answer — no RCON in client mode.
-  attr_reader :rcon, :player_db
+  # `attrs` is the live PlayerAttrs mirror (roster + play time): a feature
+  # that keeps a name-keyed base it adds to the totals (player_backup) reads
+  # it through set_foreign_bases.
+  attr_reader :rcon, :player_db, :attrs
 
   # THE EVENT CATALOGUE — what the sniffer tells features, and the whole
   # plugin API. Every event is a no-op on Plugins::Feature, so it is emitted
@@ -317,6 +320,15 @@ class FactorioPacketTools
   # Emitted on the join thread, so a feature may talk to the server here.
   def on_join_enriched(name, index, attrs)
     @plugins.emit(:on_join_enriched, name, index, attrs)
+  end
+
+  # A player left the game — clean quit (the C→S PeerDisconnect, or the
+  # S→C broadcast in client mode) or the heartbeat watchdog. Their play time
+  # for THIS save, already folded into PlayerAttrs: the last moment the
+  # player_backup feature can record what the current save is worth before a
+  # new one starts on top of it.
+  def on_player_left(name, online_time_ticks)
+    @plugins.emit(:on_player_left, name, online_time_ticks)
   end
 
   # A player changed their colour: the 4 UNORM bytes R,G,B,A (0..255) from the
@@ -658,6 +670,7 @@ class FactorioPacketTools
           pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
           @attrs.disconnect(pname, @game_tick) if pname
           @agent&.enqueue(:on_player_event, :left, pname) if pname
+          @plugins.emit(:on_player_left, pname, @attrs.online_time_ticks(pname, nil)) if pname
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
         else
@@ -1562,6 +1575,7 @@ class FactorioPacketTools
     return unless name
     @attrs.disconnect(name, @game_tick)
     @agent&.enqueue(:on_player_event, :left, name)
+    @plugins.emit(:on_player_left, name, @attrs.online_time_ticks(name, nil))
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} left the game" if player_visible?(name)
   end
@@ -1609,6 +1623,7 @@ class FactorioPacketTools
     # RCON roster refreshes (load_roster stays as-is on startup/reload).
     @attrs.disconnect(name, @game_tick)
     @agent&.enqueue(:on_player_event, :timeout, name)
+    @plugins.emit(:on_player_left, name, @attrs.online_time_ticks(name, nil))
     ts_str = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} timed out (no heartbeat for #{idle.round}s) — likely crashed or disconnected; may re-join" if player_visible?(name)
   end

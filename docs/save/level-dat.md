@@ -237,7 +237,7 @@ surface, and anything else settable from the console.
   game. The QUICKBAR is almost certainly in the record
   (per-player state of 8 KB … 2.4 MB), but it is unlocated: a quickbar is
   only findable by searching for known item ids, and we have none — no
-  capture has quick_bar_set_slot actions and no quickbars.json exists. Get
+  capture has quick_bar_set_slot actions and no backup file exists. Get
   ONE known bar (the `player_backup` plugin's file, or a capture with
   quickbar actions) and the search becomes concrete.
 - Forces section boundaries not fully mapped (a large float array at

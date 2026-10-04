@@ -300,6 +300,7 @@ class RconClient
   # sniffer asks at startup anyway (select_protocol_version). Failures are
   # NOT memoised, so a server that was down at boot is retried.
   def server_version
+    return @server_version if @server_version
     body = execute('rcon.print(helpers.game_version)').strip
     return nil if body.empty?
     @server_version = body

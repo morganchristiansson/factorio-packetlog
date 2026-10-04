@@ -14,6 +14,7 @@
 # Run: ruby -Ilib test/server_mode_test.rb
 
 require 'minitest/autorun'
+require 'mocha/minitest'
 require 'tmpdir'
 require_relative '../factorio-packettools'
 require_relative 'fixtures/packets'
@@ -122,6 +123,15 @@ class TestServerMode < Minitest::Test
     lua = nil
     client.stub(:server_version, version) { lua = client.player_attrs_for_lua(player) }
     lua
+  end
+
+  # The version is asked ONCE and memoised: a join-time query builds Lua that
+  # reads the whole quickbar, so without the memo every join re-ran
+  # rcon.print(helpers.game_version) (4 queries per join observed).
+  def test_server_version_memoised
+    client = RconClient.allocate
+    client.expects(:execute).once.returns('2.0.77')
+    3.times { assert_equal '2.0.77', client.server_version }
   end
 
   # Build a sniffer for tests with the auto-named capture replaced by an

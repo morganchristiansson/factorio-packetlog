@@ -8,6 +8,13 @@ gem 'rconrb', '~> 0.2'       # Source RCON protocol client (Factorio's RCON)
 gem 'ruby_llm', '~> 1.16'
 gem 'ruby_llm-responses_api', '0.5.4' # Responses API for muse-spark-1.3-contributor-free (/v1/responses) — 0.6.x needs ruby_llm 2.0
 
+# OPTIONAL: Discord chat bridge (the `discord` plugin in config.yaml's
+# `plugins:`). Only required when that plugin is enabled and the sniffer is
+# in server mode — discordrb is required lazily inside lib/discord.rb,
+# so a run that doesn't use it never loads the gem. discordrb is the mature
+# Ruby Discord gateway + REST library.
+gem 'discordrb', '~> 3.8'
+
 # Test suite
 gem 'minitest', '~> 5.0'
 gem 'mocha', '~> 2.0' # mocking (expects/stubs): minitest/mock's stub can't be

@@ -50,8 +50,9 @@ class FactorioPacketTools
   ].freeze
 
   # The plugin names whose objects this sniffer builds itself rather than
-  # receiving events (lib/hivemind.rb, lib/translation.rb). They stay in the
-  # list for their files (hot reload), not as features.
+  # receiving events (lib/hivemind.rb, lib/translation.rb).
+  # They stay in the list for their files (hot reload), not as features.
+  # (discord is a real plugin feature now — built by PluginSet.)
   HOST_OBJECTS = %i[hivemind translation].freeze
 
   # Seconds between two Ctrl-C/SIGHUP presses that count as "quit".
@@ -246,6 +247,9 @@ class FactorioPacketTools
       # nothing to carry over or re-point.
       @agent = nil
       @translation_agent = nil
+
+      # No @discord ivar: it's a plugin feature now, reached via
+      # @plugins[:discord] + on_chat. (See the discord block below.)
       # Hivemind AI agent: reads packet-decoded chat and answers players who
       # say "hivemind". Needs the `hivemind` plugin (config.yaml `plugins:`)
       # AND a key for its startup model, which the entry point checks into
@@ -260,7 +264,8 @@ class FactorioPacketTools
             @agent = HivemindAgent.new(rcon: @rcon, attrs: @attrs,
                                         current_tick: -> { @game_tick },
                                         player_db: @player_db,
-                                        sniffer_plugins: options[:plugins])
+                                        sniffer_plugins: options[:plugins],
+                                        emit_chat: ->(source, author, text) { publish_chat(source, author, text) })
             @agent.plugins[:followups]&.ensure_followup_scheduler
             @agent.plugins[:logwatcher]&.ensure_log_watcher(ServerDetect.log_path)
             puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
@@ -289,6 +294,24 @@ class FactorioPacketTools
         rescue => e
           warn "[translate] Translation agent disabled: #{e.message}"
           @translation_agent = nil
+        end
+      end
+
+      # Discord: relays chat between a Factorio channel and a Discord
+      # channel, and lets Discord users address the Hivemind agent. Needs the
+      # `discord` plugin + RCON (to post in-game) + DISCORD_TOKEN
+      # (env-first) + channel_id from config-discord.yaml. Built as a plugin
+      # feature by PluginSet (Discord.new(owner)) — it owns a live gateway
+      # thread and reaches the agent through the shared publish_chat relay.
+      if @plugins.enabled?(:discord) && @rcon
+        begin
+          discord = @plugins[:discord]
+          # forward_chat runs off the capture thread via the bridge's worker
+          # (AgentEvents#enqueue); the agent publishes :hivemind replies through
+          # the shared publish_chat relay instead of a reply_callback.
+          puts "[discord] online — relaying chat with Discord channel #{discord.channel_id}" if discord
+        rescue => e
+          warn "[discord] disabled: #{e.message}"
         end
       end
     end
@@ -338,6 +361,22 @@ class FactorioPacketTools
   # must not reach the files.
   def on_player_color(name, rgba)
     @plugins.emit(:on_player_color, name, rgba)
+  end
+
+  # Chat relay hub: the single chat event both the discord plugin and the
+  # Hivemind agent are reached by. publish_chat fans :on_chat to plugin
+  # features (discord — via @plugins.emit) and to the sniffer's host object
+  # (hivemind). Translation is fed directly (it needs packet-only game_player,
+  # so it's not on the relay). Sources: :factorio (player chat, from
+  # log_action), :discord, :hivemind (an agent reply). The agent's on_chat is
+  # source-aware (source: kwarg, default nil) so it self-skips :hivemind;
+  # discord skips :discord on_chat. forward_chat runs off-thread on each
+  # subscriber's worker.
+  def publish_chat(source, author, text)
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @plugins.emit(:on_chat, source, author, text)
+    @agent&.enqueue(:on_chat, author, text, source: source, now: now) if @agent
+    nil
   end
 
   # Startup, once the RCON client exists (server mode only): the whole-roster
@@ -416,6 +455,7 @@ class FactorioPacketTools
     @map_download&.stop
     @agent&.close_events
     @translation_agent&.close_events
+    @plugins[:discord]&.close
     print_summary
     @pcap_writer&.close
     @unknown_writer&.close
@@ -1150,7 +1190,7 @@ class FactorioPacketTools
         if msg
           puts "#{log_ts(ts)}  #{arrow} #{pname}: #{msg}"
           now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          @agent&.enqueue(:on_chat, pname, msg, now: now)
+          publish_chat(:factorio, pname, msg)
           @translation_agent&.enqueue(:on_chat, { game_player: act[:game_player] }, msg, now: now)
         end
       end

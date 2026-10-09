@@ -1,0 +1,26 @@
+# ─────────────────────────────────────────────────────────────
+# Discord — configuration (only when the `discord` plugin
+# is listed in config.yaml `plugins:`)
+# ─────────────────────────────────────────────────────────────
+# Copy to config-discord.yaml. The bridge refuses to start without this
+# file and its required keys (no code defaults; a missing file/key is a
+# startup error reported as "[discord] bridge disabled: ...").
+#
+# The bot token is a secret — env-first: set DISCORD_TOKEN (preferred)
+# instead of storing a token here; this file is gitignored, so a token
+# here stays local if you do.
+#
+# Bridge this channel: Factorio chat is mirrored here, and messages posted
+# here appear in-game. Enable the MESSAGE_CONTENT privileged intent in the
+# Discord Developer Portal (Bot → Privileged Gateway Intents) so the bridge
+# can read message text for everyone — not just @mentions.
+# ─────────────────────────────────────────────────────────────
+
+# REQUIRED — the Discord channel ID to bridge (right-click the channel in
+# Discord with Developer Mode on, or take it from a channel link).
+channel_id: 123456789012345678
+
+# Bot token — secret. Env var is preferred (never committed):
+#   DISCORD_TOKEN=... sudo ruby factorio-packettools.rb
+# `token:` here is the env-fallback only; leave it commented and use the env.
+# token: MjAY...your-bot-token...

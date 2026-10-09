@@ -118,6 +118,13 @@ class HivemindAgent
   attr_reader :models
   attr_reader :triggers
 
+  # Optional callback invoked with the clean text of every agent reply — both
+  # the HivemindReply tool path (via on_sent) and the send_reply fallback. Set
+  # by the sniffer to echo replies back to a Discord bridge so Discord users
+  # see Hivemind answer them. Nil-safe (no bridge → no-op). Survives hot
+  # reloads: set once on the persistent agent object.
+  attr_writer :emit_chat
+
   # Packet-derived player attributes, database, and current-tick provider.
   attr_accessor :attrs, :player_db, :current_tick
 
@@ -260,7 +267,8 @@ class HivemindAgent
   # consults it for the features it hooks (translation gates the
   # set_player_languages tool). Its OWN list is config-hivemind.yaml.
   def initialize(rcon:, attrs:, current_tick:, player_db:, sniffer_plugins: [],
-                 memory_dir: nil, config_file: CONFIG_FILE)
+                 memory_dir: nil, config_file: CONFIG_FILE, emit_chat: nil)
+    @emit_chat = emit_chat
     @sniffer_plugins = sniffer_plugins.map { |n| n.to_s.to_sym } # the SNIFFER's list — see above
     @attrs = attrs
     @current_tick = current_tick
@@ -516,7 +524,8 @@ class HivemindAgent
   # outputs, /shout echoes, etc.), and in-game chat can never begin with
   # `/`. They're excluded entirely: never queued into the console context
   # and never trigger the agent.
-  def on_chat(player, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+  def on_chat(player, message, source: nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    return if source == :hivemind  # own reply — already in context, don't duplicate
     player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
     return if message.start_with?('/')
@@ -607,7 +616,7 @@ class HivemindAgent
   # name, so this is idempotent and cheap.
   def register_tools(chat = @chat)
     return unless chat
-    chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text) }))
+    chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text); @emit_chat&.call(:hivemind, 'Hivemind', text) }))
     chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
     # The state-changing tool is a feature, not a constant: with `tags` out of
     # config-hivemind.yaml's list the file is never required and the model is
@@ -1230,6 +1239,7 @@ class HivemindAgent
   def send_reply(text)
     return if text.nil? || text.empty?
     append_history('hivemind', text)
+    @emit_chat&.call(:hivemind, 'Hivemind', text)
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{text}"
     @rcon.say("#{HivemindReply::REPLY_PREFIX}#{text}")
   end

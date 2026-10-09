@@ -31,8 +31,9 @@ end
 #                             `plugins:` — which features load)
 #   config-hivemind.yaml       Hivemind AI agent config (api_base, model, etc.)
 #   config-translation.yaml    Translation agent config (backend, locales, etc.)
+#   config-discord.yaml        Discord bridge config (channel, token)
 # Secrets (RCON password, API keys, credentials) are env-only:
-#   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY,
+#   RCON_PASSWORD, HIVE_API_KEY, GOOGLE_TRANSLATE_API_KEY, DISCORD_TOKEN,
 #   FACTORIO_USERNAME, FACTORIO_TOKEN
 
 require 'rbconfig'

@@ -20,11 +20,17 @@
 # config-hivemind.yaml.
 #   hivemind      the AI agent answering players who say "hivemind"
 #   translation   relays chat to players who can't read the original
+#   discord relays chat between a Factorio channel and a Discord
+#                  channel (config-discord.yaml; DISCORD_TOKEN env secret)
 #   player_backup    keeps a name-keyed copy of every player's quickbar and colour
 #                    (quickbars.json) and puts it back when they join a
 #                    save that has none — game indexes reset with a save,
 #                    players-cache.json does not survive one
 plugins:
+  - hivemind
+  - translation
+  - discord
+  - player_backup
   - hivemind
   - translation
   - player_backup

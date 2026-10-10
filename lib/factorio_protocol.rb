@@ -531,7 +531,7 @@ ACTIONS = {
         hdr[:header_size] += 1
         hdr[:confirm_items] = []
         count.to_i.times do
-          break if hdr[:header_size] + 4 > data.bytesize
+          break if hdr[:header_size] + 2 > data.bytesize
           hdr[:confirm_items] << data.unpack1('V', offset: hdr[:header_size])
           hdr[:header_size] += 4
         end

@@ -101,6 +101,61 @@ module FactorioSave
     strings.empty? ? nil : strings
   end
 
+  # ── The stored game tick ──────────────────────────────────────────
+  #
+  # `game.tick` at save time is stored as an IEEE 754 double (LE, 8 bytes) in
+  # the decompressed level.dat, just past the header + prototype section
+  # (where the surface/level Lua table is serialized).  The tick f64 is always
+  # followed by an 8-byte signature — the constant below — across saves from
+  # the same scenario (verified: freeplay @ seed 42, base mod only,
+  # Factorio 2.0.77).  Read the 8 bytes BEFORE the signature as an f64 LE.
+  #
+  # The stored value is typically 0-4 ticks ahead of the `game.tick` an RCON
+  # query returns at the same wall-clock moment: the save runs a few ticks
+  # after the query that triggers it (measured: lag 0 on fast saves,
+  # 4 after a `game.speed = 1000` burst).
+  #
+  # `tick_at(data)` returns the integer tick (or nil when the signature is
+  # not found — saves from other scenarios need their own anchor; see
+  # docs/save/level-dat.md).
+  TICK_SIGNATURE = "\x01\x00\x43\x3a\x03\x00\x00\x00".b
+
+  def self.tick_at(data)
+    pos = data.index(TICK_SIGNATURE)
+    return nil unless pos && pos >= 8
+    bytes = data.byteslice(pos - 8, 8)
+    return nil unless bytes && bytes.bytesize == 8
+    val = bytes.unpack1('E') # little-endian f64
+    val == val.to_i ? val.to_i : nil
+  end
+
+  # Read the stored game tick directly from a save zip or a decompressed
+  # level.dat.  Used by the observer client (factorio_client.rb) to calibrate
+  # its tick-closure base error from the server's actual save instead of a
+  # hardcoded constant.
+  def self.tick_from_save(path)
+    require 'zip'
+    ext = File.extname(path)
+    if ext == '.zip'
+      tick = nil
+      # Factorio's save zips use duff timestamps; suppress rubyzip's warnings.
+      orig_stderr = $stderr.dup
+      $stderr.reopen(File::NULL)
+      begin
+        Zip::File.open(path) do |zf|
+          entry = zf.find { |e| e.name =~ %r{level\.dat0\z} } || zf.first
+          data = Zlib::Inflate.inflate(entry.get_input_stream.read)
+          tick = tick_at(data)
+        end
+      ensure
+        $stderr.reopen(orig_stderr)
+      end
+      tick
+    else
+      tick_at(File.binread(path))
+    end
+  end
+
   # LuaPlayer.color: four f32 floats just in front of the name — measured
   # against a live game.players dump, 337 of 338 records give the exact four
   # floats here. `color` in players-cache.json is the same value, rounded the
@@ -146,7 +201,8 @@ module FactorioSave
     attr_reader :records
     # The two offsets in front of the name the stat pair really sits at (a
     # save has a couple of record layouts — -57 and -63 in ours), and the
-    # save's own tick (the largest last-online seen in the top slot).
+    # save's own tick (read from TICK_SIGNATURE in level.dat, falling back to
+    # the largest last-online seen in the top slot when not found).
     attr_reader :slots, :save_tick
 
     private
@@ -156,6 +212,7 @@ module FactorioSave
       buf = String.new(encoding: Encoding::BINARY)
       base = 0 # absolute offset of buf[0] in the stream
       last = -1 # a carried-over name can match twice
+      tick_found = false
       stream.each do |chunk|
         buf << chunk.b
         buf.scan(NAME_RE) do
@@ -178,6 +235,15 @@ module FactorioSave
                         .map { [base + at + Regexp.last_match.begin(0), Regexp.last_match[2]] }
           }
         end
+        # The game tick lives in the game-state header (first ~1 MiB).  Scan
+        # the carry buffer once; TICK_SIGNATURE appears exactly once per save
+        # from our server, so we stop searching after the first hit.
+        unless tick_found
+          if (tick = FactorioSave.tick_at(buf))
+            @save_tick = tick
+            tick_found = true
+          end
+        end
         drop = [buf.bytesize - CARRY, 0].max
         base += drop
         buf = buf.byteslice(drop, buf.bytesize - drop)
@@ -189,9 +255,11 @@ module FactorioSave
     # record's name is the boundary (the search window reaches into it).
     def resolve(candidates)
       @slots = stat_slots(candidates)
-      @save_tick = candidates.flat_map { |c| c[:pairs] }
-                           .select { |(rel, _, _)| rel == @slots.first }
-                           .map { |(_, _, last)| last }.max
+      # Fall back to the stat-pair approximation when the tick signature
+      # wasn't found (a save from a different scenario, or too small).
+      @save_tick ||= candidates.flat_map { |c| c[:pairs] }
+                             .select { |(rel, _, _)| rel == @slots.first }
+                             .map { |(_, _, last)| last }.max
       candidates.each_with_index.map do |c, i|
         stop = candidates[i + 1]&.fetch(:offset) || Float::INFINITY
         _, play, last_online = pick_pairs(c[:pairs])

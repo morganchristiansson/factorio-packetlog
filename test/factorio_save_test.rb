@@ -118,4 +118,36 @@ class TestFactorioSave < Minitest::Test
     assert_equal %w[alice bob], records.map { |r| r[:name] }
     assert_equal [1000, 2000], records.map { |r| r[:online_time_ticks] }
   end
+
+  # ── the stored game tick ──────────────────────────────────────────
+
+  # The tick is stored as an f64 LE double immediately before the 8-byte
+  # TICK_SIGNATURE in level.dat.  Build a synthetic buffer with a known tick
+  # and verify it round-trips.
+  def test_tick_at_reads_the_stored_f64
+    tick = 72040
+    data = ('x' * 100).b + [tick].pack('E') + FactorioSave::TICK_SIGNATURE + ('y' * 50).b
+    assert_equal tick, FactorioSave.tick_at(data)
+  end
+
+  def test_tick_at_returns_nil_when_signature_missing
+    assert_nil FactorioSave.tick_at(('x' * 100).b)
+  end
+
+  def test_tick_at_returns_nil_when_signature_at_start
+    # not enough bytes before the signature for an 8-byte f64
+    assert_nil FactorioSave.tick_at(FactorioSave::TICK_SIGNATURE + 'x' * 10)
+  end
+
+  # A Roster over a stream that includes the TICK_SIGNATURE picks up the
+  # real tick rather than the stat-pair approximation.
+  def test_roster_uses_the_stored_tick
+    tick = 42_000
+    stream = ("\x00" * 200).b +
+             [tick].pack('E') + FactorioSave::TICK_SIGNATURE +
+             record('alice', 1000, 90_000) +
+             ('\x00' * 100).b
+    roster = FactorioSave::Roster.new([stream])
+    assert_equal tick, roster.save_tick
+  end
 end

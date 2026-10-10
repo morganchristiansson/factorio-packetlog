@@ -3,6 +3,7 @@ source 'https://rubygems.org'
 # Factorio protocol sniffer
 gem 'pcaprub', '~> 0.13'     # Live packet capture (requires libpcap-dev)
 gem 'rconrb', '~> 0.2'       # Source RCON protocol client (Factorio's RCON)
+gem 'rubyzip', '~> 2.3'      # Read save zips natively (no shell-out to unzip)
 
 # Hivemind AI agent (--ai-agent): LLM chat via ruby_llm
 gem 'ruby_llm', '~> 1.16'

@@ -35,10 +35,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     node --version && npm --version
 
 
-RUN npm install -g @jmfederico/pi-web --allow-scripts=node-pty
-
 # ── npm global packages ─────────────────────────────────────────────────────
-RUN npm install -g @earendil-works/pi-coding-agent@1.0.0 && \
+RUN npm install -g @earendil-works/pi-coding-agent@1.0.3 && \
     pi --version
 
 # ── Ruby gems ──────────────────────────────────────────────

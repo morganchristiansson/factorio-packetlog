@@ -25,6 +25,12 @@ class TestFactorioProtocol < Minitest::Test
     FactorioProtocol.select_version('2.1')
   end
 
+  def teardown
+    # setup selected 2.1 for this file; put the default 2.0 back so the
+    # tables can't leak into another test file in a one-process run.
+    FactorioProtocol.reset_version
+  end
+
   # ── TilePos / TileRect ─────────────────────────────────────────
 
   def test_tile_pos_parses_8_bytes

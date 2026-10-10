@@ -520,6 +520,93 @@ module FactorioProtocol
           sa[:data] = data[offset, 8]
           offset += 8
         end
+      when 0x05 # MapReadyForDownload
+        if is_server && offset + 8 <= data.bytesize
+          sa[:data_size] = data.unpack1('Q<', offset: offset)
+          offset += 8
+          if offset + 8 <= data.bytesize
+            sa[:aux_size] = data.unpack1('Q<', offset: offset)
+            offset += 8
+          end
+          # Skip crc(4) + autosave_interval(4) +
+          # autosave_slots(4) + autosave_only_on_server(1) + non_blocking_saving(1) = 14
+          # …but keep update_tick(8): it is the map snapshot's game tick, the
+          # anchor the SERVER derives our expected closure ticks from.
+          if offset + 4 <= data.bytesize
+            sa[:update_tick] = data.unpack1('Q<', offset: offset + 4) if offset + 12 <= data.bytesize
+            offset += 22
+          end
+          # Consume script_checksums: count(u8) + count * (mod_name + crc(u32))
+          if offset < data.bytesize
+            sc_count = data.getbyte(offset)
+            offset += 1
+            sc_count.times do
+              _, _ = decode_uint32v(data, offset)
+              s_off, s_len = decode_uint32v(data, offset)
+              if s_len && s_off + s_len <= data.bytesize
+                offset = s_off + s_len + 4
+              else
+                sa[:hit_unknown] = true
+                break
+              end
+            end
+          end
+          # Consume script_events: count(u8) + entries (complex)
+          # Each entry: mod_name + standard_events_count(u8) + count*u32 +
+          # nth_tick_events_count(u8) + count*u32 + standard_event_filters_count(u8) +
+          # count*(u32*2) + bool + u8 + u8
+          if !sa[:hit_unknown] && offset < data.bytesize
+            se_count = data.getbyte(offset)
+            offset += 1
+            se_count.times do
+              s_off, s_len = decode_uint32v(data, offset)
+              if !s_len || s_off + s_len > data.bytesize
+                sa[:hit_unknown] = true
+                break
+              end
+              offset = s_off + s_len
+              break if offset >= data.bytesize
+              std_count = data.getbyte(offset)
+              offset += 1
+              offset += std_count * 4
+              break if offset >= data.bytesize
+              nth_count = data.getbyte(offset)
+              offset += 1
+              offset += nth_count * 4
+              break if offset >= data.bytesize
+              filt_count = data.getbyte(offset)
+              offset += 1
+              offset += filt_count * 8
+              break if offset >= data.bytesize
+              offset += 3  # bool + 2 u8s
+            end
+          end
+          # Consume script_commands: count(u8) + entries (mod_name + count + mods)
+          if !sa[:hit_unknown] && offset < data.bytesize
+            cmd_count = data.getbyte(offset)
+            offset += 1
+            cmd_count.times do
+              s_off, s_len = decode_uint32v(data, offset)
+              if !s_len || s_off + s_len > data.bytesize
+                sa[:hit_unknown] = true
+                break
+              end
+              offset = s_off + s_len
+              break if offset >= data.bytesize
+              cmd_sub_count = data.getbyte(offset)
+              offset += 1
+              cmd_sub_count.times do
+                s_off2, s_len2 = decode_uint32v(data, offset)
+                break if !s_len2 || s_off2 + s_len2 > data.bytesize
+                offset = s_off2 + s_len2
+              end
+            end
+          end
+          if sa[:hit_unknown]
+            sa[:data_size] = nil  # parsing failed, discard
+            sa[:aux_size] = nil
+          end
+        end
       when 0x12 # IncreasedLatencyConfirm — tick(8) + latency(1)
         if offset + 9 <= data.bytesize
           sa[:tick] = data.unpack1('Q<', offset: offset)

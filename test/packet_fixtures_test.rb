@@ -168,9 +168,18 @@ class TestPacketFixtures < Minitest::Test
     324 => 'gui_leave: 10 closures',
     331 => 'unidentified: 2 closures',
 
-    16 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
+    16 => 'close_blueprint_record, name live-verified via /toggle-action-logging (--act 16:1:); length unmeasured', # measured
+    23 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    24 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    25 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
     34 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
     56 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
+    77 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # cursor_split
+    89 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # stack_split
+    145 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    147 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    148 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # edit_blueprint_tool_preview
+    153 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
     65 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # drop_item
     72 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # open_parent_of_opened_item
     73 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # destroy_item
@@ -181,7 +190,6 @@ class TestPacketFixtures < Minitest::Test
     123 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # zoom_around_point
     125 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # start_repair
     126 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # deconstruct
-    153 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
     198 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # alt_reverse_select_area
     199 => 'name and length both need /toggle-action-logging + more traffic', # ** UNIDENTIFIED **
     217 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # swap_item_filters
@@ -189,6 +197,14 @@ class TestPacketFixtures < Minitest::Test
     264 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # fast_entity_transfer
     265 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # rotate_entity
     289 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # set_splitter_priority
+    154 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    202 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # set_infinity_pipe_filter
+    209 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    210 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    211 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # gui_elem_changed
+    228 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # swap_mappers
+    229 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # ** UNIDENTIFIED **
+    233 => 'measured by tools/measure_action_lens.rb --type over the full captures; no single-action packet in the fixture set', # player_leave_game
   }.freeze
 
   def test_every_measured_length_is_pinned_or_acknowledged

@@ -53,6 +53,40 @@ mods              [count: optim][name: optim-str][ver: 3×optim-u16][crc: u32]*
 After the header: localized strings (victory messages), autoplace /
 map-gen settings, then the game state.
 
+## The stored game tick
+
+`game.tick` at save time is stored as an IEEE 754 double (LE, 8 bytes) in
+the decompressed `level.dat0`, past the header + prototype section.  The
+tick is found by searching for an 8-byte signature that **always follows**
+the tick f64 in saves from the same scenario:
+
+```
+tick f64 LE (8 bytes)     01 00 43 3a 03 00 00 00     ← TICK_SIGNATURE
+```
+
+Read the 8 bytes **before** `01 00 43 3a 03 00 00 00` as an f64 LE double
+→ that is the game tick.  The signature appears exactly once per save from
+a given scenario (verified on freeplay @ seed 42, base mod only, Factorio
+2.0.77).
+
+The stored value is typically **0–4 ticks ahead** of the `game.tick` an
+RCON query returns at the same wall-clock moment: the save runs a few ticks
+after the query that triggers it.  Confirmed via `game.server_save()` in a
+single Lua command that captures both the tick and the save (lag = 0 on
+fast saves, 4 after a `game.speed = 1000` burst):
+
+| Save | RCON tick | Stored f64 | Lag |
+|------|-----------|------------|-----|
+| probe-d | 72040 | 72040.0 | 0 |
+| probe-e | 72341 | 72341.0 | 0 |
+| probe-h | 180105 | 180109.0 | 4 |
+| probe-i | 223830 | 223834.0 | 4 |
+
+`FactorioSave.tick_at(data)` implements the lookup; `FactorioSave::Roster`
+uses it to set `save_tick` (falling back to the old max-last-online
+approximation when the signature is not found — saves from a different
+scenario, or streams too small to contain it).
+
 ## Section Map (mp-save-124, ~138 MB decompressed; offsets from the older
 ## 186 MB `_autosave14` are marked where they differ)
 

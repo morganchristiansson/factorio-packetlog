@@ -13,13 +13,18 @@ module FactorioProtocol
       @result[:connection_request] = parse_request(@data, @header[:header_size])
     end
 
+    # major/minor/patch(3) build(u32) client_id(u32) — 11 bytes after the
+    # 3-byte header. The build is a FULL u32 (2.0.77 ships build 84539), and
+    # client_id sits AFTER all four of its bytes: reading the id at offset+5
+    # overlapped the build's high half and printed 1054474241 for a real
+    # 0xdedb3eda, while masking the build to 16 bits printed 19003 for 84539.
     def parse_request(data, offset)
-      return nil if data.bytesize < offset + 9
+      return nil if data.bytesize < offset + 11
       maj = data.getbyte(offset)
       min = data.getbyte(offset + 1)
       patch = data.getbyte(offset + 2)
-      build = data.unpack1('V', offset: offset + 3) & 0xFFFF
-      cid   = data.unpack1('V', offset: offset + 5)
+      build = data.unpack1('V', offset: offset + 3)
+      cid   = data.unpack1('V', offset: offset + 7)
       { version: "#{maj}.#{min}.#{patch} (build #{build})", client_id: cid }
     end
   end
@@ -86,20 +91,24 @@ module FactorioProtocol
     # so far are still correct, the list is just incomplete.
     def parse_client_mods(data, at)
       count = data.getbyte(at)
-      return {} if count.nil? || count.zero?
+      return {} if count.nil?
       at += 1
       mods = []
       count.times do
         name = string_at(data, at)
         break unless name
         at = name[1]
-        version = data.byteslice(at, 2)&.unpack1('v')
-        break unless version
-        mods << [name[0], "#{version >> 8}.#{version & 0xFF}", data.byteslice(at + 2, 4)&.unpack1('V'),
-                 data.getbyte(at + 6)]
-        at += 7
+        # Version is THREE bytes: [major, minor, sub] (each a uint8, not u16v).
+        # The CRC follows as a uint32 LE — reading only 2 version bytes
+        # shifts the CRC by one byte and gives a wrong value.
+        major = data.getbyte(at)
+        minor = data.getbyte(at + 1)
+        sub = data.getbyte(at + 2)
+        break unless major && minor && sub
+        mods << [name[0], "#{major}.#{minor}.#{sub}", data.byteslice(at + 3, 4)&.unpack1('V')]
+        at += 7  # 3 version bytes + 4 CRC bytes
       end
-      settings, after = FactorioPropertyTree.value(data, at) # `05 00` = a dictionary
+      settings, after = FactorioPropertyTree.value(data, at)
       { mods: mods, settings: settings, mods_truncated: mods.size < count,
         settings_truncated: after.nil? || after != data.bytesize }
     end
@@ -129,9 +138,15 @@ module FactorioProtocol
       res[:client_id] = data.unpack1('V', offset: offset); offset += 4
       res[:status] = data.getbyte(offset); offset += 1
       offset, res[:game_name] = decode_string(data, offset)
-      offset, res[:server_hash] = decode_string(data, offset)
-      offset, res[:description] = decode_string(data, offset)
       return nil if offset.nil?
+      offset, res[:server_hash] = decode_string(data, offset, allow_empty: true)
+      return nil if offset.nil?
+      offset, res[:description] = decode_string(data, offset, allow_empty: true)
+      return nil if offset.nil?
+      res[:latency] = data.getbyte(offset)  # input delay in ticks (32):
+      # the client's first closure must land on updateTick_at_join + this
+      # (the server kills anything else: "wrong tick closure (50) instead
+      # of (44)"). Parsed here, used by FactorioClient's seed.
       offset += 1  # latency
       offset, res[:max_updates] = decode_uint32v(data, offset)
       offset += 4  # game_id
@@ -158,6 +173,16 @@ module FactorioProtocol
         [0x01, 0x02, 0x04, 0x08, 0x10].each { |b| offset += 1 if (flags & b) != 0 }
         res[:peers] << { peer_id: peer_id, name: name }
       end
+      # expect_seq/send_seq/new_peer_id: the sequence numbers the client and
+      # server are exchanging, and the peer id the server just assigned us.
+      # From the dissector's field list — our captures are server-mode, so
+      # they hold no msg 5 to check it against (a client-mode capture or a
+      # live join does).
+      return nil if offset + 8 > data.bytesize
+      res[:expect_seq] = data.unpack1('V', offset: offset)
+      res[:send_seq]   = data.unpack1('V', offset: offset + 4)
+      offset += 8
+      offset, res[:new_peer_id] = decode_uint16v(data, offset)
       res
     end
   end

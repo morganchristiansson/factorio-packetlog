@@ -34,7 +34,7 @@ class FactorioPacketTools
   # old threshold fired mid-gap. Note the watchdog has no resurrection
   # path — touch() never revives a disconnected record — so a false
   # positive sticks until rejoin/restart; keep headroom generous.
-  HEARTBEAT_TIMEOUT = 60.0
+  HEARTBEAT_TIMEOUT = 20.0
 
   # Lib files reloaded on Ctrl-C/SIGHUP (relative to lib/). `load` re-reads
   # each file (redefining classes); `require` would only load once.

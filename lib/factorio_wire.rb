@@ -30,6 +30,8 @@ module FactorioWire
   # Instance-level entry points, for `include`ers (the packet classes) — the
   # module-level pair below is `def self.`, not `module_function`, which
   # would quietly turn these into private methods.
+  # Same for the writers: an `extend`er (FactorioProtocol) writes packets
+  # with the very codec it decodes them with.
   def varint_at(data, at)
     FactorioWire.varint(data, at)
   end
@@ -48,6 +50,29 @@ module FactorioWire
     return [at + 1, head] unless head == ESCAPE
     return [nil, nil] if at + 5 > data.bytesize
     [at + 5, data.unpack1('V', offset: at + 1)]
+  end
+
+  # ── Writers ────────────────────────────────────────────────────────
+  # The mirror of the readers above: same escape value, same string shape
+  # (packet flavor — uint32v length, no terminator). Used by
+  # FactorioProtocol.build_* (lib/factorio_protocol/build.rb), which builds
+  # the client half of the protocol from the same primitives the decoders
+  # read it with — a packet we can construct is a packet we can parse.
+
+  # uint32v: one byte below 0xFF, else ESCAPE + a u32 LE.
+  def encode_uint32v(value)
+    value < ESCAPE ? [value].pack('C') : ESCAPE.chr + [value].pack('V')
+  end
+
+  # uint16v: one byte below 0xFF, else ESCAPE + a u16 LE. The packet
+  # protocol's 2-byte varint — an input action's type and player delta.
+  def encode_uint16v(value)
+    value < ESCAPE ? [value].pack('C') : ESCAPE.chr + [value].pack('v')
+  end
+
+  # [uint32v length][bytes], no terminator.
+  def encode_string(text)
+    encode_uint32v(text.bytesize) + text.b
   end
 
   # [length][bytes] at `at`.

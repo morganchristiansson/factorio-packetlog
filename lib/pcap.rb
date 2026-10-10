@@ -236,6 +236,8 @@ class PcapReader
                  when PCAPRUB::Pcap::DLT_NULL then 4
                  when PCAPRUB::Pcap::DLT_EN10MB then 14
                  when PCAPRUB::Pcap::DLT_LINUX_SLL then 16
+                 when 276 # DLT_LINUX_SLL2
+                   20
                  else 0
                  end
     pkt_num = 0

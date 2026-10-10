@@ -95,7 +95,7 @@ class TestFragmentedMessages < Minitest::Test
     assert_equal 11, parsed[:mods].size
     assert_equal %w[base AutoDeconstruct Better-TrainHorn custom-spawn-rates elevated-rails
                     flib no-wall-repair quality RateCalculator space-age], parsed[:mods].map(&:first).first(10)
-    assert_equal ['base', '0.2', 94_144_077, 112], parsed[:mods].first
+    assert_equal ['base', '2.0.77', 1_879_415_942], parsed[:mods].first
     assert parsed[:settings_truncated], 'the settings blob spans fragments 1..5'
   end
 

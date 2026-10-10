@@ -42,6 +42,7 @@ module FactorioProtocol
   13 => ["open_production_gui", 0],
   14 => ["stop_repair", nil],
   15 => ["cancel_new_blueprint", 0],
+  16 => ["close_blueprint_record", nil], # live-verified via /toggle-action-logging
   17 => ["copy_entity_settings", 0],
   18 => ["paste_entity_settings", 0],
   19 => ["destroy_opened_item", 0],
@@ -54,6 +55,8 @@ module FactorioProtocol
   29 => ["cycle_blueprint_book_backwards", 0],
   30 => ["cycle_quality_up", 1],
   31 => ["cycle_quality_down", 0],
+  32 => ["cycle_clipboard_forwards", nil], # live-verified via /toggle-action-logging
+  33 => ["cycle_clipboard_backwards", nil], # live-verified via /toggle-action-logging
   35 => ["toggle_enable_vehicle_logistics_while_moving", 0],
   36 => ["toggle_deconstruction_item_entity_filter_mode", 0],
   37 => ["toggle_deconstruction_item_tile_filter_mode", 0],
@@ -71,7 +74,9 @@ module FactorioProtocol
   50 => ["stop_drag_build", 0],
   51 => ["flush_opened_entity_fluid", 0],
   53 => ["add_logistic_section", 0],
+  54 => ["acknowledge_technology", nil], # live-verified via /toggle-action-logging
   55 => ["open_opened_entity_grid", 0],
+  56 => ["finished_but_continuing", nil], # live-verified via /toggle-action-logging
   58 => ["open_new_platform_button_from_rocket_silo", 0],
   59 => ["toggle_selected_entity", 0],
   60 => ["cheat", 0],
@@ -95,6 +100,7 @@ module FactorioProtocol
   79 => ["send_stack_to_trash", 0],
   80 => ["send_stacks_to_trash", 0],
   81 => ["inventory_transfer", 5],
+  82 => ["stop_movement_in_the_next_tick", nil], # live-verified via /toggle-action-logging
   83 => ["craft", 7],
   84 => ["wire_dragging", 8],
   85 => ["change_shooting_state", 9],
@@ -160,6 +166,7 @@ module FactorioProtocol
   150 => ["export_blueprint", nil],
   151 => ["import_blueprint", 16],
   152 => ["import_blueprints_filtered", 6],
+  153 => ["player_join_game", nil], # live-verified via /toggle-action-logging
   155 => ["cancel_deconstruct", 0],
   156 => ["cancel_upgrade", 5],
   157 => ["change_arithmetic_combinator_parameters", 0],
@@ -233,6 +240,7 @@ module FactorioProtocol
   230 => ["quick_bar_set_slot", 9],
   231 => ["quick_bar_pick_slot", 0],
   232 => ["quick_bar_set_selected_page", nil],
+  233 => ["player_leave_game", nil], # live-verified via /toggle-action-logging
   234 => ["map_editor_action", 1],
   237 => ["change_multiplayer_config", 1],
   238 => ["admin_action", 0],

@@ -228,6 +228,9 @@ class TestDiscord < Minitest::Test
     assert_equal 'Hivemind: done!', bot.sent.last[:content]
     bridge.on_chat(:discord, 'Alice', 'echo?')          # → skipped (own source; no echo loop)
     assert_equal 2, bot.sent.size
+    bridge.on_chat(:factorio, 'Eve', '/shout hello?')     # → skipped (commands stay in game)
+    bridge.on_chat(:factorio, 'Mallory', '/w bob secret') # → skipped (whispers stay private)
+    assert_equal 2, bot.sent.size
   end
 
   def test_handler_registered_at_construction

@@ -116,10 +116,12 @@ class Discord
   # Chat relay subscriber (reached via @plugins.emit(:on_chat)). Forwards
   # in-game chat and Hivemind replies to the Discord channel; skips its own
   # :discord input (a Discord message that triggered this must not be echoed
-  # back to the channel — that's the loop guard). Runs on the bridge's worker,
-  # so the blocking send_message stays off the emitter's thread.
+  # back to the channel — that's the loop guard) and ALL slash-prefixed
+  # lines (commands and whispers stay in the game). Runs on the bridge's
+  # worker, so the blocking send_message stays off the emitter's thread.
   def on_chat(source, author, message, player_id = nil)
     return if source == :discord
+    return if message.to_s.start_with?('/')
     enqueue(:forward_chat, author, message)
   end
 

@@ -286,16 +286,27 @@ class TestHivemindAgent < Minitest::Test
   end
 
 
-  # Slash-prefixed lines are commands, not chat: they must not reach the
-  # console queue (context) and must not trigger the agent either.
-  def test_on_chat_excludes_slash_commands
+  # Commands are visible context (and can trigger like any mention);
+  # whispers (/w, /whisper) are private DMs: never queued, never triggering.
+  def test_on_chat_sees_commands_but_not_whispers
+    @agent.stubs(:handle).returns(false)
     @agent.handle_chat('alice', '/shout build the mall')
     @agent.handle_chat('bob', '/admin')
-    @agent.handle_chat('carol', ' /give iron-plate')
-    assert_empty @agent.instance_variable_get(:@console_queue)
+    history = @agent.instance_variable_get(:@console_queue)
+    assert_equal [['alice', '/shout build the mall'], ['bob', '/admin']], history
 
-    triggered = @agent.handle_chat('dave', '/hivemind what do you see?')
-    refute triggered, 'slash commands must not trigger the agent'
+    @agent.handle_chat('carol', '/w bob secret plans')
+    @agent.handle_chat('dave', '/whisper alice meet at spawn')
+    @agent.handle_chat('fred', ' /w bob sneaky leading space')
+    assert_equal 2, @agent.instance_variable_get(:@console_queue).size
+  end
+
+  def test_on_chat_whisper_never_triggers_but_command_can
+    @agent.stubs(:handle).returns(true)
+    assert @agent.handle_chat('dave', '/hivemind what do you see?'),
+           'a command mentioning hivemind triggers like any chat'
+    assert_nil @agent.handle_chat('carol', '/w hivemind tell me secrets'),
+               'whispers never trigger, even when they mention hivemind'
   end
 
 

@@ -536,12 +536,15 @@ class HivemindAgent
   # Slash-prefixed lines are COMMANDS, not chat — Factorio routes anything
   # starting with `/` to the command system (admin/teleport/permission
   # outputs, /shout echoes, etc.), and in-game chat can never begin with
-  # `/`. They're excluded entirely: never queued into the console context
-  # and never trigger the agent.
+  # `/`. Commands stay visible context (the agent should see what players
+  # do, and a "/hivemind ..." line even triggers it like any mention).
+  # WHISPERS (/w, /whisper) are the exception: private DMs, excluded
+  # entirely — never queued into the console context and never triggering
+  # the agent.
   def handle_chat(player, message, source: nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
-    return if message.start_with?('/')
+    return if message.start_with?('/w ', '/whisper ')
     append_history(player, message)
     handle(player, message, now: now)
   end

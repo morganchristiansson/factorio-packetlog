@@ -1035,14 +1035,17 @@ class TestServerMode < Minitest::Test
       # playing on the new save only ADDS to the base, live ticks grow with it
       attrs.connect('alice', 1_000)
       assert_equal 5_000 + 250, attrs.online_time_ticks('alice', 1_250)
-      # a leave inside the save is not a reset
-      backup.on_player_left('alice', 300)
+      # a leave inside the save is not a reset. The sniffer hands on_player_left
+      # the FULL total (this-save + the earlier-saves base); it strips the base,
+      # so feed it 5_000 (base) + 300 (this-save) like the live code does.
+      backup.on_player_left('alice', 5_000 + 300)
       assert_equal 5_000, backup.base_ticks('alice')
 
       # our own mirror can UNDERCOUNT a player we never seeded from RCON
       # (PlayerAttrs base 0), and a drop from it is not a reset — taking it
       # for one would invent play time. Only the game's number may lower it.
-      backup.on_player_left('alice', 12)
+      # 5_000 (base) + 12 (this-save the undercounting mirror sees).
+      backup.on_player_left('alice', 5_000 + 12)
       assert_equal 5_000, backup.base_ticks('alice'), 'a mirror number never invents time'
       roster[0][:online_time] = 0 # the new save is still detected, by RCON
       backup.on_start
@@ -1101,6 +1104,17 @@ class TestServerMode < Minitest::Test
                               online_time: 60)
       assert_equal 1, calls.size, 'no restore without a save change'
       assert_equal defaults, JSON.parse(File.read(path))['alice']['quickbar']
+
+      # she leaves and rejoins the SAME save: still no save change, still no
+      # restore. This is the regression the leave-only seen update caused —
+      # the base used to lift online_time_seen past the game's number, so every
+      # same-save reconnect then dropped under seen and restored. on_player_left
+      # now strips the base first, so the clock only drops at a real save change.
+      calls.clear
+      backup.on_player_left('alice', 5_000 + 60) # base + this-save, as the sniffer passes
+      backup.on_join_enriched('alice', 4, quickbar: defaults, color: [0.0, 0.3, 0.8, 1.0],
+                              online_time: 60) # same save: online_time didn't drop
+      assert_equal 0, calls.size, 'no restore on a same-save reconnect'
     end
   end
 

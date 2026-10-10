@@ -154,10 +154,22 @@ class PlayerBackup
   end
 
   # Player LEFT the game (clean quit in either direction, or the heartbeat
-  # watchdog) — the live total is already folded into PlayerAttrs, so the
-  # play time is what this save is worth, last chance to record it.
+  # watchdog) — the live total is already folded into PlayerAttrs, last
+  # chance to record what this save is worth.
+  #
+  # The sniffer hands us PlayerAttrs' FULL total: this-save ticks PLUS the
+  # earlier-saves base that PlayerBackup itself keeps and PlayerAttrs adds
+  # back on read. But `seen` tracks the GAME's own p.online_time — this-save
+  # only — so a drop under `seen` means the save restarted, not the base
+  # inflating the mirror. Stripping the base is what makes the leave value a
+  # this-save lower bound again (the assumption sync_times relies on):
+  # without it, a leave+rejoin of the SAME save looks like a drop (the base
+  # lifts `seen` past what the game reports) and the player's bar and colour
+  # get restored on every reconnect instead of only on the first join of a
+  # new save.
   def on_player_left(name, online_time_ticks)
-    sync_times([[name, online_time_ticks]], exact: false)
+    this_save = online_time_ticks.to_i - base_ticks(name)
+    sync_times([[name, this_save]], exact: false)
   end
 
   # Fold the game's live play times (name → ticks; a whole roster is fine)

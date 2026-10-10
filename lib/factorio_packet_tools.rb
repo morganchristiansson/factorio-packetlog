@@ -344,8 +344,9 @@ class FactorioPacketTools
   # their OWN workers (emit itself runs on the capture thread). Sources:
   # :factorio (player chat, from log_action), :discord, :hivemind (an agent
   # reply). Each feature self-skips its own source: discord skips :discord;
-  # translation skips :discord/:hivemind (the agent replies in English;
-  # Discord text is not re-translated); hivemind skips :hivemind (its replies
+  # translation translates :factorio in-game chat only (Discord text and
+  # Hivemind replies are never re-translated); hivemind skips :hivemind (its
+  # replies
   # are already in its conversation context). player_id is the packet's
   # 1-indexed game index (nil for non-Factorio sources): translation needs it
   # for its index-keyed relay, discord and the agent ignore it.

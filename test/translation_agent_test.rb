@@ -335,8 +335,8 @@ class TestTranslationAgent < Minitest::Test
     player_db = PlayerDatabase.new(nil)
     player_db[1] = {name: 'ivan', locale: 'ru'}
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
-    # :discord (don't re-translate Discord text) and :hivemind (the agent
-    # replies in English) are skipped: nil, and no relay command is sent.
+    # Only in-game (:factorio) chat is translated: nil for any other source,
+    # and no relay command is sent.
     assert_nil agent.on_chat(:discord, 'Alice', 'hi', 1)
     assert_nil agent.on_chat(:hivemind, 'Hivemind', 'done', 1)
     agent.close_events

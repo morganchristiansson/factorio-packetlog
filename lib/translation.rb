@@ -87,12 +87,12 @@ class TranslationAgent
 
   def on_chat(source, author, text, player_id = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     # Sync-light relay subscriber (reached via @plugins.emit(:on_chat)):
-    # in-game chat only — skip :discord (don't re-translate, avoid a loop) and
-    # :hivemind (the agent replies in English); defer the heavy argos+RCON
-    # relay to handle_chat on this agent's worker (emit is synchronous, on the
-    # capture thread). player_id is the packet's 1-indexed game index
-    # (nil for non-Factorio sources).
-    return if source == :discord || source == :hivemind
+    # in-game (:factorio) chat ONLY — Discord text and Hivemind replies
+    # (English) are never re-translated. player_id is the packet's 1-indexed
+    # game index, without which the per-player relay has no speaker to key
+    # on; defer the heavy argos+RCON relay to handle_chat on this agent's
+    # worker (emit is synchronous, on the capture thread).
+    return unless source == :factorio
     return unless player_id
     enqueue(:handle_chat, player_id, text, now: now)
   end

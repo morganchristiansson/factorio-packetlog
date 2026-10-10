@@ -22,6 +22,17 @@ require_relative '../lib/translation_mock'
 # the checked-in example, the way the hivemind tests do.
 TRANSLATION_TEST_CONFIG = File.expand_path('../config-translation.yaml.example', __dir__)
 
+# Lets tests inject the translation feature where the sniffer reaches it: it
+# is built by PluginSet now, so the /simulate console command and the
+# emit(:on_chat) bus go through @plugins[:translation], not a @translation_agent
+# ivar. The fake needs only what the sniffer calls on it.
+class PluginsDouble
+  def initialize(translation: nil) = @translation = translation
+  def [](name) = name == :translation ? @translation : nil
+  def enabled?(*) = false
+  def emit(*) = nil
+end
+
 class TestTranslationAgent < Minitest::Test
   def setup
     @agents = []
@@ -72,7 +83,7 @@ class TestTranslationAgent < Minitest::Test
   def test_simulate_command_and_locale_console
     sniffer = make_sniffer
     player_db = sniffer.instance_variable_get(:@player_db)
-    sniffer.instance_variable_set(:@translation_agent, make_agent(player_db: player_db))
+    sniffer.instance_variable_set(:@plugins, PluginsDouble.new(translation: make_agent(player_db: player_db)))
 
     simulate_output, simulate_error = capture_io do
       sniffer.handle_command(%q{/simulate StarBurtS ru "Zdravstvuyte"})
@@ -239,9 +250,9 @@ class TestTranslationAgent < Minitest::Test
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
 
     output, = capture_io do
-      result = agent.on_chat({ game_player: 1 }, 'привет')
+      result = agent.handle_chat(1, 'привет')
       assert_equal [true, 'привет'], result
-      agent.on_chat({ game_player: 3 }, 'hola que tal')
+      agent.handle_chat(3, 'hola que tal')
       assert_equal '[en] привет', agent.simulate_translation('ivan', 'ru', 'привет')
       agent.simulate_translation('pedro', 'pt-BR', 'olá')
     end
@@ -297,7 +308,7 @@ class TestTranslationAgent < Minitest::Test
     agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
     agent.instance_variable_set(:@translation_service, missing_pack)
 
-    capture_io { agent.on_chat({ game_player: 1 }, "привет\0\0") }
+    capture_io { agent.handle_chat(1, "привет\0\0") }
     assert_includes commands.first, '[2]="[ru>en] ivan:'
     refute_includes commands.first, '[3]='
     refute_includes commands.first, "\0"
@@ -313,9 +324,23 @@ class TestTranslationAgent < Minitest::Test
       roster: -> { [{ index: 1, name: 'ivan' }, { index: 2, name: 'bob' }, { index: 3, name: 'pierre' }] }
     )
 
-    capture_io { unsupported_agent.on_chat({ game_player: 1 }, 'привет') }
+    capture_io { unsupported_agent.handle_chat(1, 'привет') }
     assert_includes unsupported_commands.first, '[2]="[ru>en] ivan:'
     refute_includes unsupported_commands.first, '[3]='
+  end
+
+  def test_on_chat_skips_non_factorio_sources
+    roster = -> { [{ index: 1, name: 'ivan' }] }
+    rcon, commands = command_recorder
+    player_db = PlayerDatabase.new(nil)
+    player_db[1] = {name: 'ivan', locale: 'ru'}
+    agent = make_agent(rcon: rcon, player_db: player_db, roster: roster)
+    # :discord (don't re-translate Discord text) and :hivemind (the agent
+    # replies in English) are skipped: nil, and no relay command is sent.
+    assert_nil agent.on_chat(:discord, 'Alice', 'hi', 1)
+    assert_nil agent.on_chat(:hivemind, 'Hivemind', 'done', 1)
+    agent.close_events
+    assert_empty commands
   end
 
   def test_locale_override_persistence

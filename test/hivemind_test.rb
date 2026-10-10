@@ -16,6 +16,17 @@ class TestHivemindAgent < Minitest::Test
     @agent = make_agent
   end
 
+  # Hivemind is a plugin feature now: PluginSet builds HivemindAgent.new(owner)
+  # and a build that cannot serve (no RCON here; a missing key raises too, in
+  # the LLM wiring) is reported "[plugin] hivemind disabled" instead of
+  # half-alive. The kwargs path above is what tests use (owner = nil).
+  def test_needs_rcon_like_any_server_mode_feature
+    error = assert_raises(RuntimeError) do
+      HivemindAgent.new(player_db: PlayerDatabase.new(nil), config_file: HIVE_TEST_CONFIG)
+    end
+    assert_match(/needs RCON/, error.message)
+  end
+
   def test_hivemind_yaml_options_are_applied
     config = YAML.safe_load_file(HIVE_TEST_CONFIG)
     group = config['providers'].values.first
@@ -268,8 +279,8 @@ class TestHivemindAgent < Minitest::Test
     # mocha, not define_singleton_method: the stub is reverted at teardown, so
     # an override cannot outlive the case that wanted it.
     @agent.stubs(:handle).returns(false)
-    @agent.on_chat('alice', 'hey hivemind')
-    @agent.on_chat('bob', 'nice base')
+    @agent.handle_chat('alice', 'hey hivemind')
+    @agent.handle_chat('bob', 'nice base')
     history = @agent.instance_variable_get(:@console_queue)
     assert_equal [['alice', 'hey hivemind'], ['bob', 'nice base']], history
   end
@@ -278,12 +289,12 @@ class TestHivemindAgent < Minitest::Test
   # Slash-prefixed lines are commands, not chat: they must not reach the
   # console queue (context) and must not trigger the agent either.
   def test_on_chat_excludes_slash_commands
-    @agent.on_chat('alice', '/shout build the mall')
-    @agent.on_chat('bob', '/admin')
-    @agent.on_chat('carol', ' /give iron-plate')
+    @agent.handle_chat('alice', '/shout build the mall')
+    @agent.handle_chat('bob', '/admin')
+    @agent.handle_chat('carol', ' /give iron-plate')
     assert_empty @agent.instance_variable_get(:@console_queue)
 
-    triggered = @agent.on_chat('dave', '/hivemind what do you see?')
+    triggered = @agent.handle_chat('dave', '/hivemind what do you see?')
     refute triggered, 'slash commands must not trigger the agent'
   end
 
@@ -325,9 +336,23 @@ class TestHivemindAgent < Minitest::Test
   end
 
 
+  # on_chat is the sync-light emit subscriber now (the sniffer reaches it via
+  # @plugins.emit(:on_chat)): it returns nil for its own replies (:hivemind —
+  # already in context) and defers everything else, INCLUDING :discord chat
+  # (Discord users address the agent), to handle_chat on the worker —
+  # drained by close_events, which is also how last_trigger lands.
+  def test_on_chat_is_sync_light_and_skips_hivemind_source
+    assert_nil @agent.on_chat(:hivemind, 'Hivemind', 'hi there')
+    @agent.on_chat(:discord, 'Alice', 'hivemind help', 0)
+    @agent.on_chat(:factorio, 'alice', 'hivemind hello', 4)
+    @agent.close_events
+    # FIFO: Alice's Discord message, then alice's in-game message wins.
+    assert_equal ['alice', 'hivemind hello'], @agent.last_trigger
+  end
+
   def test_on_chat_cleans_binary_flagged_player_name
     @agent.stubs(:handle).returns(false)
-    @agent.on_chat("sévérin".b, 'hey hivemind')
+    @agent.handle_chat("sévérin".b, 'hey hivemind')
     player, _msg = @agent.instance_variable_get(:@console_queue).last
     assert_equal Encoding::UTF_8, player.encoding
     assert_equal 'sévérin', player
@@ -355,8 +380,8 @@ class TestHivemindAgent < Minitest::Test
   def test_invalid_utf8_chat_does_not_crash
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stubs(:handle).returns(false)
-    agent.on_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
-    agent.on_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
+    agent.handle_chat('alice', "hivemind ".b + "\xFF\xFE".b + "testing".b)            # binary-flagged
+    agent.handle_chat('bob', ("hi".b + "\xFF".b).force_encoding('UTF-8'))              # utf8-flagged invalid
     queue = agent.instance_variable_get(:@console_queue)
     assert queue.all? { |_, m| m.valid_encoding? }, 'queued messages are valid UTF-8'
     assert_includes queue.first[1], 'hivemind'
@@ -388,8 +413,8 @@ class TestHivemindAgent < Minitest::Test
 
   def test_turn_prompt_includes_snapshot_and_console
     @agent.stubs(:greet_join)
-    @agent.on_player_event(:joined, 'alice')
-    @agent.on_player_event(:left, 'bob')
+    @agent.handle_player_event(:joined, 'alice')
+    @agent.handle_player_event(:left, 'bob')
     prompt = @agent.send(:turn_prompt, 'INSTRUCTION')
     assert_includes prompt, 'INSTRUCTION'
     assert_includes prompt, 'alice joined the game'
@@ -447,8 +472,8 @@ class TestHivemindAgent < Minitest::Test
 
   def test_on_player_event_appends_join_and_leave
     @agent.stubs(:greet_join)
-    @agent.on_player_event(:joined, 'alice')
-    @agent.on_player_event(:left, 'bob')
+    @agent.handle_player_event(:joined, 'alice')
+    @agent.handle_player_event(:left, 'bob')
     history = @agent.instance_variable_get(:@console_queue)
     # join event, then the leave (greeting is stubbed to send nothing)
     assert_equal [nil, 'alice joined the game'], history[0]
@@ -467,7 +492,7 @@ class TestHivemindAgent < Minitest::Test
     rcon.stubs(:player_attributes).returns(rows)
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     agent.stubs(:greet_join)
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     assert_equal [nil, 'alice joined the game (2d3h played)'],
                  agent.instance_variable_get(:@console_queue)[0]
   end
@@ -478,7 +503,7 @@ class TestHivemindAgent < Minitest::Test
   def test_on_player_event_playtime_absent_without_rcon_attrs
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stubs(:greet_join)
-    agent.on_player_event(:joined, 'bob')
+    agent.handle_player_event(:joined, 'bob')
     assert_equal [nil, 'bob joined the game'],
                  agent.instance_variable_get(:@console_queue)[0]
   end
@@ -496,13 +521,13 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_on_player_event_ignores_blank_name
-    @agent.on_player_event(:joined, '  ')
+    @agent.handle_player_event(:joined, '  ')
     assert_empty @agent.instance_variable_get(:@console_queue)
   end
 
 
   def test_ask_llm_includes_new_console_lines
-    @agent.on_chat('bob', 'nice rail setup')
+    @agent.handle_chat('bob', 'nice rail setup')
     prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind what is the bus?') }
     assert_includes prompt, 'bob: nice rail setup'
     assert_includes prompt, 'In-game chat from alice: hivemind what is the bus?'
@@ -510,9 +535,9 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_ask_llm_does_not_repeat_previous_prompt_lines
-    @agent.on_chat('bob', 'nice rail setup')
+    @agent.handle_chat('bob', 'nice rail setup')
     capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind first?') }
-    @agent.on_chat('carol', 'anyone have iron?')
+    @agent.handle_chat('carol', 'anyone have iron?')
     prompt2 = capture_prompt(@agent) { @agent.send(:ask_llm, 'alice', 'hivemind second?') }
     assert_includes prompt2, 'carol: anyone have iron?'
     refute_includes prompt2, 'nice rail setup'   # already sent in the first prompt
@@ -529,7 +554,7 @@ class TestHivemindAgent < Minitest::Test
 
 
   def test_unread_console_excludes_hivemind_replies
-    @agent.on_chat('alice', 'hey')
+    @agent.handle_chat('alice', 'hey')
     @agent.send(:append_history, 'hivemind', 'greetings')
     lines = @agent.send(:unread_console)
     assert_includes lines, 'alice: hey'
@@ -575,7 +600,7 @@ class TestHivemindAgent < Minitest::Test
 
   def test_ask_llm_includes_events
     @agent.stubs(:greet_join)
-    @agent.on_player_event(:joined, 'alice')
+    @agent.handle_player_event(:joined, 'alice')
     prompt = capture_prompt(@agent) { @agent.send(:ask_llm, 'bob', 'hivemind hi') }
     assert_includes prompt, 'alice joined the game'
   end
@@ -588,7 +613,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome, alice. The belts are quiet without you.')
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2  # greeting runs off-thread, inside the stub
     assert_includes seen_prompt, 'alice just joined'
     assert_includes rcon.sent, 'Hivemind> Welcome, alice. The belts are quiet without you.'
@@ -605,7 +630,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome, alice.')
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2
     assert_includes seen_prompt, 'alice just joined'
     assert_includes seen_prompt, 'they have played 2d3h in total'
@@ -620,7 +645,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome, alice.')
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2
     refute_includes seen_prompt, ' they have played '
   end
@@ -629,7 +654,7 @@ class TestHivemindAgent < Minitest::Test
   def test_join_greeting_recorded_in_history
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.stubs(:complete).returns('Welcome, alice. The factory is watching.')
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2
     assert_equal ['hivemind', 'Welcome, alice. The factory is watching.'],
                  agent.instance_variable_get(:@console_queue).last
@@ -641,7 +666,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     agent.stubs(:complete).returns('hi')
     agent.instance_variable_set(:@last_greet, Process.clock_gettime(Process::CLOCK_MONOTONIC))
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2
     assert_empty rcon.sent
   end
@@ -650,7 +675,7 @@ class TestHivemindAgent < Minitest::Test
   def test_leave_does_not_greet
     rcon = FakeRcon.new
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
-    agent.on_player_event(:left, 'alice')
+    agent.handle_player_event(:left, 'alice')
     assert_empty rcon.sent
   end
 
@@ -664,7 +689,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asked = nil
     agent.stubs(:complete).with { |p| asked = p; true }.returns('')
-    agent.on_chat('alice', 'good bot')
+    agent.handle_chat('alice', 'good bot')
     sleep 0.2  # LLM call runs off-thread, inside the stub
     refute_nil asked, 'good bot should reach the LLM'
     assert_includes asked, 'In-game chat from alice: good bot'
@@ -676,7 +701,7 @@ class TestHivemindAgent < Minitest::Test
     # Each variant pings (rate limiter collapses rapid-fire to one) — the
     # cardinality IS the assertion, so let mocha verify it at teardown.
     agent.expects(:complete).once.returns('')
-    ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.on_chat('bob', m); sleep 0.2 }
+    ['Good bot!', 'goodbot', 'GOOD BOT'].each { |m| agent.handle_chat('bob', m); sleep 0.2 }
   end
 
 
@@ -690,8 +715,8 @@ class TestHivemindAgent < Minitest::Test
     # The slow-LLM stub sleeps INSIDE the stub block: the worker threads
     # must still see it when they call in.
     agent.stubs(:complete).with { |p| asked << p; sleep 0.05; true }.returns('')
-    agent.on_chat('alice', 'hivemind hi')
-    agent.on_chat('bob', 'hivemind hello')
+    agent.handle_chat('alice', 'hivemind hi')
+    agent.handle_chat('bob', 'hivemind hello')
     sleep 0.4
     assert_equal 2, asked.size, 'different players each get a turn'
     assert_includes asked.join, 'In-game chat from alice: hivemind hi'
@@ -701,8 +726,8 @@ class TestHivemindAgent < Minitest::Test
     # same player again within the window is still collapsed (anti-spam),
     # using a fresh player so the first trigger is outside any old window.
     agent.expects(:complete).once.returns('')
-    agent.on_chat('carol', 'hivemind again')
-    agent.on_chat('carol', 'hivemind stop')
+    agent.handle_chat('carol', 'hivemind again')
+    agent.handle_chat('carol', 'hivemind stop')
     sleep 0.4
   end
 
@@ -781,7 +806,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     asked = nil
     agent.stubs(:complete).with { |p| asked = p; true }.returns('')
-    agent.on_chat('alice', 'wdyt? hm')
+    agent.handle_chat('alice', 'wdyt? hm')
     sleep 0.2
     refute_nil asked, 'standalone "hm" should reach the LLM'
   end
@@ -790,7 +815,7 @@ class TestHivemindAgent < Minitest::Test
   def test_shmoose_does_not_trigger
     agent = new_hive_agent(rcon: FakeRcon.new, memory_dir: false)
     agent.expects(:complete).never # "shmoose" must not page the agent
-    agent.on_chat('alice', 'shmoose is back')
+    agent.handle_chat('alice', 'shmoose is back')
     sleep 0.2
   end
 
@@ -801,7 +826,7 @@ class TestHivemindAgent < Minitest::Test
       agent.instance_variable_get(:@memory_store).write_key('alice', 'alice once nuked the bus on purpose')
       seen_prompt = nil
       agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome.')
-      agent.on_player_event(:joined, 'alice')
+      agent.handle_player_event(:joined, 'alice')
       sleep 0.2
       assert_includes seen_prompt, 'alice just joined'
       assert_includes seen_prompt, '=== memory of alice ==='
@@ -817,7 +842,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome.')
-    agent.on_player_event(:joined, 'alice')
+    agent.handle_player_event(:joined, 'alice')
     sleep 0.2
     assert_includes seen_prompt, 'they have played 2d3h in total and are an admin'
   end
@@ -830,7 +855,7 @@ class TestHivemindAgent < Minitest::Test
     agent = new_hive_agent(rcon: rcon, memory_dir: false)
     seen_prompt = nil
     agent.stubs(:complete).with { |prompt| seen_prompt = prompt; true }.returns('Welcome.')
-    agent.on_player_event(:joined, 'bob')
+    agent.handle_player_event(:joined, 'bob')
     sleep 0.2
     assert_includes seen_prompt, 'they have played 2m in total and are not an admin'
   end

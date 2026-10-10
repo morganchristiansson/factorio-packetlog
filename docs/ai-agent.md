@@ -394,9 +394,9 @@ running across reloads (methods resolve against the reloaded classes) and
 need no cleanup.
 
 On hot reload the sniffer re-points the agent's providers and calls
-`@agent.ensure_followup_scheduler` / `ensure_log_watcher` for the plugins
-that are on (`followups`, `logwatcher` — `reload_code!` revives a thread
-that died).
+`@plugins[:hivemind].ensure_followup_scheduler` / `ensure_log_watcher` for
+the plugins that are on (`followups`, `logwatcher` — `reload_code!` revives
+a thread that died).
 Hot reload swaps CODE, not object shape — the agent keeps its boot-time
 ivars. Changes that add/remove instance state need a full restart;
 method/tool/prompt changes hot-reload fine. `hivemind.rb` is re-`load`ed

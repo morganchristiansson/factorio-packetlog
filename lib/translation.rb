@@ -36,9 +36,11 @@ class TranslationAgent
   # here and Lua just prints to the computed indexes.
   # google_api_key/argos_path/backend/config_file are injection points for
   # tests (and the key for ops); everything else comes from the config file.
-  def initialize(rcon:, player_db:, backend: nil, google_api_key: nil, roster: nil,
+  def initialize(owner = nil, rcon: nil, player_db: nil, backend: nil, google_api_key: nil, roster: nil,
                  config_file: CONFIG_FILE, argos_path: nil)
-    # config-translation.yaml is the source; the kwargs exist for tests.
+    # owner (the sniffer) provides rcon/player_db/roster; the kwargs stay for
+    # tests that build TranslationAgent directly. PluginSet builds
+    # TranslationAgent.new(owner); config-translation.yaml is the source.
     trans_config = self.class.load_config(config_file)
     backend = (backend || trans_config.fetch('backend')).to_sym
     # Google key for the hybrid/google backend. Env wins (ops/CI
@@ -48,8 +50,8 @@ class TranslationAgent
     if (backend == :hybrid || backend == :google) && google_api_key.nil?
       google_api_key = ENV['GOOGLE_TRANSLATE_API_KEY'] || trans_config['google_api_key']
     end
-    @rcon = rcon
-    @player_db = player_db
+    @rcon = rcon || (owner&.rcon)
+    @player_db = player_db || (owner&.player_db)
     @backend = backend
     @google_api_key = google_api_key
     @enabled = !@rcon.nil? && !@player_db.nil?
@@ -60,7 +62,7 @@ class TranslationAgent
     @whitelist = trans_config.fetch('whitelist').map { |l| l.to_s.downcase }.to_set
     # Minimum interval between translations for the same player (anti-spam)
     @min_interval = trans_config.fetch('min_interval').to_f
-    @roster = roster
+    @roster = roster || -> { owner&.attrs&.roster_pairs || [] }
 
     # A backend we cannot actually run is a startup error, not a silent
     # no-translation agent: a Google backend with no key, an argos install
@@ -83,20 +85,27 @@ class TranslationAgent
   # google/hybrid without one can't call the API.
   def google_api_key? = !@google_api_key.to_s.empty?
 
-  # Called by sniffer for each incoming chat message
-  # act: the decoded action hash (has :game_player = 1-indexed game index, matching players-cache.json)
-  # message: decoded chat text
-  # Returns: [should_continue, message] — original message; relay handles per-reader translation
-  def on_chat(act, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+  def on_chat(source, author, text, player_id = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    # Sync-light relay subscriber (reached via @plugins.emit(:on_chat)):
+    # in-game chat only — skip :discord (don't re-translate, avoid a loop) and
+    # :hivemind (the agent replies in English); defer the heavy argos+RCON
+    # relay to handle_chat on this agent's worker (emit is synchronous, on the
+    # capture thread). player_id is the packet's 1-indexed game index
+    # (nil for non-Factorio sources).
+    return if source == :discord || source == :hivemind
+    return unless player_id
+    enqueue(:handle_chat, player_id, text, now: now)
+  end
+
+  # The heavy relay (argos + per-player Lua print), run on this agent's worker
+  # thread so the capture thread is never blocked. Body of the former on_chat,
+  # keyed by player_id (1-indexed game index, matching players-cache.json).
+  def handle_chat(player_id, message, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     return [true, nil] unless @enabled
     return [true, nil] if message.nil? || message.strip.empty?
     return [true, nil] if message.start_with?('/')  # Commands not translated
     message = message.delete("\0")  # packet padding/embedded NULs: argos + Lua reject them
     return [true, nil] if message.empty?
-
-    # Get player ID from action (1-indexed game_player matches players-cache.json)
-    player_id = act[:game_player]
-    return [true, nil] unless player_id
 
     # Look up player name from ID
     player = @player_db.lookup(player_id)

@@ -120,14 +120,13 @@ class HivemindAgent
 
   # Optional callback invoked with the clean text of every agent reply — both
   # the HivemindReply tool path (via on_sent) and the send_reply fallback. Set
-  # by the sniffer to echo replies back to a Discord bridge so Discord users
-  # see Hivemind answer them. Nil-safe (no bridge → no-op). Survives hot
-  # reloads: set once on the persistent agent object.
-  attr_writer :emit_chat
+  # by the sniffer. Nil-safe (no sniffer owner → no-op). Survives hot
+  # reloads: the owner is set once on the persistent agent object.
+  # (The reply path: @owner.publish_chat(:hivemind, 'Hivemind', text) —
+  # the same relay every chat feature publishes through.)
 
   # Packet-derived player attributes, database, and current-tick provider.
   attr_accessor :attrs, :player_db, :current_tick
-
   # The parsed config-hivemind.yaml (the agent and its plugins read their
   # keys from it with fetch — a missing key raises where it is read).
   # Reload-safe like the mutexes below: a hot-reloaded agent built by older
@@ -266,14 +265,21 @@ class HivemindAgent
   # sniffer_plugins: the SNIFFER's list (config.yaml `plugins:`) — the agent
   # consults it for the features it hooks (translation gates the
   # set_player_languages tool). Its OWN list is config-hivemind.yaml.
-  def initialize(rcon:, attrs:, current_tick:, player_db:, sniffer_plugins: [],
-                 memory_dir: nil, config_file: CONFIG_FILE, emit_chat: nil)
-    @emit_chat = emit_chat
-    @sniffer_plugins = sniffer_plugins.map { |n| n.to_s.to_sym } # the SNIFFER's list — see above
-    @attrs = attrs
-    @current_tick = current_tick
-    @player_db = player_db
-    @rcon = rcon
+  def initialize(owner = nil, rcon: nil, attrs: nil, current_tick: nil, player_db: nil,
+                 sniffer_plugins: nil, memory_dir: nil, config_file: CONFIG_FILE)
+    # A plugin FEATURE (built by PluginSet as HivemindAgent.new(owner)): the
+    # owner is the sniffer, which provides rcon/attrs/player_db and publishes
+    # replies through publish_chat. The kwargs stay for the tests that build
+    # the agent directly (no owner). Server-less runs raise here — the agent
+    # needs RCON for game.print replies and join queries.
+    @owner = owner
+    @rcon = rcon || owner&.rcon
+    raise 'HivemindAgent needs RCON (server mode) — game.print replies and join queries require it' unless @rcon
+
+    @sniffer_plugins = Array(sniffer_plugins).map { |n| n.to_s.to_sym }
+    @attrs = attrs || owner&.attrs
+    @current_tick = current_tick || -> { 0 }
+    @player_db = player_db || owner&.player_db
     # THIS OWNER'S FEATURES: the classes config-hivemind.yaml `plugins:`
     # names, each built with this agent. The agent drives them by name
     # (plugins[:followups].schedule(…)), so a feature that is not listed is
@@ -338,8 +344,8 @@ class HivemindAgent
 
     # ── LLM wiring. Every non-secret setting is required from
     #    config-hivemind.yaml; HIVE_API_KEY is the only environment secret.
-    #    Missing config/key or bad provider config raises; FactorioPacketTools
-    #    rescues and leaves @agent=nil.
+    #    Missing config/key or bad provider config raises; PluginSet#build
+    #    rescues and reports the feature disabled.
     hive_config = self.class.load_config(config_file)
     # Kept whole so a plugin reads its OWN keys (with fetch, at the point of
     # use) instead of the agent copying them out here.
@@ -512,11 +518,19 @@ class HivemindAgent
     "#{s[0...max]}…"
   end
 
-  # Feed a decoded chat message (player name, message text). Called by the
-  # sniffer from log_action for write_to_console actions. Returns true when
-  # a response was dispatched (trigger matched, rate limit passed).
-  # Player name AND message are cleaned: a Unicode name must not stay
-  # binary-flagged — interpolating it into the UTF-8 prompt raises
+  # Chat-relay subscriber (reached via @plugins.emit(:on_chat)). Sync-light:
+  # skip own replies and defer everything else to handle_chat on this
+  # agent's worker (emit runs on the capture thread; the LLM ask must not).
+  # player_id is ignored — the agent resolves player names itself.
+  def on_chat(source, author, text, player_id = nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    return if source == :hivemind  # own reply — already in context, don't duplicate
+    enqueue(:handle_chat, author, text, source: source, now: now)
+  end
+
+  # The heavy chat handler, on this agent's worker: queue the message into
+  # the console history and trigger the agent if it matches. Player name
+  # AND message are cleaned: a Unicode name must not stay binary-flagged —
+  # interpolating it into the UTF-8 prompt raises
   # Encoding::CompatibilityError inside turn_prompt.
   #
   # Slash-prefixed lines are COMMANDS, not chat — Factorio routes anything
@@ -524,8 +538,7 @@ class HivemindAgent
   # outputs, /shout echoes, etc.), and in-game chat can never begin with
   # `/`. They're excluded entirely: never queued into the console context
   # and never trigger the agent.
-  def on_chat(player, message, source: nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
-    return if source == :hivemind  # own reply — already in context, don't duplicate
+  def handle_chat(player, message, source: nil, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     player = clean_text(player)
     message = clean_text(message)  # invalid UTF-8 from the wire is safe here
     return if message.start_with?('/')
@@ -539,6 +552,13 @@ class HivemindAgent
   # ticks — formatted as days/hours like the context snapshot) and get an
   # LLM-generated personal greeting (see greet_join).
   def on_player_event(kind, player, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+    enqueue(:handle_player_event, kind, player, now: now)
+  end
+
+  # The heavy join/leave handler, on this agent's worker (the sniffer emits
+  # on_player_event on the bus; :joined runs an RCON attrs query and maybe a
+  # greeting LLM call, so it must not run on the capture thread).
+  def handle_player_event(kind, player, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
     name = clean_text(player)
     return if name.empty?
     case kind
@@ -616,7 +636,7 @@ class HivemindAgent
   # name, so this is idempotent and cheap.
   def register_tools(chat = @chat)
     return unless chat
-    chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text); @emit_chat&.call(:hivemind, 'Hivemind', text) }))
+    chat.with_tool(HivemindReply.new(rcon: @rcon, on_sent: ->(text) { append_history('hivemind', text); @owner&.publish_chat(:hivemind, 'Hivemind', text) }))
     chat.with_tool(RconQuery.new(rcon: @rcon)) if defined?(RconQuery)
     # The state-changing tool is a feature, not a constant: with `tags` out of
     # config-hivemind.yaml's list the file is never required and the model is
@@ -1239,7 +1259,7 @@ class HivemindAgent
   def send_reply(text)
     return if text.nil? || text.empty?
     append_history('hivemind', text)
-    @emit_chat&.call(:hivemind, 'Hivemind', text)
+    @owner&.publish_chat(:hivemind, 'Hivemind', text)
     puts "#{Time.now.strftime('%H:%M:%S')}  [hivemind] → #{text}"
     @rcon.say("#{HivemindReply::REPLY_PREFIX}#{text}")
   end

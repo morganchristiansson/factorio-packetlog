@@ -20,39 +20,66 @@ class TestAgentEvents < Minitest::Test
     def fail_event = raise('expected test error')
   end
 
-  def test_blocked_agents_do_not_block_packets_and_workers_preserve_fifo
-    hive = Recorder.new
-    translation = Recorder.new
-    entered, release = Queue.new, Queue.new
-    translation.define_singleton_method(:on_chat) do |*args, **kwargs|
-      entered << true
-      release.pop
-      @events << args
+  # The sniffer's PluginSet dispatches the emit(:on_chat) bus to features;
+  # this fake does the same for the injected features (a real PluginSet
+  # can't build the real classes here — the feature configs are absent).
+  class PluginsDouble
+    def initialize(translation: nil, hivemind: nil)
+      @translation = translation
+      @hivemind = hivemind
     end
+    def [](name) = name == :translation ? @translation : (name == :hivemind ? @hivemind : nil)
+    def emit(event, *args)
+      [@translation, @hivemind].compact.each { |f| f.public_send(event, *args) if f.respond_to?(event) }
+    end
+  end
+
+  def test_blocked_agents_do_not_block_packets_and_workers_preserve_fifo
+    # Both chat features (translation + hivemind) ride the same emit(:on_chat)
+    # bus. Each on_chat is SYNC-LIGHT (emit runs on the capture thread): it
+    # records the dispatch args and defers the blocking relay to handle_chat
+    # on ITS OWN worker — so a blocked feature never blocks the capture
+    # thread, and each worker preserves FIFO.
+    features = [Recorder.new, Recorder.new]
+    entered, release = Queue.new, Queue.new
+    features.each do |feature|
+      feature.define_singleton_method(:on_chat) do |source, author, text, player_id = nil|
+        @events << [:emit, source, author, text, player_id]
+        enqueue(:handle_chat, author, text) if source == :factorio
+      end
+      feature.define_singleton_method(:handle_chat) do |*|
+        entered << true
+        release.pop
+        @events << [:handle]
+      end
+    end
+    translation, hivemind = features
     Dir.mktmpdir do |dir|
       sniffer = FactorioPacketTools.new({player_db: nil}, pcap_writer: PcapWriter.new("#{dir}/capture.pcap"))
-      sniffer.instance_variable_set(:@agent, hive)
-      sniffer.instance_variable_set(:@translation_agent, translation)
+      sniffer.instance_variable_set(:@plugins, PluginsDouble.new(translation: translation, hivemind: hivemind))
       action = {name: 'write_to_console', game_player: 1, type: 1, data: "\x01\x02hi".b}
       capture_io do
         Timeout.timeout(1) do
           sniffer.send(:log_action, Time.now.to_f, action, false)
-          entered.pop
+          2.times { entered.pop }  # both features' first handle_chat in flight (blocked)
           sniffer.send(:log_action, Time.now.to_f, action, false)
-          hive.close_events
         end
-        assert_equal [['Player_1', 'hi'], ['Player_1', 'hi']], hive.events
-        assert_empty translation.events
-        2.times { release << true }
+        # emit reached BOTH sync-light subscribers with the relay args
+        expected = [[:emit, :factorio, 'Player_1', 'hi', 1], [:emit, :factorio, 'Player_1', 'hi', 1]]
+        assert_equal expected, translation.events.select { |e| e.first == :emit }
+        assert_equal expected, hivemind.events.select { |e| e.first == :emit }
+        4.times { release << true }
         translation.close_events
-        assert_equal 2, translation.events.size
+        hivemind.close_events
+        # handle_chat preserved FIFO on each feature's own worker
+        assert_equal [[:handle], [:handle]], translation.events.select { |e| e.first == :handle }
+        assert_equal [[:handle], [:handle]], hivemind.events.select { |e| e.first == :handle }
         sniffer.finish
       end
     end
   ensure
-    2.times { release << true } if release
-    hive&.close_events
-    translation&.close_events
+    4.times { release << true } if release
+    Array(features).each(&:close_events)
   end
 
   def test_legacy_agent_without_queue_self_heals_and_never_crashes_shutdown

@@ -14,7 +14,7 @@ require_relative 'agent_events'
 # on its own thread (Discordrb::Bot#run(:async)) parallel to the sniffer's
 # capture loop — the same background-thread pattern translation/hivemind use.
 #
-# A real plugin FEATURE (not a host object): PluginSet builds Discord.new(owner)
+# A plugin FEATURE: PluginSet builds Discord.new(owner)
 # via the `plugins:` list. The sniffer reaches this object with the chat relay
 # (`owner.publish_chat`) and reads rcon/player_db from `owner` — so the bridge
 # holds no agent ref and there is no reply_callback bolt-on. It enters the
@@ -118,7 +118,7 @@ class Discord
   # :discord input (a Discord message that triggered this must not be echoed
   # back to the channel — that's the loop guard). Runs on the bridge's worker,
   # so the blocking send_message stays off the emitter's thread.
-  def on_chat(source, author, message)
+  def on_chat(source, author, message, player_id = nil)
     return if source == :discord
     enqueue(:forward_chat, author, message)
   end

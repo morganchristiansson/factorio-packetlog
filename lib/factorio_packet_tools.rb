@@ -49,12 +49,6 @@ class FactorioPacketTools
     factorio_protocol/packets/connection_packets
   ].freeze
 
-  # The plugin names whose objects this sniffer builds itself rather than
-  # receiving events (lib/hivemind.rb, lib/translation.rb).
-  # They stay in the list for their files (hot reload), not as features.
-  # (discord is a real plugin feature now — built by PluginSet.)
-  HOST_OBJECTS = %i[hivemind translation].freeze
-
   # Seconds between two Ctrl-C/SIGHUP presses that count as "quit".
   # Monotonic time, so wall-clock changes (NTP, manual) don't matter.
   QUIT_WINDOW = 5
@@ -180,12 +174,12 @@ class FactorioPacketTools
     # this host drives, not features it emits to. MODE-INDEPENDENT and
     # outside any mode block: the packet path emits on_player_color in
     # every mode (pcap replay included), so @plugins must always exist.
-    # `hivemind` and `translation` are in the list so their CODE is hot-
-    # reloaded, but they are OBJECTS this sniffer constructs (see below), not
-    # features it dispatches events to — building them would warn "no feature
-    # class" for each on the first emit.
+    # Every listed name is a feature: PluginSet builds it lazily on the
+    # first event/access. Hivemind's sniffer-specific bits — its live tick
+    # provider and the sniffer's own plugin list (for the tool gate) — are
+    # handed down as the feature's constructor kwargs via the args: slot.
     listed = Array(options[:plugins]).map { |n| n.to_s.to_sym }
-    @plugins = Plugins::PluginSet.new(listed, self, dispatch: listed - HOST_OBJECTS)
+    @plugins = Plugins::PluginSet.new(listed, self, args: {hivemind: {current_tick: -> { @game_tick }, sniffer_plugins: options[:plugins]}})
     # Server mode: this host IS the game server. Classify packet direction
     # by comparing src/dst against our own IPs and analyze ONLY incoming
     # (client→server) traffic — the outgoing direction is a broadcast of
@@ -242,39 +236,24 @@ class FactorioPacketTools
       # survives hot reloads with the instance). Main action types are
       # version-stable and need no switch — only segments follow
       # defines.input_action.
-      # Optional features: both objects are plain ivars — hot reload swaps
-      # the CODE under this object, not the object itself, so there is
-      # nothing to carry over or re-point.
-      @agent = nil
-      @translation_agent = nil
-
-      # No @discord ivar: it's a plugin feature now, reached via
-      # @plugins[:discord] + on_chat. (See the discord block below.)
+      # Optional features: plugin FEATURES in @plugins (built lazily by
+      # PluginSet), so hot reload swaps the CODE under the same objects and
+      # there are no feature ivars to carry over or re-point.
       # Hivemind AI agent: reads packet-decoded chat and answers players who
       # say "hivemind". Needs the `hivemind` plugin (config.yaml `plugins:`)
-      # AND a key for its startup model, which the entry point checks into
-      # options[:ai_agent]. Context comes from the packet-derived
-      # @attrs cache (seeded from RCON at startup, maintained by
-      # packets); online players and stats are cached. Player admin is
-      # stored in PlayerDatabase (players-cache.json); targeted RCON
-      # attrs lookups happen once for newly joined players only.
-      if @plugins.enabled?(:hivemind) && options[:ai_agent]
-        if @rcon
-          begin
-            @agent = HivemindAgent.new(rcon: @rcon, attrs: @attrs,
-                                        current_tick: -> { @game_tick },
-                                        player_db: @player_db,
-                                        sniffer_plugins: options[:plugins],
-                                        emit_chat: ->(source, author, text) { publish_chat(source, author, text) })
-            @agent.plugins[:followups]&.ensure_followup_scheduler
-            @agent.plugins[:logwatcher]&.ensure_log_watcher(ServerDetect.log_path)
-            puts "[hivemind] AI agent online — answering chat for \"#{@agent.triggers.join(', ')}\" (model #{@agent.model})"
-          rescue => e
-            warn "[hivemind] AI agent disabled: #{e.message}"
-            @agent = nil
-          end
-        else
-          warn '[hivemind] AI agent auto-enabled (server mode) but RCON is unavailable (--no-rcon?); agent disabled'
+      # AND server mode with RCON plus a key for its startup model — the
+      # constructor enforces those (missing → "[plugin] hivemind disabled"
+      # warn; nothing builds), like any feature. Context comes from the
+      # packet-derived @attrs cache (seeded from RCON at startup, maintained
+      # by packets); online players and stats are cached. Player admin is
+      # stored in PlayerDatabase (players-cache.json); targeted RCON attrs
+      # lookups happen once for newly joined players only.
+      if @plugins.enabled?(:hivemind) && @rcon
+        hivemind = @plugins[:hivemind]
+        if hivemind
+          hivemind.plugins[:followups]&.ensure_followup_scheduler
+          hivemind.plugins[:logwatcher]&.ensure_log_watcher(ServerDetect.log_path)
+          puts "[hivemind] AI agent online — answering chat for \"#{hivemind.triggers.join(', ')}\" (model #{hivemind.model})"
         end
       end
 
@@ -283,17 +262,13 @@ class FactorioPacketTools
       # Backend and Google API key come from config-translation.yaml
       # (`google_api_key:`) with the env overriding it.
       if @plugins.enabled?(:translation) && @rcon
-        begin
-          @translation_agent = TranslationAgent.new(rcon: @rcon, player_db: @player_db, roster: -> { @attrs.roster_pairs })
-          backend = @translation_agent.backend
-          if [:hybrid, :google].include?(backend) && @translation_agent.google_api_key?
+        if (t = @plugins[:translation])
+          backend = t&.backend
+          if [:hybrid, :google].include?(backend) && t&.google_api_key?
             puts "[translate] Translation agent online — auto-translating foreign player chat (hybrid: argos + google cloud fallback)"
           else
             puts "[translate] Translation agent online — auto-translating foreign player chat (#{backend} backend)"
           end
-        rescue => e
-          warn "[translate] Translation agent disabled: #{e.message}"
-          @translation_agent = nil
         end
       end
 
@@ -363,19 +338,19 @@ class FactorioPacketTools
     @plugins.emit(:on_player_color, name, rgba)
   end
 
-  # Chat relay hub: the single chat event both the discord plugin and the
-  # Hivemind agent are reached by. publish_chat fans :on_chat to plugin
-  # features (discord — via @plugins.emit) and to the sniffer's host object
-  # (hivemind). Translation is fed directly (it needs packet-only game_player,
-  # so it's not on the relay). Sources: :factorio (player chat, from
-  # log_action), :discord, :hivemind (an agent reply). The agent's on_chat is
-  # source-aware (source: kwarg, default nil) so it self-skips :hivemind;
-  # discord skips :discord on_chat. forward_chat runs off-thread on each
-  # subscriber's worker.
-  def publish_chat(source, author, text)
-    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @plugins.emit(:on_chat, source, author, text)
-    @agent&.enqueue(:on_chat, author, text, source: source, now: now) if @agent
+  # Chat relay hub: the single chat event every chat feature is reached by.
+  # publish_chat fans :on_chat to the plugin features — discord, translation
+  # and hivemind — all sync-light on_chat that enqueue their blocking work to
+  # their OWN workers (emit itself runs on the capture thread). Sources:
+  # :factorio (player chat, from log_action), :discord, :hivemind (an agent
+  # reply). Each feature self-skips its own source: discord skips :discord;
+  # translation skips :discord/:hivemind (the agent replies in English;
+  # Discord text is not re-translated); hivemind skips :hivemind (its replies
+  # are already in its conversation context). player_id is the packet's
+  # 1-indexed game index (nil for non-Factorio sources): translation needs it
+  # for its index-keyed relay, discord and the agent ignore it.
+  def publish_chat(source, author, text, player_id: nil)
+    @plugins.emit(:on_chat, source, author, text, player_id)
     nil
   end
 
@@ -453,8 +428,8 @@ class FactorioPacketTools
   # Memory is NOT distilled here — compaction is manual only (`/compact`).
   def finish
     @map_download&.stop
-    @agent&.close_events
-    @translation_agent&.close_events
+    @plugins[:hivemind]&.close_events
+    @plugins[:translation]&.close_events
     @plugins[:discord]&.close
     print_summary
     @pcap_writer&.close
@@ -493,15 +468,16 @@ class FactorioPacketTools
       $VERBOSE = old_verbose
     end
     select_protocol_version
-    @agent&.plugins&.[](:followups)&.ensure_followup_scheduler
-    @agent&.plugins&.[](:logwatcher)&.ensure_log_watcher(ServerDetect.log_path)
-    # Hot reload swaps code under the same agent object; re-point
+    hivemind = @plugins[:hivemind]
+    hivemind&.plugins&.[](:followups)&.ensure_followup_scheduler
+    hivemind&.plugins&.[](:logwatcher)&.ensure_log_watcher(ServerDetect.log_path)
+    # Hot reload swaps code under the same hivemind object; re-point
     # the cached attrs/tick provider in case this is the first
     # reload after the agent was constructed (or libs changed
     # the ivar shape).
-    @agent&.attrs = @attrs
-    @agent&.current_tick = -> { @game_tick }
-    @agent.player_db = @player_db if @agent
+    hivemind&.attrs = @attrs
+    hivemind&.current_tick = -> { @game_tick }
+    hivemind.player_db = @player_db if hivemind
     # Agent event queues/workers persist on the same objects across reloads.
   end
 
@@ -511,7 +487,7 @@ class FactorioPacketTools
   # files, and the loaded hivemind plugins' files. Absolute paths come from
   # Plugins (a feature may live outside lib/), bare names are lib/ files.
   def reload_files
-    (RELOADABLE_LIBS + @plugins.files + [@agent].compact.flat_map(&:plugin_files)).uniq
+    (RELOADABLE_LIBS + @plugins.files + [@plugins[:hivemind]].compact.flat_map(&:plugin_files)).uniq
   end
 
   # Whether to persist this packet to the capture file. `capture: full`
@@ -700,7 +676,7 @@ class FactorioPacketTools
         ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
         # Don't print our own join as "joined the game" (we know we connected)
         unless @self_name == sa[:username]
-          @agent&.enqueue(:on_player_event, :joined, sa[:username], now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+          @plugins.emit(:on_player_event, :joined, sa[:username])
           puts "#{ts_str}  #{sa[:username]} joined the game (peer #{sa[:peer_id]}, index #{pid})" if player_visible?(sa[:username])
         end
       end
@@ -709,7 +685,7 @@ class FactorioPacketTools
           # S→C broadcast form (client mode): names the departed peer.
           pname = @peer_names[sa[:peer_id]] || @player_db.lookup(sa[:peer_id] + 1)
           @attrs.disconnect(pname, @game_tick) if pname
-          @agent&.enqueue(:on_player_event, :left, pname) if pname
+          @plugins.emit(:on_player_event, :left, pname) if pname
           @plugins.emit(:on_player_left, pname, @attrs.online_time_ticks(pname, nil)) if pname
           ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
           puts "#{ts_str}  #{pname} left the game" if player_visible?(pname)
@@ -767,7 +743,7 @@ class FactorioPacketTools
           # analysis (NewPeerInfo/PeerDisconnect broadcasts are dropped),
           # so joins are detected here and leaves via the final
           # heartbeat's PeerDisconnect sync action.
-          @agent&.enqueue(:on_player_event, :joined, name, now: Process.clock_gettime(Process::CLOCK_MONOTONIC))
+          @plugins.emit(:on_player_event, :joined, name)
           # One targeted RCON query for everything only the server knows
           # about a joiner: their locale and their whole quickbar (the C→S
           # actions report it as deltas, so a join is the one moment the
@@ -1189,9 +1165,7 @@ class FactorioPacketTools
         msg = FactorioProtocol.decode_chat(data)
         if msg
           puts "#{log_ts(ts)}  #{arrow} #{pname}: #{msg}"
-          now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          publish_chat(:factorio, pname, msg)
-          @translation_agent&.enqueue(:on_chat, { game_player: act[:game_player] }, msg, now: now)
+          publish_chat(:factorio, pname, msg, player_id: act[:game_player])
         end
       end
       return
@@ -1434,18 +1408,18 @@ class FactorioPacketTools
     when '/stats'
       print_summary
     when '/model'
-      if @agent.nil?
+      if @plugins[:hivemind].nil?
         puts "hivemind disabled (no HIVE_API_KEY or init failed) — model N/A"
       elsif parts[1].nil?
-        puts "model: #{@agent.model} (configured in config-hivemind.yaml)"
-        puts "available: #{@agent.models.join(', ')}"
+        puts "model: #{@plugins[:hivemind].model} (configured in config-hivemind.yaml)"
+        puts "available: #{@plugins[:hivemind].models.join(', ')}"
         puts "usage: /model <model-id>"
       else
         model = parts[1..].join(' ').strip.gsub(/\A["']|["']\z/, '')
-        puts @agent.switch_model!(model)
+        puts @plugins[:hivemind].switch_model!(model)
       end
     when '/try'
-      if @agent.nil?
+      if @plugins[:hivemind].nil?
         puts "hivemind disabled — cannot try"
       elsif parts[1].nil?
         puts "usage: /try <model> [message]  — e.g. /try gpt-4o hivemind how is the factory?"
@@ -1454,13 +1428,13 @@ class FactorioPacketTools
         model = parts[1].strip.gsub(/\A["']|["']\z/, '')
         msg = parts[2..]&.join(' ')
         msg = nil if msg && msg.strip.empty?
-        puts @agent.try_model!(model, msg)
+        puts @plugins[:hivemind].try_model!(model, msg)
       end
     when '/simulate'
       # Test the translation backend directly: translate MSG from LANG to English.
       # Usage: /simulate <player_name> <language_code> <message>
       # (player_name is decorative — the backend has no per-player state.)
-      if @translation_agent.nil?
+      if @plugins[:translation].nil?
         puts 'translation agent not enabled — cannot simulate'
         return
       end
@@ -1479,7 +1453,7 @@ class FactorioPacketTools
         return
       end
       begin
-        translated = @translation_agent.simulate_translation(player_name, lang_code, msg)
+        translated = @plugins[:translation]&.simulate_translation(player_name, lang_code, msg)
         puts "[simulate] player=#{player_name} lang=#{lang_code} msg='#{msg}' => translated='#{translated}'"
       rescue StandardError => e
         warn "[simulate] error: #{e.class}: #{e.message}"
@@ -1514,7 +1488,8 @@ class FactorioPacketTools
       # `plugins:`); the only other way in is no running agent. Past that
       # compact_memory! itself returns false for a disabled memory store, so
       # the session is kept and nothing is cleared.
-      unless @agent&.plugin?(:compaction)
+      hivemind = @plugins[:hivemind]
+      unless hivemind&.plugin?(:compaction)
         puts 'memory compaction unavailable (no agent, or the compaction plugin is off in config-hivemind.yaml) — session NOT cleared'
         return
       end
@@ -1524,10 +1499,10 @@ class FactorioPacketTools
       # is disabled or errors, compact_memory! returns false and the
       # session is kept. Both calls serialize on the agent mutex.
       Thread.new do
-        if @agent.compact_memory!('manual')
+        if hivemind.compact_memory!('manual')
           # Trim, don't wipe: drop the messages the pass saw (minus a
           # recent tail kept for flow); mid-pass console lines survive.
-          @agent.trim_session_after_compaction!
+          hivemind.trim_session_after_compaction!
         else
           puts 'memory compaction FAILED — session kept (see [hivemind] error above)'
         end
@@ -1614,7 +1589,7 @@ class FactorioPacketTools
     name = entry && entry[0]
     return unless name
     @attrs.disconnect(name, @game_tick)
-    @agent&.enqueue(:on_player_event, :left, name)
+    @plugins.emit(:on_player_event, :left, name)
     @plugins.emit(:on_player_left, name, @attrs.online_time_ticks(name, nil))
     ts_str = Time.at(ts).strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} left the game" if player_visible?(name)
@@ -1662,7 +1637,7 @@ class FactorioPacketTools
     # Liveness comes from packet-derived heartbeats, not periodic
     # RCON roster refreshes (load_roster stays as-is on startup/reload).
     @attrs.disconnect(name, @game_tick)
-    @agent&.enqueue(:on_player_event, :timeout, name)
+    @plugins.emit(:on_player_event, :timeout, name)
     @plugins.emit(:on_player_left, name, @attrs.online_time_ticks(name, nil))
     ts_str = Time.now.strftime('%H:%M:%S.%L')
     puts "#{ts_str}  #{name} timed out (no heartbeat for #{idle.round}s) — likely crashed or disconnected; may re-join" if player_visible?(name)

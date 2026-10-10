@@ -149,13 +149,26 @@ class TestServerMode < Minitest::Test
     writer.records.map { |record| record[14, record.bytesize - 14] }
   end
 
+  # The sniffer reaches hivemind through the emit bus now (@plugins), so the
+  # stubs speak the feature shapes: on_chat(source, author, text, player_id),
+  # on_player_event(kind, player). close_events is what finish calls on a
+  # feature.
+  class PluginsDouble
+    def initialize(hivemind: nil) = @hivemind = hivemind
+    def [](name) = name == :hivemind ? @hivemind : nil
+    def enabled?(*) = false
+    def emit(event, *args)
+      @hivemind&.public_send(event, *args) if @hivemind&.respond_to?(event)
+    end
+  end
+
   def recording_agent
     events = []
     agent = Object.new
     agent.define_singleton_method(:events) { events }
     agent.define_singleton_method(:on_player_event) { |kind, name| events << [kind, name] }
-    agent.define_singleton_method(:on_chat) { |_player, _message| }
-    agent.define_singleton_method(:enqueue) { |method, *args, **_kwargs| public_send(method, *args) }
+    agent.define_singleton_method(:on_chat) { |_source, _author, _text, _player_id = nil| }
+    agent.define_singleton_method(:close_events) {}
     agent
   end
 
@@ -596,7 +609,7 @@ class TestServerMode < Minitest::Test
     online_after_quit = nil
     result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
-      sniffer.instance_variable_set(:@agent, agent)
+      sniffer.instance_variable_set(:@plugins, PluginsDouble.new(hivemind: agent))
       ts = 1_700_000_000.0
       # msg 4 ConnectionRequestReplyConfirm — connection attempt with username
       msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') +
@@ -620,7 +633,7 @@ class TestServerMode < Minitest::Test
     left14 = nil
     result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
-      sniffer.instance_variable_set(:@agent, agent)
+      sniffer.instance_variable_set(:@plugins, PluginsDouble.new(hivemind: agent))
       ts = 1_700_000_000.0
       msg4 = "\x04".b + [1].pack('v') + [100].pack('V') + [200].pack('V') + [300].pack('V') +
         [5].pack('C') + 'alice' + msg4_session
@@ -636,7 +649,7 @@ class TestServerMode < Minitest::Test
     events = nil
     result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
       agent = recording_agent
-      sniffer.instance_variable_set(:@agent, agent)
+      sniffer.instance_variable_set(:@plugins, PluginsDouble.new(hivemind: agent))
       sniffer.send(:process_packet, 1, 1_700_000_000.0, CLIENT_IP, SERVER_IP, 34197, 34197, "\x0e".b + [7].pack('V'))
       events = agent.events
     end
@@ -653,7 +666,7 @@ class TestServerMode < Minitest::Test
     messages = []
     agent = recording_agent_with_messages
     result = run_sniffer(server: true, host_ips: [SERVER_IP], player_db: nil) do |sniffer|
-      sniffer.instance_variable_set(:@agent, agent)
+      sniffer.instance_variable_set(:@plugins, PluginsDouble.new(hivemind: agent))
       ts = 1_700_000_000.0
       # fragment 0: [0x15][29] + first 18 chars
       frag0 = "\x15\x1dwe dont need it to".b
@@ -1337,8 +1350,8 @@ class TestServerMode < Minitest::Test
            'no watchdog thread in tests (no :interface)'
     agent = Object.new
     agent.define_singleton_method(:on_player_event) { |kind, name| wd_events << [kind, name] }
-    agent.define_singleton_method(:enqueue) { |method, *args, **_kwargs| public_send(method, *args) }
-    sniffer.instance_variable_set(:@agent, agent)
+    agent.define_singleton_method(:close_events) {}
+    sniffer.instance_variable_set(:@plugins, PluginsDouble.new(hivemind: agent))
     sniffer.instance_variable_set(:@show_players, [])
     sniffer.instance_variable_set(:@debug, false)
     sniffer.instance_variable_set(:@attrs, PlayerAttrs.new)
@@ -1411,9 +1424,9 @@ class TestServerMode < Minitest::Test
     messages = []
     agent = Object.new
     agent.define_singleton_method(:msgs) { messages }
-    agent.define_singleton_method(:on_chat) { |_player, message| messages << message }
+    agent.define_singleton_method(:on_chat) { |_source, _author, text, _player_id = nil| messages << text }
     agent.define_singleton_method(:on_player_event) { |_kind, _name| }
-    agent.define_singleton_method(:enqueue) { |method, *args, **_kwargs| public_send(method, *args) }
+    agent.define_singleton_method(:close_events) {}
     agent
   end
 end

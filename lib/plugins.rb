@@ -36,11 +36,12 @@ module Plugins
     #   growing a config knob or a test chdir'ing into a scratch directory to
     #   redirect a file it does not care about.
     # dispatch: the subset of names EVENTS are sent to. A name can be in the
-    #   list for its FILE alone — the sniffer lists `hivemind` and
-    #   `translation` so their code reloads, but it constructs those two
-    #   objects itself and has no events for them, so building them as
-    #   features would warn "no feature class" on the first emit. Anything not
-    #   named here dispatches to everything.
+    #   list for its FILE alone — a host dispatches events to most of its
+    #   names but keeps one for its file (and its family) without building it
+    #   as a feature. Anything not named here dispatches to everything; by
+    #   default every listed name is a feature and gets every event it
+    #   implements (the sniffer and Hivemind both run this way — discord,
+    #   translation and hivemind ride the same emit(:on_chat) bus).
     def initialize(names, host, dir: __dir__, owner: nil, args: {}, dispatch: nil)
       @names = Array(names).map { |n| n.to_s.to_sym }.uniq
       @dispatch = (dispatch || @names).map { |n| n.to_s.to_sym } & @names
@@ -159,12 +160,11 @@ module Plugins
       Array(names).map { |n| n.to_s.to_sym }.uniq
     end
 
-    # Require the file each name names, building NOTHING. A name that IS a
-    # feature gets the same require as a side effect of building it — but the
-    # sniffer's `hivemind` and `translation` entries are NOT features (it
-    # constructs those two objects itself), and the class has to exist before
-    # the first line that asks it anything. Entry point calls this first,
-    # right after list!.
+    # Require the file each name names, building NOTHING. Every name is a
+    # feature these days (PluginSet re-requires its file when it BUILDS the
+    # object, lazily on first use) — the entry point still loads them up
+    # front so a missing/broken file fails at startup, not on the first
+    # event. Called right after list!.
     def load_files(names, dir: __dir__)
       Array(names).map(&:to_s).uniq.each { |name| require File.expand_path("#{name}.rb", dir) }
     end

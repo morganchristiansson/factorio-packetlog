@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Tests for the Discord plugin (now a PluginSet feature reached via the shared
-# :on_chat chat relay, not a sniffer-constructed host object). Drives
+# Tests for the Discord plugin (a PluginSet feature reached via the shared
+# :on_chat chat relay). Drives
 # Discord.new(owner) with a fake gateway bot + a fake owner that records the
 # relay's publish_chat calls. No network, no discordrb at runtime (it stays
 # lazily required, only built by build_bot).
